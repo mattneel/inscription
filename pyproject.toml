@@ -1,0 +1,16 @@
+[project]
+name = "inscription"
+version = "0.0.0"
+description = "Deterministic prose-shaped v0 compiler to MLIR/LLVM 22"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+inscription = "inscription.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
