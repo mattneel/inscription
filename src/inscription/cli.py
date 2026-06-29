@@ -4,9 +4,9 @@ import argparse
 import sys
 from pathlib import Path
 
-from .compiler import compile_source
+from .compiler import compile_file
 from .diagnostics import InscriptionError
-from .runner import LOWERING_PASSES, ToolchainError, resolve_toolchain, run_source, verify_mlir
+from .runner import LOWERING_PASSES, ToolchainError, resolve_toolchain, run_file, verify_mlir
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -17,9 +17,11 @@ def main(argv: list[str] | None = None) -> int:
     compile_p.add_argument("source", type=Path)
     compile_p.add_argument("-o", "--output", type=Path)
     compile_p.add_argument("--verify", action="store_true", help="verify emitted MLIR with LLVM 22 mlir-opt")
+    compile_p.add_argument("--module-root", type=Path, help="root directory for resolving imported modules")
 
     run_p = sub.add_parser("run", help="compile and execute through LLVM 22 lli")
     run_p.add_argument("source", type=Path)
+    run_p.add_argument("--module-root", type=Path, help="root directory for resolving imported modules")
 
     highlight_p = sub.add_parser("highlight", help="syntax-highlight an Inscription source file")
     highlight_p.add_argument("source", type=Path)
@@ -34,7 +36,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         if args.command == "compile":
-            mlir = compile_source(args.source.read_text())
+            mlir = compile_file(args.source, module_root=args.module_root)
             if args.verify:
                 verify_mlir(mlir)
             if args.output:
@@ -43,7 +45,7 @@ def main(argv: list[str] | None = None) -> int:
                 sys.stdout.write(mlir)
             return 0
         if args.command == "run":
-            result = run_source(args.source.read_text())
+            result = run_file(args.source, module_root=args.module_root)
             return result.exit_status
         if args.command == "highlight":
             from .highlighting import HighlightError, highlight_source

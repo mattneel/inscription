@@ -14,9 +14,9 @@ ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
 sys.path.insert(0, str(SRC))
 
-from inscription.compiler import compile_source
+from inscription.compiler import compile_file, compile_source
 from inscription.diagnostics import InscriptionError
-from inscription.runner import LOWERING_PASSES, ToolchainError, resolve_toolchain, run_source, verify_mlir
+from inscription.runner import LOWERING_PASSES, ToolchainError, resolve_toolchain, run_file, run_source, verify_mlir
 
 FIXTURES = ROOT / "tests" / "fixtures" / "positive"
 GOLDENS = ROOT / "tests" / "goldens"
@@ -31,7 +31,7 @@ class CompilerTests(unittest.TestCase):
             with self.subTest(golden=source_path.name):
                 expected_path = source_path.with_suffix(".mlir")
                 expected = expected_path.read_text()
-                actual = compile_source(source_path.read_text())
+                actual = compile_source(source_path.read_text(), source_path=source_path, module_root=GOLDENS)
                 diff = "".join(
                     difflib.unified_diff(
                         expected.splitlines(True),
@@ -48,7 +48,7 @@ class CompilerTests(unittest.TestCase):
         for filename, status in expected.items():
             with self.subTest(filename=filename):
                 try:
-                    result = run_source(self.fixture(filename))
+                    result = run_file(FIXTURES / filename, module_root=FIXTURES)
                 except ToolchainError as exc:
                     self.skipTest(str(exc))
                 self.assertEqual(result.exit_status, status)
@@ -148,6 +148,7 @@ class CompilerTests(unittest.TestCase):
                 (GOLDENS / "58_layout_write_procedure.ins").read_text(),
                 (GOLDENS / "60_constants_layout_checks.ins").read_text(),
                 (GOLDENS / "63_phrase_body_check.ins").read_text(),
+                (GOLDENS / "67_module_import.ins").read_text(),
                 "highlight new widths a: i8 and b: i16 and c: u64 gives u64:\n  c bitwise xor c\n",
             ]
         )
@@ -340,6 +341,48 @@ main gives i32:
         check_mlir = compile_source(self.fixture("phrase_body_check.ins"))
         self.assertIn("memref<6xi8>", check_mlir)
         self.assertNotIn("check", check_mlir)
+
+
+    def test_v010_modules_import_qualified_phrases(self):
+        mlir = compile_file(FIXTURES / "module_import_main.ins", module_root=FIXTURES)
+        self.assertIn("func.func @modules__math__add", mlir)
+        self.assertIn("func.call @modules__math__add", mlir)
+        self.assertNotIn("func.func @add", mlir)
+
+    def test_v010_module_diagnostics(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "math.ins").write_text("module math\n\nadd a: i32 and b: i32 gives i32:\n  a plus b\n")
+            self.assertIn(
+                "unexpected token '1'",
+                self._compile_file_error(root, "import math\n\nmain gives i32:\n  add 1 and 2\n"),
+            )
+
+            (root / "wrong.ins").write_text("module other\n\nvalue gives i32:\n  0\n")
+            self.assertIn(
+                "module declaration other does not match import wrong",
+                self._compile_file_error(root, "import wrong\n\nmain gives i32:\n  0\n"),
+            )
+
+            (root / "plain.ins").write_text("value gives i32:\n  0\n")
+            self.assertIn(
+                "must declare module plain",
+                self._compile_file_error(root, "import plain\n\nmain gives i32:\n  0\n"),
+            )
+
+            (root / "a.ins").write_text("module a\nimport b\n\na gives i32:\n  0\n")
+            (root / "b.ins").write_text("module b\nimport a\n\nb gives i32:\n  0\n")
+            self.assertIn(
+                "import cycle detected: a -> b -> a",
+                self._compile_file_error(root, "import a\n\nmain gives i32:\n  0\n"),
+            )
+
+    def _compile_file_error(self, root: Path, source: str) -> str:
+        path = root / "main.ins"
+        path.write_text(source)
+        with self.assertRaises(InscriptionError) as ctx:
+            compile_file(path, module_root=root)
+        return str(ctx.exception)
 
     def test_record_parameter_rebinding_does_not_mutate_caller(self):
         source = """record Point:

@@ -24,11 +24,19 @@ RecordLayoutKind = Literal["value", "natural", "packed"]
 
 
 @dataclass(frozen=True)
+class ImportDecl:
+    module: str
+    line: int
+
+
+@dataclass(frozen=True)
 class Program:
     records: tuple["RecordDecl", ...]
     constants: tuple["ConstantDecl", ...]
     checks: tuple["CheckStmt", ...]
     functions: tuple["Function", ...]
+    module_name: str | None = None
+    imports: tuple[ImportDecl, ...] = ()
 
 
 @dataclass(frozen=True)

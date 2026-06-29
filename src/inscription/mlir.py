@@ -313,6 +313,9 @@ class MlirEmitter:
         if isinstance(expr, OffsetOfField):
             return self.emit_integer(layout_info(self.records[expr.type_name]).field_offsets[expr.field], "i32", lines, indent)
         if isinstance(expr, FieldAccess):
+            qualified_constant = f"{expr.name}.{expr.field}"
+            if expr.name not in env and qualified_constant in self.top_constants:
+                return self.emit_const_value(self.top_constants[qualified_constant], lines, indent)
             return self.require_record(env[expr.name]).fields[expr.field]
         if isinstance(expr, RecordConstructor):
             raise AssertionError("record constructor used where scalar value was expected")  # pragma: no cover

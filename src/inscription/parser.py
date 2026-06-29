@@ -25,6 +25,7 @@ from .ast import (
     ForStmt,
     Function,
     IfStmt,
+    ImportDecl,
     Integer,
     AlignmentOfType,
     LengthOf,
@@ -58,8 +59,8 @@ TOKEN_RE = re.compile(r"\s*(-?\d+|[A-Z][A-Za-z0-9_]*|[a-z][a-z0-9_]*|[().,])")
 RESERVED = {
     "address", "alignment", "and", "arguments", "array", "as", "at", "be", "becomes", "bitwise", "buffer", "by", "call",
     "check", "constant", "divided", "do", "does", "each", "else", "equal", "false", "filled", "float", "for", "from",
-    "function", "gives", "greater", "i1", "i32", "i64", "if", "in", "index", "input", "into",
-    "i8", "i16", "is", "layout", "length", "less", "let", "memref", "minus", "no", "not", "or", "otherwise", "output", "packed", "parameters",
+    "function", "gives", "greater", "i1", "i32", "i64", "if", "in", "index", "input", "into", "import",
+    "i8", "i16", "is", "layout", "length", "less", "let", "memref", "minus", "module", "no", "not", "or", "otherwise", "output", "packed", "parameters",
     "pointer", "plus", "print", "read", "remainder", "return", "set", "shifted", "size", "takes", "than", "then", "times", "to",
     "track", "true", "u8", "u16", "u32", "u64", "up", "record", "when", "while", "with", "write", "xor", "zero",
 }
@@ -75,10 +76,16 @@ COMPARATORS: tuple[tuple[tuple[str, ...], str], ...] = (
 CONNECTOR_WORDS = {"of", "from", "to", "at", "in", "into", "between", "and", "with", "by"}
 BUFFER_LENGTH_PATTERN = r"(?:-?\d+|[a-z][a-z0-9_]*|\([^)]*\))"
 TYPE_PATTERN = rf"(?:buffer\s+of\s+{BUFFER_LENGTH_PATTERN}\s+[A-Za-z][A-Za-z0-9_]*|[A-Za-z][A-Za-z0-9_]*|[a-z][a-z0-9_]*)"
+MODULE_RE = re.compile(r"[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)*")
 
 
-def parse_source(source: str) -> Program:
-    return Parser(source).parse_program()
+def parse_source(
+    source: str,
+    *,
+    external_phrases: tuple["PhraseTemplate", ...] = (),
+    symbol_prefix: str | None = None,
+) -> Program:
+    return Parser(source, external_phrases=external_phrases, symbol_prefix=symbol_prefix).parse_program()
 
 
 @dataclass(frozen=True)
@@ -112,10 +119,20 @@ ParsedTopLevel = RecordDecl | ConstantDecl | CheckStmt | Function
 
 
 class Parser:
-    def __init__(self, source: str):
+    def __init__(
+        self,
+        source: str,
+        *,
+        external_phrases: tuple[PhraseTemplate, ...] = (),
+        symbol_prefix: str | None = None,
+    ):
         self.lines = self._preprocess(source)
+        self.symbol_prefix = symbol_prefix
+        self.external_phrases = external_phrases
+        self.local_phrases: tuple[PhraseTemplate, ...] = ()
         self.phrases: tuple[PhraseTemplate, ...] = ()
-        self.phrases = self._collect_phrase_templates()
+        self.local_phrases = self._collect_phrase_templates()
+        self.phrases = tuple(sorted((*self.local_phrases, *self.external_phrases), key=lambda template: len(template.parts), reverse=True))
 
     def _preprocess(self, source: str) -> list[Line]:
         lines: list[Line] = []
@@ -151,9 +168,25 @@ class Parser:
         constants: list[ConstantDecl] = []
         checks: list[CheckStmt] = []
         functions: list[Function] = []
+        imports: list[ImportDecl] = []
+        module_name: str | None = None
         index = 0
         while index < len(self.lines):
             line = self.lines[index]
+            if line.indent == 0 and line.text.startswith("module "):
+                if line.is_header:
+                    raise InscriptionError("malformed module declaration", line.number)
+                if module_name is not None:
+                    raise InscriptionError("program can declare only one module", line.number)
+                module_name = self._module_name(line.text[len("module ") :].strip(), line.number)
+                index += 1
+                continue
+            if line.indent == 0 and line.text.startswith("import "):
+                if line.is_header:
+                    raise InscriptionError("malformed import declaration", line.number)
+                imports.append(ImportDecl(self._module_name(line.text[len("import ") :].strip(), line.number), line.number))
+                index += 1
+                continue
             if self._looks_like_record_header(line):
                 record, index = self._parse_record_decl(index)
                 records.append(record)
@@ -167,7 +200,7 @@ class Parser:
                 index += 1
                 continue
             if not self._looks_like_phrase_header(line):
-                raise InscriptionError("expected phrase definition, record declaration, constant declaration, or check", line.number)
+                raise InscriptionError("expected phrase definition, record declaration, constant declaration, check, module, or import", line.number)
             template, return_type = self._parse_phrase_header(line)
             body, index = self._parse_phrase_body(index + 1, template, line.number)
             functions.append(
@@ -180,7 +213,12 @@ class Parser:
                     template.display_name,
                 )
             )
-        return Program(tuple(records), tuple(constants), tuple(checks), tuple(functions))
+        seen_imports: set[str] = set()
+        for imported in imports:
+            if imported.module in seen_imports:
+                raise InscriptionError(f"module {imported.module} is already imported", imported.line)
+            seen_imports.add(imported.module)
+        return Program(tuple(records), tuple(constants), tuple(checks), tuple(functions), module_name, tuple(imports))
 
     def _looks_like_record_header(self, line: Line) -> bool:
         return (
@@ -193,7 +231,7 @@ class Parser:
         return (
             self._looks_like_phrase_header(line)
             or self._looks_like_record_header(line)
-            or (line.indent == 0 and (line.text.startswith("constant ") or line.text.startswith("check ")))
+            or (line.indent == 0 and (line.text.startswith("constant ") or line.text.startswith("check ") or line.text.startswith("module ") or line.text.startswith("import ")))
         )
 
     def _parse_record_decl(self, index: int) -> tuple[RecordDecl, int]:
@@ -275,6 +313,8 @@ class Parser:
         if not parts or all(isinstance(part, PhraseHole) for part in parts):
             raise InscriptionError("phrase definition must include literal words", line)
         symbol = self._phrase_symbol(parts, line)
+        if self.symbol_prefix is not None:
+            symbol = f"{self.symbol_prefix}__{symbol}"
         display_name = " ".join("_" if isinstance(part, PhraseHole) else part for part in parts)
         return PhraseTemplate(symbol, tuple(parts), tuple(params), line, return_type, display_name)
 
@@ -654,6 +694,14 @@ class Parser:
     def _field_name(self, value: str, line: int) -> str:
         if not NAME_RE.fullmatch(value):
             raise InscriptionError(f"invalid field name '{value}'", line)
+        return value
+
+    def _module_name(self, value: str, line: int) -> str:
+        if not MODULE_RE.fullmatch(value):
+            raise InscriptionError(f"invalid module name '{value}'", line)
+        for part in value.split("."):
+            if part in RESERVED:
+                raise InscriptionError(f"reserved word '{part}' cannot be a module name", line)
         return value
 
     def _record_name(self, value: str, line: int) -> str:

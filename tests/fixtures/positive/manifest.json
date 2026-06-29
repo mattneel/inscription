@@ -34,6 +34,7 @@
   "layout_write_procedure.ins": 11,
   "loop_sum.ins": 55,
   "loop_writes.ins": 10,
+  "module_import_main.ins": 42,
   "nested_for_multiply.ins": 42,
   "nested_procedure_calls.ins": 24,
   "nested_while_multiply.ins": 42,

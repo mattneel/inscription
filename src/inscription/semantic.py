@@ -984,6 +984,14 @@ def evaluate_const_expr(
         return ConstValue("i32", layout_info(records[expr.type_name]).alignment)
     if isinstance(expr, OffsetOfField):
         return ConstValue("i32", layout_info(records[expr.type_name]).field_offsets[expr.field])
+    if isinstance(expr, FieldAccess):
+        qualified_constant = f"{expr.name}.{expr.field}"
+        if qualified_constant in constants and expr.name not in env:
+            value = constants[qualified_constant]
+            if expected is not None and value.type_name != expected:
+                require_type(value.type_name, expected, expr.line)
+            return value
+        raise CompileTimeEvaluationError("expression is not compile-time evaluable", expr.line)
     if isinstance(expr, Cast):
         source = evaluate_const_expr(expr.expr, env, functions, records, constants)
         assert is_integer_type(source.type_name)
@@ -1174,6 +1182,13 @@ def infer_expr_type(
             require_type("i32", expected, expr.line)
         return "i32"
     if isinstance(expr, FieldAccess):
+        qualified_constant = f"{expr.name}.{expr.field}"
+        if expr.name not in env and qualified_constant in constants:
+            actual = constants[qualified_constant].type_name
+            if expected is not None:
+                assert isinstance(expected, str)
+                require_type(actual, expected, expr.line)
+            return actual
         record_type = _require_record_type(expr.name, expr.line, env)
         field_type = _require_record_field(record_type, expr.field, expr.line, records)
         if expected is not None:

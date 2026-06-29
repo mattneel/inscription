@@ -7,7 +7,7 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
-from .compiler import compile_source
+from .compiler import compile_file, compile_source
 
 LOWERING_PASSES = [
     "--convert-scf-to-cf",
@@ -60,9 +60,38 @@ def verify_mlir(mlir: str, toolchain: Toolchain | None = None) -> None:
         _run_checked([str(toolchain.mlir_opt), str(path), "-o", os.devnull], "MLIR verification failed")
 
 
-def run_source(source: str, toolchain: Toolchain | None = None) -> RunResult:
+def run_source(
+    source: str,
+    toolchain: Toolchain | None = None,
+    *,
+    source_path: Path | None = None,
+    module_root: Path | None = None,
+) -> RunResult:
     toolchain = toolchain or resolve_toolchain()
-    mlir = compile_source(source)
+    mlir = compile_source(source, source_path=source_path, module_root=module_root)
+    with tempfile.TemporaryDirectory(prefix="inscription-run-") as tmp:
+        tmp_path = Path(tmp)
+        input_mlir = tmp_path / "input.mlir"
+        lowered_mlir = tmp_path / "lowered.mlir"
+        llvm_ir = tmp_path / "output.ll"
+        input_mlir.write_text(mlir)
+        _run_checked([str(toolchain.mlir_opt), str(input_mlir), "-o", os.devnull], "MLIR verification failed")
+        _run_checked(
+            [str(toolchain.mlir_opt), str(input_mlir), *LOWERING_PASSES, "-o", str(lowered_mlir)],
+            "MLIR lowering failed",
+        )
+        _run_checked(
+            [str(toolchain.mlir_translate), "--mlir-to-llvmir", str(lowered_mlir), "-o", str(llvm_ir)],
+            "MLIR translation failed",
+        )
+        executed = subprocess.run([str(toolchain.lli), str(llvm_ir)], check=False)
+        return RunResult(executed.returncode, mlir, lowered_mlir.read_text(), llvm_ir.read_text())
+
+
+
+def run_file(source_path: Path, toolchain: Toolchain | None = None, *, module_root: Path | None = None) -> RunResult:
+    toolchain = toolchain or resolve_toolchain()
+    mlir = compile_file(source_path, module_root=module_root)
     with tempfile.TemporaryDirectory(prefix="inscription-run-") as tmp:
         tmp_path = Path(tmp)
         input_mlir = tmp_path / "input.mlir"

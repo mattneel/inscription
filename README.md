@@ -6,7 +6,7 @@ The language is readable, but it is **not** natural-language interpretation: eve
 
 ## Status
 
-This repository currently implements **Inscription v0.9**:
+This repository currently implements **Inscription v0.10**:
 
 - source-visible scalar types: `i1`, signed integers `i8`/`i16`/`i32`/`i64`, and unsigned integers `u8`/`u16`/`u32`/`u64`
 - phrase-shaped function definitions and phrase-shaped calls
@@ -16,6 +16,8 @@ This repository currently implements **Inscription v0.9**:
 - scalar rebinding with `name becomes expression`
 - source-level value records declared with `record TypeName:` and scalar fields
 - layout-aware value records declared with `layout record TypeName:` or `packed layout record TypeName:`
+- optional source modules with `module name` and imports with `import name`
+- qualified calls to imported phrases, such as `math.add 1 and 2`, lowered to stable module-qualified MLIR symbols
 - top-level typed compile-time constants with `constant name: type be expression`
 - compile-time assertions with `check expression` at top level or inside phrase bodies
 - local fixed-size stack buffers with `let name be buffer of LENGTH TYPE filled with expression`, where `LENGTH` may be a literal, constant name, or parenthesized compile-time expression
@@ -45,9 +47,9 @@ This repository currently implements **Inscription v0.9**:
 - exact MLIR golden conformance tests in [`tests/goldens`](tests/goldens)
 - MLIR emission using `func`, `arith`, `scf.if`, `scf.for`, `scf.while`, flattened scalar SSA for records, and local `memref.alloca`/`memref.load`/`memref.store` for buffers
 - LLVM 22 lowering and execution through `mlir-opt`, `mlir-translate`, and `lli`
-- no source-level I/O, heap allocation, pointers, dynamic-size buffers, buffer return values, buffer aliasing, slices, LLVM/C ABI structs, floats, strings, statement-level `return`, `break`, `continue`, macros, imports, generics, global storage, runtime assertions, overloading, type coercions, or natural-language inference
+- no source-level I/O, heap allocation, pointers, dynamic-size buffers, buffer return values, buffer aliasing, slices, LLVM/C ABI structs, floats, strings, statement-level `return`, `break`, `continue`, macros, import aliases, wildcard imports, generics, global storage, runtime assertions, overloading, type coercions, or natural-language inference
 
-See [`docs/inscription-v0.9-spec.md`](docs/inscription-v0.9-spec.md) and [`grammar/inscription-v0.9.ebnf`](grammar/inscription-v0.9.ebnf) for the exact current language contract. The immutable previous contracts remain in [`docs/inscription-v0-spec.md`](docs/inscription-v0-spec.md), [`docs/inscription-v0.1-spec.md`](docs/inscription-v0.1-spec.md), [`docs/inscription-v0.2-spec.md`](docs/inscription-v0.2-spec.md), [`docs/inscription-v0.3-spec.md`](docs/inscription-v0.3-spec.md), [`docs/inscription-v0.4-spec.md`](docs/inscription-v0.4-spec.md), [`docs/inscription-v0.5-spec.md`](docs/inscription-v0.5-spec.md), [`docs/inscription-v0.6-spec.md`](docs/inscription-v0.6-spec.md), [`docs/inscription-v0.7-spec.md`](docs/inscription-v0.7-spec.md), [`grammar/inscription-v0.ebnf`](grammar/inscription-v0.ebnf), [`grammar/inscription-v0.1.ebnf`](grammar/inscription-v0.1.ebnf), [`grammar/inscription-v0.2.ebnf`](grammar/inscription-v0.2.ebnf), [`grammar/inscription-v0.3.ebnf`](grammar/inscription-v0.3.ebnf), [`grammar/inscription-v0.4.ebnf`](grammar/inscription-v0.4.ebnf), [`grammar/inscription-v0.5.ebnf`](grammar/inscription-v0.5.ebnf), [`grammar/inscription-v0.6.ebnf`](grammar/inscription-v0.6.ebnf), and [`grammar/inscription-v0.7.ebnf`](grammar/inscription-v0.7.ebnf). The v0.8 layout-record contract remains in [`docs/inscription-v0.8-spec.md`](docs/inscription-v0.8-spec.md) and [`grammar/inscription-v0.8.ebnf`](grammar/inscription-v0.8.ebnf).
+See [`docs/inscription-v0.10-spec.md`](docs/inscription-v0.10-spec.md) and [`grammar/inscription-v0.10.ebnf`](grammar/inscription-v0.10.ebnf) for the exact current language contract. The immutable previous contracts remain in [`docs/inscription-v0-spec.md`](docs/inscription-v0-spec.md), [`docs/inscription-v0.1-spec.md`](docs/inscription-v0.1-spec.md), [`docs/inscription-v0.2-spec.md`](docs/inscription-v0.2-spec.md), [`docs/inscription-v0.3-spec.md`](docs/inscription-v0.3-spec.md), [`docs/inscription-v0.4-spec.md`](docs/inscription-v0.4-spec.md), [`docs/inscription-v0.5-spec.md`](docs/inscription-v0.5-spec.md), [`docs/inscription-v0.6-spec.md`](docs/inscription-v0.6-spec.md), [`docs/inscription-v0.7-spec.md`](docs/inscription-v0.7-spec.md), [`grammar/inscription-v0.ebnf`](grammar/inscription-v0.ebnf), [`grammar/inscription-v0.1.ebnf`](grammar/inscription-v0.1.ebnf), [`grammar/inscription-v0.2.ebnf`](grammar/inscription-v0.2.ebnf), [`grammar/inscription-v0.3.ebnf`](grammar/inscription-v0.3.ebnf), [`grammar/inscription-v0.4.ebnf`](grammar/inscription-v0.4.ebnf), [`grammar/inscription-v0.5.ebnf`](grammar/inscription-v0.5.ebnf), [`grammar/inscription-v0.6.ebnf`](grammar/inscription-v0.6.ebnf), and [`grammar/inscription-v0.7.ebnf`](grammar/inscription-v0.7.ebnf). The v0.8 layout-record contract remains in [`docs/inscription-v0.8-spec.md`](docs/inscription-v0.8-spec.md) and [`grammar/inscription-v0.8.ebnf`](grammar/inscription-v0.8.ebnf). The v0.9 constants/checks contract remains in [`docs/inscription-v0.9-spec.md`](docs/inscription-v0.9-spec.md) and [`grammar/inscription-v0.9.ebnf`](grammar/inscription-v0.9.ebnf).
 
 ## Requirements
 
@@ -139,21 +141,24 @@ echo $?
 ## CLI
 
 ```sh
-python -m inscription compile SOURCE [-o OUTPUT] [--verify]
+python -m inscription compile SOURCE [-o OUTPUT] [--verify] [--module-root ROOT]
 python -m inscription highlight SOURCE [-o OUTPUT] [--format terminal|html] [--style STYLE] [--full]
-python -m inscription run SOURCE
+python -m inscription run SOURCE [--module-root ROOT]
 python -m inscription check-tools [--show-pipeline]
 ```
 
-Commands return `2` for compiler, diagnostic, toolchain, or filesystem errors.
+Commands return `2` for compiler, diagnostic, toolchain, or filesystem errors. Imports resolve relative to the root source file directory by default; pass `--module-root ROOT` to resolve module paths from another directory.
 
 `highlight` uses Pygments with a built-in Inscription lexer. The default output is ANSI-colored terminal text. Use `--format html --full -o file.html` to emit a complete HTML document.
 
 ## Language summary
 
-A program is a list of top-level constants, compile-time checks, record declarations, layout-record declarations, and phrase definitions:
+A program is an optional module declaration followed by imports, top-level constants, compile-time checks, record declarations, layout-record declarations, and phrase definitions:
 
 ```text
+module module.name
+import other.module
+
 constant name: type be expression
 check expression
 
@@ -167,6 +172,18 @@ record TypeName:
 <phrase with typed holes> does:
   <body item>+
 ```
+
+
+Modules let one source file use phrases from another without adding unqualified names to the caller. Imported declarations are qualified only:
+
+```text
+import math
+
+main gives i32:
+  math.add 2 and 3
+```
+
+Module `math` is resolved as `math.ins` under the module root and must declare `module math`. Nested modules such as `geometry.points` resolve as `geometry/points.ins`. Imported phrase definitions emit stable symbols such as `@math__add` and `@geometry__points__sum`. Existing unmoduled single-file programs keep their previous MLIR output.
 
 A scalar type is one of `i1`, `i8`, `i16`, `i32`, `i64`, `u8`, `u16`, `u32`, or `u64`. A record type is a nominal top-level name declared with scalar fields. A buffer parameter type is written `buffer of LENGTH TYPE`, where `TYPE` is an integer numeric scalar type, not `i1`, and `LENGTH` is a compile-time integer length. `i1` is boolean only; all other scalar types are integer numeric types. Signedness is source-semantic: MLIR integers are signless, but Inscription signedness selects division, remainder, ordered comparison, right-shift, widening cast, and dynamic buffer-index conversion operations. A scalar typed hole is written `name: type`; a buffer typed hole is written `name: buffer of LENGTH type`. The call site mirrors the definition by filling the holes:
 
