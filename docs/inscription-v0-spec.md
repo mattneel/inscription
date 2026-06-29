@@ -43,13 +43,14 @@ lli output.ll
 - `Function name takes no parameters.`
 - `Function name takes a and b.`
 - `Function name takes a, b, and c.`
-- `End function.`
+- `End function.` remains valid, but can be omitted when a function's final sentence is an explicit `Return ...` or a top-level implicit return expression.
 - `Set name to expression.`
 - `If comparison then.` ... `Otherwise.` ... `End if.`
 - `While comparison do.` ... `End while.`
 - `Return expression.`
+- top-level tail expression sugar: `expression.`
 
-`Return` is a tail statement for the function body in v0. Branching return-code programs use `Set result ...` in branches and a single final `Return result.`.
+`Return` is a tail statement for the function body in v0. A bare expression as the final top-level function sentence is sugar for `Return expression.` and closes the function at EOF or immediately before the next `Function` header. Branching return-code programs use `Set result ...` in branches and a single final `Return result.` or final `result.` expression after `End if.`
 
 ## Expressions
 
@@ -83,6 +84,7 @@ Comparisons are used only by `if` and `while`:
 - Variables assigned inside `while` must be initialized before the loop and lower as loop-carried SSA values through `scf.while`.
 - New variables cannot be introduced only inside a loop.
 - v0 has no block-local scope and no early `Return` inside `if`, `otherwise`, or `while` blocks.
+- Implicit return expressions are accepted only at top-level function scope and must be the final function sentence.
 - Unsupported I/O, arrays, floats, pointers, memrefs, structs, proof prose, natural-language requests, and custom dialect syntax are rejected.
 
 ## MLIR subset

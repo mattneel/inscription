@@ -74,12 +74,10 @@ inscription run tests/fixtures/positive/add.ins
 ```text
 Function add takes a and b.
 Return a plus b.
-End function.
 
 Function main takes no parameters.
 Set result to call add with 2 and 3.
-Return result.
-End function.
+result.
 ```
 
 Compile it to MLIR:
@@ -135,6 +133,16 @@ End while.
 Return expression.
 ```
 
+At top-level function scope, a final bare expression is sugar for `Return expression.` and can close the function without `End function`:
+
+```text
+Function add takes a and b.
+a plus b.
+
+Function main takes no parameters.
+call add with 2 and 3.
+```
+
 Expressions:
 
 ```text
@@ -168,6 +176,7 @@ Important v0 rules:
 - `main` must exist, take no parameters, and return `i32`
 - `if` always requires `Otherwise`
 - variables assigned in `while` must already exist before the loop
+- a top-level implicit return expression must be the final function sentence
 - early `Return` inside `if`, `otherwise`, or `while` blocks is not part of v0
 
 ## Tests

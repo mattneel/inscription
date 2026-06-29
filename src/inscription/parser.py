@@ -77,14 +77,71 @@ class Parser:
                 raise InscriptionError("expected function definition", line.number)
             name = self._name(match.group(1), line.number)
             params = self._parse_name_list(match.group(2), line.number, none_phrase="no parameters")
-            body, index, term = self._parse_block(index + 1, {"End function"})
-            if term != "End function":
-                raise InscriptionError(f"function '{name}' is missing 'End function.'", line.number)
+            body, index = self._parse_function_body(index + 1, name, line.number)
             functions.append(Function(name, tuple(params), tuple(body), line.number))
-            index += 1
         if not functions:
             raise InscriptionError("program must contain at least one function")
         return Program(tuple(functions))
+
+    def _parse_function_body(self, index: int, name: str, line: int) -> tuple[list[Stmt], int]:
+        statements: list[Stmt] = []
+        while index < len(self.lines):
+            current = self.lines[index]
+            text = current.text
+            if text == "End function":
+                return statements, index + 1
+            if text.startswith("Function "):
+                if statements and isinstance(statements[-1], ReturnStmt):
+                    return statements, index
+                raise InscriptionError(
+                    f"function '{name}' is missing 'End function.' or a final return expression",
+                    line,
+                )
+            if text.lower() in {"end function", "end while", "end if", "otherwise"}:
+                raise InscriptionError("unsupported or malformed sentence pattern", current.number)
+            if statements and isinstance(statements[-1], ReturnStmt):
+                raise InscriptionError("implicit or explicit return must be the final function sentence", current.number)
+            parsed, index = self._parse_function_statement(index)
+            statements.append(parsed)
+        if statements and isinstance(statements[-1], ReturnStmt):
+            return statements, index
+        raise InscriptionError(f"function '{name}' is missing 'End function.' or a final return expression", line)
+
+    def _parse_function_statement(self, index: int) -> tuple[Stmt, int]:
+        line = self.lines[index]
+        text = line.text
+        if text.startswith("Set "):
+            return self._parse_set(line), index + 1
+        if text.startswith("Return "):
+            return self._parse_return(line), index + 1
+        if text.startswith("While "):
+            condition_text = self._match_statement(line, r"While (.+) do")
+            body, index, term = self._parse_block(index + 1, {"End while"})
+            if term != "End while":
+                raise InscriptionError("while block is missing 'End while.'", line.number)
+            return WhileStmt(parse_comparison(condition_text, line.number), tuple(body), line.number), index + 1
+        if text.startswith("If "):
+            condition_text = self._match_statement(line, r"If (.+) then")
+            then_body, index, term = self._parse_block(index + 1, {"Otherwise", "End if"})
+            if term == "End if":
+                raise InscriptionError("if block requires 'Otherwise.' before 'End if.'", line.number)
+            if term != "Otherwise":
+                raise InscriptionError("if block is missing 'Otherwise.'", line.number)
+            else_body, index, term = self._parse_block(index + 1, {"End if"})
+            if term != "End if":
+                raise InscriptionError("if block is missing 'End if.'", line.number)
+            return (
+                IfStmt(parse_comparison(condition_text, line.number), tuple(then_body), tuple(else_body), line.number),
+                index + 1,
+            )
+        if text in {"End while", "End if", "Otherwise"}:
+            raise InscriptionError("unexpected block terminator in function body", line.number)
+        if self._looks_like_expression(text):
+            return ReturnStmt(parse_expression(text, line.number), line.number), index + 1
+        raise InscriptionError("unsupported or malformed sentence pattern", line.number)
+
+    def _looks_like_expression(self, text: str) -> bool:
+        return bool(re.match(r"-?\d|call\b|[a-z][a-z0-9_]*\b", text))
 
     def _parse_block(self, index: int, terminators: set[str]) -> tuple[list[Stmt], int, str | None]:
         statements: list[Stmt] = []

@@ -137,6 +137,64 @@ End function.
             self.skipTest(str(exc))
         self.assertEqual(result.exit_status, 7)
 
+    def test_tail_expression_is_implicit_return_and_can_close_function(self):
+        source = """Function add takes a and b.
+a plus b.
+
+Function main takes no parameters.
+call add with 2 and 3.
+"""
+        mlir = compile_source(source)
+        self.assertIn("func.func @add", mlir)
+        self.assertIn("func.return", mlir)
+        try:
+            result = run_source(source)
+        except ToolchainError as exc:
+            self.skipTest(str(exc))
+        self.assertEqual(result.exit_status, 5)
+
+    def test_explicit_return_can_close_function_without_end_function(self):
+        source = """Function one takes no parameters.
+Return 1.
+
+Function main takes no parameters.
+Return call one with no arguments.
+"""
+        try:
+            result = run_source(source)
+        except ToolchainError as exc:
+            self.skipTest(str(exc))
+        self.assertEqual(result.exit_status, 1)
+
+    def test_implicit_return_can_follow_ordinary_statements(self):
+        source = """Function main takes no parameters.
+Set x to 2.
+x plus 3.
+"""
+        try:
+            result = run_source(source)
+        except ToolchainError as exc:
+            self.skipTest(str(exc))
+        self.assertEqual(result.exit_status, 5)
+
+    def test_implicit_return_must_be_final_function_sentence(self):
+        self.assertCompileError(
+            "Function main takes no parameters.\n1.\nSet x to 2.\n",
+            "return must be the final function sentence",
+        )
+
+    def test_implicit_return_does_not_apply_inside_blocks(self):
+        self.assertCompileError(
+            "Function main takes no parameters.\nIf 1 is equal to 1 then.\n1.\nOtherwise.\n2.\nEnd if.\nEnd function.\n",
+            "unsupported or malformed",
+        )
+
+    def test_unreturned_function_still_needs_explicit_end_or_tail_return(self):
+        self.assertCompileError(
+            "Function f takes no parameters.\nSet x to 1.\nFunction main takes no parameters.\n0.\n",
+            "missing 'End function.' or a final return expression",
+        )
+
     def test_empty_while_body_is_rejected_before_mlir_verification(self):
         self.assertCompileError(
             "Function main takes no parameters.\nSet n to 1.\nWhile n is greater than 0 do.\nEnd while.\nReturn n.\nEnd function.\n",
