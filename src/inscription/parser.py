@@ -47,6 +47,8 @@ from .ast import (
     Unary,
     ValueType,
     Variable,
+    ViewBinding,
+    ViewType,
     WhenCase,
     WhenExpr,
     WhileStmt,
@@ -62,7 +64,7 @@ RESERVED = {
     "function", "gives", "greater", "i1", "i32", "i64", "if", "in", "index", "input", "into", "import",
     "i8", "i16", "is", "layout", "length", "less", "let", "memref", "minus", "module", "no", "not", "or", "otherwise", "output", "packed", "parameters",
     "pointer", "plus", "print", "read", "remainder", "return", "set", "shifted", "size", "takes", "than", "then", "times", "to",
-    "track", "true", "u8", "u16", "u32", "u64", "up", "record", "when", "while", "with", "write", "xor", "zero",
+    "track", "true", "u8", "u16", "u32", "u64", "up", "record", "view", "when", "while", "with", "write", "xor", "zero",
 }
 TYPE_NAMES: set[str] = {"i1", "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64"}
 COMPARATORS: tuple[tuple[tuple[str, ...], str], ...] = (
@@ -75,7 +77,7 @@ COMPARATORS: tuple[tuple[tuple[str, ...], str], ...] = (
 )
 CONNECTOR_WORDS = {"of", "from", "to", "at", "in", "into", "between", "and", "with", "by"}
 BUFFER_LENGTH_PATTERN = r"(?:-?\d+|[a-z][a-z0-9_]*|\([^)]*\))"
-TYPE_PATTERN = rf"(?:buffer\s+of\s+{BUFFER_LENGTH_PATTERN}\s+[A-Za-z][A-Za-z0-9_]*|[A-Za-z][A-Za-z0-9_]*|[a-z][a-z0-9_]*)"
+TYPE_PATTERN = rf"(?:buffer\s+of\s+{BUFFER_LENGTH_PATTERN}\s+[A-Za-z][A-Za-z0-9_]*|view\s+of\s+[a-z][a-z0-9_]*|[A-Za-z][A-Za-z0-9_]*|[a-z][a-z0-9_]*)"
 MODULE_RE = re.compile(r"[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)*")
 
 
@@ -277,10 +279,10 @@ class Parser:
         return CheckStmt(self._parse_expression(line.text[len("check ") :], line.number), line.number)
 
     def _looks_like_phrase_header(self, line: Line) -> bool:
-        return line.is_header and re.fullmatch(r".+? (?:gives [A-Za-z][A-Za-z0-9_]*|does)", line.text) is not None
+        return line.is_header and re.fullmatch(r".+? (?:gives .+|does)", line.text) is not None
 
     def _parse_phrase_header(self, line: Line) -> tuple[PhraseTemplate, ReturnType]:
-        match = re.fullmatch(r"(.+?) (?:gives ([A-Za-z][A-Za-z0-9_]*)|does)", line.text)
+        match = re.fullmatch(r"(.+?) (?:gives (.+)|does)", line.text)
         if not line.is_header or not match:
             raise InscriptionError("expected phrase definition", line.number)
         phrase_text = match.group(1).strip()
@@ -588,7 +590,7 @@ class Parser:
             raise InscriptionError("value block must evaluate to an expression", lines[-1].number)
         return unconditional
 
-    def _parse_let(self, line: Line) -> SetStmt | BufferBinding:
+    def _parse_let(self, line: Line) -> SetStmt | BufferBinding | ViewBinding:
         buffer_match = re.fullmatch(
             rf"let ([a-z][a-z0-9_]*) be buffer of ({BUFFER_LENGTH_PATTERN}) ([A-Za-z][A-Za-z0-9_]*|[a-z][a-z0-9_]*) filled with (.+)",
             line.text,
@@ -598,6 +600,15 @@ class Parser:
                 self._name(buffer_match.group(1), line.number),
                 BufferType(self._buffer_length(buffer_match.group(2), line.number), self._return_type(buffer_match.group(3), line.number)),
                 self._parse_expression(buffer_match.group(4), line.number),
+                line.number,
+            )
+        view_match = re.fullmatch(r"let ([a-z][a-z0-9_]*) be view of ([a-z][a-z0-9_]*) from (.+) for (.+)", line.text)
+        if view_match:
+            return ViewBinding(
+                self._name(view_match.group(1), line.number),
+                self._name(view_match.group(2), line.number),
+                self._parse_expression(view_match.group(3), line.number),
+                self._parse_expression(view_match.group(4), line.number),
                 line.number,
             )
         match = re.fullmatch(r"let ([a-z][a-z0-9_]*)(?::\s*([A-Za-z][A-Za-z0-9_]*|[a-z][a-z0-9_]*))? be (.+)", line.text)
@@ -716,6 +727,9 @@ class Parser:
         buffer_match = re.fullmatch(rf"buffer of ({BUFFER_LENGTH_PATTERN}) ([A-Za-z][A-Za-z0-9_]*|[a-z][a-z0-9_]*)", value)
         if buffer_match is not None:
             return BufferType(self._buffer_length(buffer_match.group(1), line), self._return_type(buffer_match.group(2), line))
+        view_match = re.fullmatch(r"view of ([a-z][a-z0-9_]*)", value)
+        if view_match is not None:
+            return ViewType(self._type_name(view_match.group(1), line))
         return self._return_type(value, line)
 
     def _buffer_length(self, value: str, line: int) -> int | Expr:
@@ -729,6 +743,8 @@ class Parser:
         raise InscriptionError("malformed buffer length", line)
 
     def _return_type(self, value: str, line: int) -> TypeName | RecordType:
+        if value.startswith("view of "):
+            return ViewType(self._type_name(value[len("view of ") :].strip(), line))
         if RECORD_NAME_RE.fullmatch(value):
             return RecordType(value)
         return self._type_name(value, line)

@@ -1,0 +1,13 @@
+packed layout record Word:
+  value: u16
+
+layout read from view gives i32:
+  let bytes be buffer of 4 u8 filled with 0
+  bytes at 1 becomes 42
+  bytes at 2 becomes 0
+  let window be view of bytes from 1 for 2
+  let word be read Word from window at 0
+  word.value as i32
+
+main gives i32:
+  layout read from view

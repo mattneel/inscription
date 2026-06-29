@@ -46,6 +46,8 @@ from .ast import (
     Unary,
     ValueType,
     Variable,
+    ViewBinding,
+    ViewType,
     WhenCase,
     WhenExpr,
     WhileStmt,
@@ -263,6 +265,8 @@ def qualify_function(
 def qualify_type(type_name: ValueType, module_name: str, record_names: set[str], constant_names: set[str]) -> ValueType:
     if isinstance(type_name, BufferType):
         return BufferType(qualify_buffer_length(type_name.length, module_name, record_names, constant_names), qualify_type(type_name.element_type, module_name, record_names, constant_names))
+    if isinstance(type_name, ViewType):
+        return type_name
     if isinstance(type_name, RecordType) and type_name.name in record_names:
         return RecordType(qname(module_name, type_name.name))
     return type_name
@@ -290,6 +294,14 @@ def qualify_stmt(stmt: Stmt, module_name: str, record_names: set[str], constant_
         buffer_type = qualify_type(stmt.buffer_type, module_name, record_names, constant_names)
         assert isinstance(buffer_type, BufferType)
         return BufferBinding(stmt.name, buffer_type, qualify_expr(stmt.fill, module_name, record_names, constant_names), stmt.line)
+    if isinstance(stmt, ViewBinding):
+        return ViewBinding(
+            stmt.name,
+            stmt.source_name,
+            qualify_expr(stmt.start, module_name, record_names, constant_names),
+            qualify_expr(stmt.count, module_name, record_names, constant_names),
+            stmt.line,
+        )
     if isinstance(stmt, AssignStmt):
         return AssignStmt(stmt.name, qualify_expr(stmt.expr, module_name, record_names, constant_names), stmt.line)
     if isinstance(stmt, BufferStoreStmt):

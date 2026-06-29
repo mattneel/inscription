@@ -104,12 +104,18 @@ class BufferType:
 
 
 @dataclass(frozen=True)
+class ViewType:
+    element_type: TypeName
+    length: int | None = None
+
+
+@dataclass(frozen=True)
 class RecordType:
     name: str
 
 
-ValueType = TypeName | BufferType | RecordType
-ReturnType = TypeName | RecordType | None
+ValueType = TypeName | BufferType | ViewType | RecordType
+ReturnType = TypeName | RecordType | ViewType | None
 
 
 @dataclass(frozen=True)
@@ -272,6 +278,15 @@ class BufferBinding:
 
 
 @dataclass(frozen=True)
+class ViewBinding:
+    name: str
+    source_name: str
+    start: Expr
+    count: Expr
+    line: int
+
+
+@dataclass(frozen=True)
 class AssignStmt:
     name: str
     expr: Expr
@@ -357,6 +372,7 @@ BodyStmt = (
     CheckStmt
     | SetStmt
     | BufferBinding
+    | ViewBinding
     | AssignStmt
     | BufferStoreStmt
     | FieldAssignStmt

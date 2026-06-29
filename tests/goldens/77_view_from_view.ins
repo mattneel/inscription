@@ -1,0 +1,13 @@
+view from view gives i32:
+  let cells be buffer of 6 i32 filled with 0
+  for each index i of cells:
+    cells at i becomes i
+  let outer be view of cells from 1 for 4
+  let inner be view of outer from 1 for 2
+  let total be 0
+  for each index i of inner:
+    total becomes total plus inner at i
+  total
+
+main gives i32:
+  view from view

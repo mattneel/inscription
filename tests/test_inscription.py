@@ -149,6 +149,7 @@ class CompilerTests(unittest.TestCase):
                 (GOLDENS / "60_constants_layout_checks.ins").read_text(),
                 (GOLDENS / "63_phrase_body_check.ins").read_text(),
                 (GOLDENS / "67_module_import.ins").read_text(),
+                (GOLDENS / "75_view_parameter_sum.ins").read_text(),
                 "highlight new widths a: i8 and b: i16 and c: u64 gives u64:\n  c bitwise xor c\n",
             ]
         )
@@ -348,6 +349,22 @@ main gives i32:
         self.assertIn("func.func @modules__math__add", mlir)
         self.assertIn("func.call @modules__math__add", mlir)
         self.assertNotIn("func.func @add", mlir)
+
+    def test_v011_views_lower_to_dynamic_memref_base_start_length(self):
+        mlir = compile_source(self.fixture("view_parameter_sum.ins"))
+        self.assertIn("func.func @sum_view(%cells_base: memref<?xi32>, %cells_start: i32, %cells_length: i32) -> i32", mlir)
+        self.assertIn("memref.cast", mlir)
+        self.assertIn("func.call @sum_view", mlir)
+        self.assertIn(": (memref<?xi32>, i32, i32) -> i32", mlir)
+
+        local_mlir = compile_source(self.fixture("local_view_sum.ins"))
+        self.assertIn("memref.load", local_mlir)
+        self.assertIn("arith.addi", local_mlir)
+        self.assertIn("memref<?xi32>", local_mlir)
+
+        layout_mlir = compile_source(self.fixture("layout_read_from_view.ins"))
+        self.assertIn("memref<?xi8>", layout_mlir)
+        self.assertIn("arith.extui", layout_mlir)
 
     def test_v010_module_diagnostics(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -938,6 +955,74 @@ main gives i32:
             "check used as expression": (
                 "bad gives i32:\n  let x be check 1 is equal to 1\n  0\n",
                 "check is a step and cannot be used as an expression",
+            ),
+            "view source unknown": (
+                "bad gives i32:\n  let window be view of cells from 0 for 1\n  0\n",
+                "unknown binding cells",
+            ),
+            "view source scalar": (
+                "bad gives i32:\n  let cells be 0\n  let window be view of cells from 0 for 1\n  0\n",
+                "view source cells must be a buffer or view, got i32",
+            ),
+            "view start not i32": (
+                "bad gives i32:\n  let cells be buffer of 4 i32 filled with 0\n  let start: i64 be 0\n  let window be view of cells from start for 1\n  0\n",
+                "view start must have type i32, got i64",
+            ),
+            "view count not i32": (
+                "bad gives i32:\n  let cells be buffer of 4 i32 filled with 0\n  let count: i64 be 1\n  let window be view of cells from 0 for count\n  0\n",
+                "view count must have type i32, got i64",
+            ),
+            "static view out of bounds": (
+                "bad gives i32:\n  let cells be buffer of 4 i32 filled with 0\n  let window be view of cells from 2 for 3\n  0\n",
+                "view range 2 for 3 exceeds source cells of length 4",
+            ),
+            "negative static view count": (
+                "bad gives i32:\n  let cells be buffer of 4 i32 filled with 0\n  let window be view of cells from 0 for (zero minus 1)\n  0\n",
+                "view count must be nonnegative",
+            ),
+            "view load static out of bounds": (
+                "bad gives i32:\n  let cells be buffer of 4 i32 filled with 0\n  let window be view of cells from 1 for 2\n  window at 2\n",
+                "view index 2 is out of bounds for view window of length 2",
+            ),
+            "view store static out of bounds": (
+                "bad gives i32:\n  let cells be buffer of 4 i32 filled with 0\n  let window be view of cells from 1 for 2\n  window at 2 becomes 1\n  0\n",
+                "view index 2 is out of bounds for view window of length 2",
+            ),
+            "view used as scalar": (
+                "bad gives i32:\n  let cells be buffer of 4 i32 filled with 0\n  let window be view of cells from 0 for 4\n  window\n",
+                "view window cannot be used as a scalar value; use `window at index`",
+            ),
+            "view cannot be rebound": (
+                "bad gives i32:\n  let cells be buffer of 4 i32 filled with 0\n  let window be view of cells from 0 for 4\n  window becomes 1\n  0\n",
+                "cannot rebind view window",
+            ),
+            "store through readonly view parameter": (
+                "bad view cells: view of i32 gives i32:\n  cells at 0 becomes 1\n  0\n",
+                "cannot store through read-only view cells",
+            ),
+            "readonly view passed to does phrase": (
+                "fill view cells: view of i32 with value: i32 does:\n  cells at 0 becomes value\n\nbad view cells: view of i32 gives i32:\n  fill view cells with 1\n  0\n",
+                "cannot pass read-only view cells to effectful phrase `fill view _ with _`",
+            ),
+            "view element type mismatch": (
+                "sum view cells: view of i32 gives i32:\n  0\n\nbad gives i32:\n  let bytes be buffer of 4 u8 filled with 0\n  sum view bytes\n",
+                "argument bytes must have type view of i32, got buffer of 4 u8",
+            ),
+            "duplicate root storage through views": (
+                "copy view source: view of i32 to destination: view of i32 does:\n  for each index i of source:\n    destination at i becomes source at i\n\nbad gives i32:\n  let cells be buffer of 4 i32 filled with 1\n  let left be view of cells from 0 for 2\n  let right be view of cells from 2 for 2\n  copy view left to right\n  0\n",
+                "views left and right share root buffer cells and cannot be passed to multiple view parameters in one call",
+            ),
+            "layout read from non u8 view": (
+                "packed layout record Word:\n  value: u16\n\nbad gives i32:\n  let cells be buffer of 4 i32 filled with 0\n  let window be view of cells from 0 for 2\n  let word be read Word from window at 0\n  0\n",
+                "read Word requires a u8 buffer or view, got view of i32",
+            ),
+            "layout write to readonly u8 view": (
+                "packed layout record Word:\n  value: u16\n\nbad view bytes: view of u8 gives i32:\n  let word be Word with value be 1\n  write word into bytes at 0\n  0\n",
+                "cannot write to read-only view bytes",
+            ),
+            "view return type unsupported": (
+                "bad gives view of i32:\n  0\n",
+                "view return types are not supported in v0.11",
             ),
         }
         for name, (source, contains) in cases.items():
