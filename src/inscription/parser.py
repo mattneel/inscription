@@ -18,7 +18,6 @@ from .ast import (
     Program,
     ReturnStmt,
     SetStmt,
-    TrackStmt,
     TypeName,
     Unary,
     Variable,
@@ -220,7 +219,7 @@ class Parser:
         if current.text.startswith("let "):
             return self._parse_let(current), index + 1
         if current.text.startswith("track "):
-            return self._parse_track(current), index + 1
+            raise InscriptionError("`track` is not valid Inscription syntax; use `let name be ...`", current.number)
         assignment = self._assignment_match(current)
         if assignment is not None:
             return self._parse_assignment(current, assignment), index + 1
@@ -270,7 +269,7 @@ class Parser:
             if self._looks_like_phrase_header(current):
                 raise InscriptionError(f"phrase definitions cannot appear inside {name}", current.number)
             if not self._is_body_item_start(current):
-                raise InscriptionError(f"{name} only supports let bindings, track bindings, assignments, while loops, and if blocks", current.number)
+                raise InscriptionError(f"{name} only supports let bindings, assignments, while loops, and if blocks", current.number)
             item, body_index = self._parse_body_item(body_index, in_while=True)
             body.append(item)
         return body, body_index
@@ -318,18 +317,12 @@ class Parser:
         return unconditional
 
     def _parse_let(self, line: Line) -> SetStmt:
-        match = re.fullmatch(r"let ([a-z][a-z0-9_]*) be (.+)", line.text)
+        match = re.fullmatch(r"let ([a-z][a-z0-9_]*)(?::\s*([a-z][a-z0-9_]*))? be (.+)", line.text)
         if not match:
             raise InscriptionError("malformed let binding", line.number)
-        return SetStmt(self._name(match.group(1), line.number), self._parse_expression(match.group(2), line.number), line.number)
-
-    def _parse_track(self, line: Line) -> TrackStmt:
-        match = re.fullmatch(r"track ([a-z][a-z0-9_]*):\s*([a-z][a-z0-9_]*) from (.+)", line.text)
-        if not match:
-            raise InscriptionError("malformed track binding", line.number)
-        return TrackStmt(
+        return SetStmt(
             self._name(match.group(1), line.number),
-            self._type_name(match.group(2), line.number),
+            self._type_name(match.group(2), line.number) if match.group(2) is not None else None,
             self._parse_expression(match.group(3), line.number),
             line.number,
         )

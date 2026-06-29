@@ -185,6 +185,14 @@ main gives i32:
         self.assertIn("arith.subi %0, %n : i64", mlir)
         self.assertIn("arith.cmpi slt, %0, %n : i64", mlir)
 
+    def test_typed_let_annotation_drives_initializer_type(self):
+        source = """one as i64 gives i64:
+  let one: i64 be 1
+  one
+"""
+        mlir = compile_source(source)
+        self.assertIn("arith.constant 1 : i64", mlir)
+
     def test_recursive_phrase_call(self):
         mlir = compile_source(self.fixture("recursive_factorial.ins"))
         self.assertIn("func.call @factorial", mlir)
@@ -315,24 +323,26 @@ main gives i32:
             "memrefs": ("main gives i32:\n  memref\n", "unexpected token"),
             "reserved hole name": ("echo of let: i32 gives i32:\n  let\n\nmain gives i32:\n  0\n", "reserved word"),
             "out of range literal": ("main gives i64:\n  9223372036854775808\n", "outside signed 64-bit"),
-            "assignment to phrase hole": ("bad of x: i32 gives i32:\n  x becomes 1\n  x\n", "cannot assign to immutable phrase hole x"),
-            "assignment to let binding": ("bad gives i32:\n  let x be 1\n  x becomes 2\n  x\n", "cannot assign to immutable let binding x"),
-            "assignment to undeclared binding": ("bad gives i32:\n  y becomes 1\n  0\n", "unknown binding y"),
-            "track initializer type mismatch": ("bad gives i32:\n  track x: i32 from false\n  x\n", "track x initializer must have type i32, got i1"),
+            "assignment to undeclared binding": ("bad gives i32:\n  x becomes 1\n  0\n", "unknown binding x"),
             "assignment type mismatch": (
-                "bad gives i32:\n  track x: i32 from 0\n  x becomes x is equal to 0\n  x\n",
+                "bad gives i32:\n  let x be 0\n  x becomes x is equal to 0\n  x\n",
                 "assignment to x must have type i32, got i1",
             ),
+            "let annotation mismatch": ("bad gives i32:\n  let x: i32 be true\n  x\n", "let x must have type i32, got i1"),
+            "old track syntax": (
+                "bad gives i32:\n  track x: i32 from 0\n  x\n",
+                "`track` is not valid Inscription syntax; use `let name be ...`",
+            ),
             "while condition is not i1": (
-                "bad gives i32:\n  track x: i32 from 0\n  while x:\n    x becomes x plus 1\n  x\n",
+                "bad gives i32:\n  let x be 0\n  while x:\n    x becomes x plus 1\n  x\n",
                 "while condition must be i1",
             ),
             "while let does not escape": (
-                "bad gives i32:\n  track x: i32 from 0\n  while x is less than 1:\n    let y be 2\n    x becomes x plus 1\n  y\n",
+                "bad gives i32:\n  let x be 0\n  while x is less than 1:\n    let y be 2\n    x becomes x plus 1\n  y\n",
                 "unknown binding y",
             ),
             "missing while body": (
-                "bad gives i32:\n  track x: i32 from 0\n  while x is less than 1:\n  x\n",
+                "bad gives i32:\n  let x be 0\n  while x is less than 1:\n  x\n",
                 "while loop requires an indented body",
             ),
             "remainder on i1": ("bad gives i1:\n  true remainder false\n", "remainder requires numeric operands"),
@@ -341,27 +351,23 @@ main gives i32:
                 "remainder operands must have same type",
             ),
             "if condition is not i1": (
-                "bad gives i32:\n  track x: i32 from 0\n  if x:\n    x becomes 1\n  otherwise:\n    x becomes 2\n  x\n",
+                "bad gives i32:\n  let x be 0\n  if x:\n    x becomes 1\n  otherwise:\n    x becomes 2\n  x\n",
                 "if condition must be i1",
             ),
             "missing if otherwise": (
-                "bad gives i32:\n  track x: i32 from 0\n  if x is equal to 0:\n    x becomes 1\n  x\n",
+                "bad gives i32:\n  let x be 0\n  if x is equal to 0:\n    x becomes 1\n  x\n",
                 "if block requires otherwise",
             ),
             "empty if branch": (
-                "bad gives i32:\n  track x: i32 from 0\n  if x is equal to 0:\n  otherwise:\n    x becomes 1\n  x\n",
+                "bad gives i32:\n  let x be 0\n  if x is equal to 0:\n  otherwise:\n    x becomes 1\n  x\n",
                 "if branch must contain at least one step",
             ),
             "empty otherwise branch": (
-                "bad gives i32:\n  track x: i32 from 0\n  if x is equal to 0:\n    x becomes 1\n  otherwise:\n  x\n",
+                "bad gives i32:\n  let x be 0\n  if x is equal to 0:\n    x becomes 1\n  otherwise:\n  x\n",
                 "otherwise branch must contain at least one step",
             ),
             "branch let does not escape": (
-                "bad gives i32:\n  track x: i32 from 0\n  if x is equal to 0:\n    let y be 1\n  otherwise:\n    let y be 2\n  y\n",
-                "unknown binding y",
-            ),
-            "branch track does not escape": (
-                "bad gives i32:\n  track x: i32 from 0\n  if x is equal to 0:\n    track y: i32 from 1\n  otherwise:\n    track y: i32 from 2\n  y\n",
+                "bad gives i32:\n  let x be 0\n  if x is equal to 0:\n    let y be 1\n  otherwise:\n    let y be 2\n  y\n",
                 "unknown binding y",
             ),
             "boolean and requires i1": ("bad gives i1:\n  1 and 2\n", "and requires i1 operands"),

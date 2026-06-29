@@ -17,7 +17,6 @@ from .ast import (
     Program,
     ReturnStmt,
     SetStmt,
-    TrackStmt,
     TypeName,
     Unary,
     Variable,
@@ -27,7 +26,7 @@ from .ast import (
 from .diagnostics import InscriptionError
 
 NUMERIC_TYPES: set[TypeName] = {"i32", "i64"}
-BindingKind = Literal["param", "let", "track"]
+BindingKind = Literal["param", "let"]
 
 
 @dataclass(frozen=True)
@@ -87,9 +86,6 @@ def _check_body_stmt(stmt: BodyStmt, bindings: dict[str, Binding], functions: di
     if isinstance(stmt, SetStmt):
         _declare_let(stmt, bindings, functions)
         return
-    if isinstance(stmt, TrackStmt):
-        _declare_track(stmt, bindings, functions)
-        return
     if isinstance(stmt, AssignStmt):
         _check_assignment(stmt, bindings, functions)
         return
@@ -107,37 +103,21 @@ def _declare_let(stmt: SetStmt, bindings: dict[str, Binding], functions: dict[st
     if existing is not None:
         if existing.kind == "param":
             raise InscriptionError(f"let binding '{stmt.name}' cannot shadow phrase hole", stmt.line)
-        if existing.kind == "track":
-            raise InscriptionError(f"let binding '{stmt.name}' cannot shadow tracked binding", stmt.line)
         raise InscriptionError(f"duplicate let binding '{stmt.name}'", stmt.line)
+    if stmt.type_name is not None:
+        actual = _infer_declared_type(stmt.expr, stmt.type_name, _env_types(bindings), functions)
+        if actual != stmt.type_name:
+            raise InscriptionError(f"let {stmt.name} must have type {stmt.type_name}, got {actual}", stmt.line)
+        bindings[stmt.name] = Binding(stmt.type_name, "let", stmt.line)
+        return
     type_name = infer_expr_type(stmt.expr, _env_types(bindings), functions)
     bindings[stmt.name] = Binding(type_name, "let", stmt.line)
-
-
-def _declare_track(stmt: TrackStmt, bindings: dict[str, Binding], functions: dict[str, Function]) -> None:
-    existing = bindings.get(stmt.name)
-    if existing is not None:
-        if existing.kind == "param":
-            raise InscriptionError(f"track binding '{stmt.name}' cannot shadow phrase hole", stmt.line)
-        if existing.kind == "let":
-            raise InscriptionError(f"track binding '{stmt.name}' cannot shadow let binding", stmt.line)
-        raise InscriptionError(f"duplicate track binding '{stmt.name}'", stmt.line)
-    actual = _infer_declared_type(stmt.expr, stmt.type_name, _env_types(bindings), functions)
-    if actual != stmt.type_name:
-        raise InscriptionError(
-            f"track {stmt.name} initializer must have type {stmt.type_name}, got {actual}", stmt.line
-        )
-    bindings[stmt.name] = Binding(stmt.type_name, "track", stmt.line)
 
 
 def _check_assignment(stmt: AssignStmt, bindings: dict[str, Binding], functions: dict[str, Function]) -> None:
     binding = bindings.get(stmt.name)
     if binding is None:
         raise InscriptionError(f"unknown binding {stmt.name}", stmt.line)
-    if binding.kind == "param":
-        raise InscriptionError(f"cannot assign to immutable phrase hole {stmt.name}", stmt.line)
-    if binding.kind == "let":
-        raise InscriptionError(f"cannot assign to immutable let binding {stmt.name}", stmt.line)
     actual = _infer_declared_type(stmt.expr, binding.type_name, _env_types(bindings), functions)
     if actual != binding.type_name:
         raise InscriptionError(

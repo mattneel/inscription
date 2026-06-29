@@ -12,9 +12,8 @@ This repository currently implements **Inscription v0.2**:
 - phrase-shaped function definitions and phrase-shaped calls
 - value blocks with `expression when condition` and `otherwise expression`
 - implicit returns: the block value is the phrase result
-- immutable `let name be expression` bindings before a value block
-- tracked mutable source bindings with `track name: type from expression`
-- assignment to tracked bindings with `name becomes expression`
+- local bindings with `let name be expression` and `let name: type be expression`
+- rebinding visible local bindings with `name becomes expression`
 - `while condition:` step blocks lowered as loop-carried SSA values through `scf.while`
 - nested `while` loops
 - step-level `if condition:` / `otherwise:` blocks lowered through `scf.if` SSA results
@@ -87,8 +86,8 @@ inscription run tests/fixtures/positive/loop_sum.ins
 
 ```text
 sum through n: i32 gives i32:
-  track total: i32 from 0
-  track i: i32 from 1
+  let total be 0
+  let i be 1
   while i is less than or equal to n:
     total becomes total plus i
     i becomes i plus 1
@@ -145,10 +144,10 @@ main gives i32:
   square of 12
 ```
 
-Body items may introduce immutable lets, tracked bindings, assignments, while loops, or step-level if/otherwise blocks:
+Body items may introduce local `let` bindings, rebindings, while loops, or step-level if/otherwise blocks:
 
 ```text
-track total: i32 from 0
+let total be 0
 total becomes total plus 1
 while total is less than 10:
   total becomes total plus 1
@@ -158,7 +157,7 @@ otherwise:
   total becomes total
 ```
 
-Tracked bindings are source-level mutable names, but they lower to SSA values, `scf.while` loop-carried results, and `scf.if` results, not memory.
+A local binding is introduced with `let`. A binding is rebound with `becomes`. Rebinding lowers to SSA values, `scf.while` loop-carried results, and `scf.if` results, not memory storage.
 
 Conditional value blocks return the first matching line, with a required fallback:
 
@@ -241,24 +240,25 @@ Important v0.2 rules:
 - function names are generated from the leading literal words in a phrase definition
 - phrase names are unique; there is no overloading
 - library compilation does not require `main`; if `main` exists, it must take no holes
-- phrase holes and `let` bindings are immutable
-- assignment is valid only for tracked bindings
-- tracked binding initializers and assignments must match the declared tracked type
+- phrase holes and `let` bindings can be rebound locally with `becomes`
+- rebinding a phrase hole does not mutate the caller
+- each binding type is fixed after initialization or annotation
+- typed `let` initializers and rebinding right-hand sides must match the binding type
 - while conditions must be `i1`
-- while-body lets and tracks are scoped to that loop iteration and do not escape
+- while-body lets are scoped to that loop iteration and do not escape
 - nested while loops are supported
 - if/otherwise conditions must be `i1`, and both branches must contain at least one step
-- branch-local lets and tracks do not escape
-- tracked bindings assigned in if branches lower to `scf.if` results in track declaration order
+- branch-local lets do not escape
+- bindings assigned in if branches lower to `scf.if` results in source binding order
 - arithmetic operands must be numeric (`i32` or `i64`)
 - `remainder` requires matching numeric operands and lowers to `arith.remsi`
 - comparisons require numeric operands and return `i1`
 - boolean `and`, `or`, and `not` require `i1` operands and return `i1`
-- variables must be initialized by a phrase hole, prior `let`, or prior `track`
+- variables must be initialized by a phrase hole or prior visible `let`
 - phrase calls must match a declared phrase template exactly
 - conditional value blocks require `otherwise`
 - removed ceremony words such as `Function`, `End function`, `Set`, `Return`, and `call ... with` are not valid Inscription syntax
-- unsupported I/O, arrays, floats, pointers, memrefs, mutable storage lowering, and free prose are rejected
+- unsupported `track`, I/O, arrays, floats, pointers, memrefs, mutable storage lowering, and free prose are rejected
 
 ## Tests
 

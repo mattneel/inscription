@@ -1,7 +1,7 @@
 module {
-  func.func @collatz_steps(%start: i32) -> i32 {
+  func.func @collatz_steps(%n: i32) -> i32 {
     %0 = arith.constant 0 : i32
-    %1:2 = scf.while (%n_before = %start, %steps_before = %0) : (i32, i32) -> (i32, i32) {
+    %1:2 = scf.while (%n_before = %n, %steps_before = %0) : (i32, i32) -> (i32, i32) {
       %2 = arith.constant 1 : i32
       %3 = arith.cmpi sgt, %n_before, %2 : i32
       scf.condition(%3) %n_before, %steps_before : i32, i32

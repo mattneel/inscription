@@ -1,6 +1,6 @@
 module {
-  func.func @gcd(%a0: i32, %b0: i32) -> i32 {
-    %0:2 = scf.while (%a_before = %a0, %b_before = %b0) : (i32, i32) -> (i32, i32) {
+  func.func @gcd(%a: i32, %b: i32) -> i32 {
+    %0:2 = scf.while (%a_before = %a, %b_before = %b) : (i32, i32) -> (i32, i32) {
       %1 = arith.constant 0 : i32
       %2 = arith.cmpi ne, %b_before, %1 : i32
       scf.condition(%2) %a_before, %b_before : i32, i32

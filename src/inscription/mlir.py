@@ -17,7 +17,6 @@ from .ast import (
     ReturnStmt,
     SetStmt,
     Stmt,
-    TrackStmt,
     TypeName,
     Unary,
     Variable,
@@ -48,8 +47,7 @@ class MlirEmitter:
         self.functions = function_table(program)
         self.counter = 0
         self.constants: dict[ConstantKey, Value] = {}
-        self.tracked_types: dict[str, TypeName] = {}
-        self.track_order: list[str] = []
+        self.binding_order: list[str] = []
         self.while_counter = 0
         self.while_depth = 0
 
@@ -70,8 +68,7 @@ class MlirEmitter:
     def emit_function(self, fn: Function, lines: list[str]) -> None:
         self.counter = 0
         self.constants = {}
-        self.tracked_types = {}
-        self.track_order = []
+        self.binding_order = [param.name for param in fn.params]
         self.while_counter = 0
         self.while_depth = 0
         args = ", ".join(f"%{param.name}: {param.type_name}" for param in fn.params)
@@ -98,17 +95,12 @@ class MlirEmitter:
     def emit_body_stmt(self, stmt: Stmt, env: dict[str, Value], lines: list[str], indent: str) -> None:
         if isinstance(stmt, SetStmt):
             env_types = {name: value.type_name for name, value in env.items()}
-            type_name = infer_expr_type(stmt.expr, env_types, self.functions)
+            type_name = stmt.type_name or infer_expr_type(stmt.expr, env_types, self.functions)
             env[stmt.name] = self.emit_expr(stmt.expr, env, lines, indent, expected=type_name)
-            return
-        if isinstance(stmt, TrackStmt):
-            value = self.emit_expr(stmt.expr, env, lines, indent, expected=stmt.type_name)
-            env[stmt.name] = value
-            self.tracked_types[stmt.name] = stmt.type_name
-            self.track_order.append(stmt.name)
+            self.binding_order.append(stmt.name)
             return
         if isinstance(stmt, AssignStmt):
-            type_name = self.tracked_types[stmt.name]
+            type_name = env[stmt.name].type_name
             env[stmt.name] = self.emit_expr(stmt.expr, env, lines, indent, expected=type_name)
             return
         if isinstance(stmt, WhileStmt):
@@ -239,8 +231,8 @@ class MlirEmitter:
         loop_id = self.while_counter
         self.while_counter += 1
         arg_suffix = "" if self.while_depth == 0 else f"_loop{loop_id}"
-        visible_track_order = list(self.track_order)
-        carried_names = self.assigned_tracked_names(stmt.body, visible_track_order)
+        visible_binding_order = list(self.binding_order)
+        carried_names = self.assigned_binding_names(stmt.body, visible_binding_order)
         carried_values = [env[name] for name in carried_names]
         carried_types = [value.type_name for value in carried_values]
         result_base = self.fresh() if carried_names else None
@@ -276,7 +268,7 @@ class MlirEmitter:
         self.while_depth += 1
         try:
             self.emit_with_local_constants(
-                lambda: self.emit_with_track_scope(
+                lambda: self.emit_with_binding_scope(
                     lambda: self.emit_while_body(stmt, body_env, carried_names, carried_types, lines, indent)
                 )
             )
@@ -323,8 +315,8 @@ class MlirEmitter:
             lines.append(f"{indent}  scf.yield")
 
     def emit_if(self, stmt: IfStmt, env: dict[str, Value], lines: list[str], indent: str) -> None:
-        visible_track_order = list(self.track_order)
-        result_names = self.assigned_tracked_names((*stmt.then_body, *stmt.else_body), visible_track_order)
+        visible_binding_order = list(self.binding_order)
+        result_names = self.assigned_binding_names((*stmt.then_body, *stmt.else_body), visible_binding_order)
         result_values = [env[name] for name in result_names]
         result_types = [value.type_name for value in result_values]
 
@@ -338,14 +330,14 @@ class MlirEmitter:
 
         then_env = dict(env)
         self.emit_with_local_constants(
-            lambda: self.emit_with_track_scope(
+            lambda: self.emit_with_binding_scope(
                 lambda: self.emit_if_branch(stmt.then_body, then_env, result_names, result_types, lines, indent)
             )
         )
         lines.append(f"{indent}}} else {{")
         else_env = dict(env)
         self.emit_with_local_constants(
-            lambda: self.emit_with_track_scope(
+            lambda: self.emit_with_binding_scope(
                 lambda: self.emit_if_branch(stmt.else_body, else_env, result_names, result_types, lines, indent)
             )
         )
@@ -382,17 +374,15 @@ class MlirEmitter:
         finally:
             self.constants = saved
 
-    def emit_with_track_scope(self, emit: Callable[[], None]) -> None:
-        saved_tracked_types = dict(self.tracked_types)
-        saved_track_order = list(self.track_order)
+    def emit_with_binding_scope(self, emit: Callable[[], None]) -> None:
+        saved_binding_order = list(self.binding_order)
         try:
             emit()
         finally:
-            self.tracked_types = saved_tracked_types
-            self.track_order = saved_track_order
+            self.binding_order = saved_binding_order
 
-    def assigned_tracked_names(self, body: tuple[Stmt, ...], visible_track_order: list[str]) -> list[str]:
-        visible = set(visible_track_order)
+    def assigned_binding_names(self, body: tuple[Stmt, ...], visible_binding_order: list[str]) -> list[str]:
+        visible = set(visible_binding_order)
         assigned: set[str] = set()
 
         def visit(statements: tuple[Stmt, ...]) -> None:
@@ -407,7 +397,7 @@ class MlirEmitter:
                     visit(statement.else_body)
 
         visit(body)
-        return [name for name in visible_track_order if name in assigned]
+        return [name for name in visible_binding_order if name in assigned]
 
     def type_list(self, types: list[TypeName]) -> str:
         return ", ".join(types)

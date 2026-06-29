@@ -1,5 +1,7 @@
 # Inscription v0.1 specification
 
+> Historical note: v0.1 documented `track`; the current v0.2 language removes source-level `track` and uses `let` plus `becomes` for local rebinding.
+
 Inscription v0.1 is a deterministic, fixed-pattern, phrase-shaped compiler. It is prose-like, but it is not a natural-language system: every accepted source line matches one grammar production exactly. Unsupported prose is rejected with a diagnostic.
 
 v0.1 extends v0 with source-level tracked mutable bindings, assignments, `while` loops lowered as loop-carried SSA values, boolean literals, and signed remainder. It does not introduce source-level storage or memory lowering.

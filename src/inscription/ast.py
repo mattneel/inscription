@@ -97,14 +97,7 @@ Expr = Integer | Boolean | Variable | Unary | Binary | Call | Comparison | WhenE
 @dataclass(frozen=True)
 class SetStmt:
     name: str
-    expr: Expr
-    line: int
-
-
-@dataclass(frozen=True)
-class TrackStmt:
-    name: str
-    type_name: TypeName
+    type_name: TypeName | None
     expr: Expr
     line: int
 
@@ -137,5 +130,5 @@ class ReturnStmt:
     line: int
 
 
-BodyStmt = SetStmt | TrackStmt | AssignStmt | WhileStmt | IfStmt
+BodyStmt = SetStmt | AssignStmt | WhileStmt | IfStmt
 Stmt = BodyStmt | ReturnStmt

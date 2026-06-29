@@ -1,6 +1,5 @@
-collatz steps of start: i32 gives i32:
-  track n: i32 from start
-  track steps: i32 from 0
+collatz steps of n: i32 gives i32:
+  let steps be 0
   while n is greater than 1:
     if n remainder 2 is equal to 0:
       n becomes n divided by 2

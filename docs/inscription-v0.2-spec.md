@@ -1,6 +1,6 @@
 # Inscription v0.2 specification
 
-Inscription v0.2 is a deterministic, phrase-shaped compiler. It is prose-like, but it is not natural-language interpretation: every accepted line matches the grammar exactly. v0.2 preserves v0 and v0.1 behavior and extends v0.1 with structured step-level control flow, nested while loops, and strict boolean operators.
+Inscription v0.2 is a deterministic, phrase-shaped compiler. It is prose-like, but it is not natural-language interpretation: every accepted line matches the grammar exactly. v0.2 uses `let` for local bindings and `becomes` for local rebinding; source-level `track` is not valid syntax.
 
 ## Execution model
 
@@ -42,6 +42,7 @@ lli output.ll
 - Integer literals are base-10 signed 64-bit literals and are typed by context; untyped integer-only arithmetic defaults to `i32`.
 - `zero` is sugar for integer literal `0`.
 - Boolean literals are `true` and `false` and have type `i1`.
+- `track` is reserved only so the compiler can reject old syntax clearly.
 
 ## Phrase definitions
 
@@ -74,7 +75,7 @@ Body items are evaluated sequentially and must appear before the value block:
 
 ```text
 let name be expression
-track name: type from expression
+let name: type be expression
 name becomes expression
 while condition:
   step
@@ -101,34 +102,29 @@ Rules:
 - `if condition:` is a step-level block, not a value block.
 - There is no statement-level `return`.
 
-## Tracked bindings and assignment
+## Local bindings and rebinding
 
-A tracked binding introduces a mutable source-level name with a fixed type:
+A local binding is introduced with `let`:
 
 ```text
-track total: i32 from 0
-track current: i64 from n
-track done: i1 from false
+let total be 0
+let acc: i64 be 1
+let done be false
 ```
 
-Assignment updates the current compiler environment value for a tracked binding:
+If the optional type annotation is present, the initializer must type-check as that type. If no annotation is present, the initializer is typed by the normal expression typing rules. The binding's type is fixed after initialization.
+
+Rebinding updates the current source value for any visible binding:
 
 ```text
 total becomes total plus i
-current becomes current minus 1
-done becomes current is equal to zero
+n becomes n minus 1
+done becomes n is equal to zero
 ```
 
-Assignments are sequential. In:
+`becomes` is valid for phrase holes and `let` bindings. Rebinding a phrase hole is local to the function and does not mutate the caller.
 
-```text
-a becomes b
-b becomes a
-```
-
-the second assignment sees the updated value of `a`; swapping requires an explicit `let` temporary.
-
-Tracked bindings lower to SSA values. Assignment emits the right-hand expression and updates the compiler's binding map; it emits no storage operation.
+Rebinding lowers to SSA values. It emits the right-hand expression and updates the compiler's binding map; it emits no storage operation.
 
 ## While loops
 
@@ -145,13 +141,13 @@ Rules:
 - The condition must type-check as `i1`.
 - The body must contain at least one step.
 - v0.2 supports nested `while` loops.
-- A while body may contain lets, tracks, assignments, nested whiles, and if/otherwise blocks.
-- Let and track bindings declared inside a while body are scoped to that loop iteration and do not escape.
-- A track declared inside a loop body is initialized on each iteration.
-- Tracked bindings declared before a while and assigned anywhere inside it, including in nested loops or branches, are loop-carried values.
-- Tracked bindings declared inside the while body are not carried by that outer while, but can be carried by nested loops inside that body.
+- A while body may contain lets, assignments, nested whiles, and if/otherwise blocks.
+- Let bindings declared inside a while body are scoped to that loop iteration and do not escape.
+- A let declared inside a loop body is initialized on each iteration.
+- Bindings declared before a while and assigned anywhere inside it, including in nested loops or branches, are loop-carried values.
+- Bindings declared inside the while body are not carried by that outer while, but can be carried by nested loops inside that binding's scope.
 
-Lowering uses `scf.while` with deterministic loop-carried operands ordered by original visible `track` declaration order. The before region evaluates the condition and forwards current carried values through `scf.condition`; the after region emits body steps and yields final carried values through `scf.yield`.
+Lowering uses `scf.while` with deterministic loop-carried operands ordered by source binding order: phrase holes in definition order, then visible lets in declaration order. The before region evaluates the condition and forwards current carried values through `scf.condition`; the after region emits body steps and yields final carried values through `scf.yield`.
 
 ## Step-level if/otherwise blocks
 
@@ -169,22 +165,21 @@ Rules:
 - The condition must type-check as `i1`.
 - `otherwise` is required.
 - Both branches must contain at least one step.
-- Branches may contain lets, tracks, assignments, nested whiles, and nested if/otherwise blocks.
-- Let and track bindings declared inside a branch do not escape that branch.
-- Any tracked binding assigned in either branch is yielded from an `scf.if` result.
-- If a tracked binding is assigned in one branch but not the other, the unassigned branch yields its pre-if value.
-- Multiple tracked results are yielded in visible track declaration order.
+- Branches may contain lets, assignments, nested whiles, and nested if/otherwise blocks.
+- Let bindings declared inside a branch do not escape that branch.
+- Any visible binding assigned in either branch is yielded from an `scf.if` result.
+- If a binding is assigned in one branch but not the other, the unassigned branch yields its pre-if value.
+- Multiple results are yielded in source binding order.
 
 Example:
 
 ```text
 absolute using branch of n: i32 gives i32:
-  track result: i32 from 0
   if n is less than zero:
-    result becomes zero minus n
+    n becomes zero minus n
   otherwise:
-    result becomes n
-  result
+    n becomes n
+  n
 ```
 
 ## Expressions
@@ -228,25 +223,24 @@ Comparisons return `i1`:
 - Generated phrase names are unique; there is no overloading.
 - Parameter names are unique.
 - Calls must match a known phrase template.
-- Variables must be initialized by a phrase hole, prior `let`, or visible `track` before use.
+- Variables must be initialized by a phrase hole or visible prior `let` before use.
 - If `main` exists, it must take no holes.
 - Types are exactly `i1`, `i32`, and `i64`.
-- Phrase holes are immutable.
-- `let` bindings are immutable.
-- Assignment is valid only for tracked bindings.
-- Track and let bindings may not shadow visible overlapping bindings.
+- Phrase holes and lets can be rebound locally with `becomes`.
+- Rebinding does not mutate callers or storage.
+- Let bindings may not shadow visible overlapping bindings.
 - A binding name may be reused only after the previous lexical scope has ended.
-- Track initializers must match their declared type.
-- Assignment right-hand sides must match the tracked binding's declared type.
+- Typed let initializers must match their declared type.
+- Assignment right-hand sides must match the binding's fixed type.
 - While and if conditions must be `i1`.
-- Branch-local and loop-local lets/tracks do not escape.
+- Branch-local and loop-local lets do not escape.
 - Arithmetic requires matching numeric operand types (`i32` or `i64`).
 - `remainder` requires matching numeric operands and lowers to signed `arith.remsi`.
 - Comparisons require matching numeric operand types and return `i1`.
 - `and`, `or`, and `not` require `i1` operands and return `i1`.
-- Integer literals are coerced to the numeric type required by context when possible.
+- Integer literals are coerced to the numeric type required by their context when possible.
 - Conditional value blocks require `otherwise` and lower through `scf.if` results.
-- Unsupported `Function`, `End function`, `Set`, `Return`, `call ... with`, I/O, arrays, floats, pointers, memrefs, structs, proof prose, natural-language requests, custom dialect syntax, `break`, and `continue` are rejected.
+- Unsupported `track`, `Function`, `End function`, `Set`, `Return`, `call ... with`, I/O, arrays, floats, pointers, memrefs, structs, proof prose, natural-language requests, custom dialect syntax, `break`, and `continue` are rejected.
 
 ## MLIR subset
 
