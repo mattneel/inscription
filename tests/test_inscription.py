@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import difflib
 import importlib.util
 import json
 import os
@@ -18,11 +19,28 @@ from inscription.diagnostics import InscriptionError
 from inscription.runner import LOWERING_PASSES, ToolchainError, resolve_toolchain, run_source, verify_mlir
 
 FIXTURES = ROOT / "tests" / "fixtures" / "positive"
+GOLDENS = ROOT / "tests" / "goldens"
 
 
 class CompilerTests(unittest.TestCase):
     def fixture(self, name: str) -> str:
         return (FIXTURES / name).read_text()
+
+    def test_goldens_match_exact_mlir(self):
+        for source_path in sorted(GOLDENS.glob("*.ins")):
+            with self.subTest(golden=source_path.name):
+                expected_path = source_path.with_suffix(".mlir")
+                expected = expected_path.read_text()
+                actual = compile_source(source_path.read_text())
+                diff = "".join(
+                    difflib.unified_diff(
+                        expected.splitlines(True),
+                        actual.splitlines(True),
+                        fromfile=str(expected_path),
+                        tofile="actual",
+                    )
+                )
+                self.assertEqual(actual, expected, diff)
 
     def test_known_fixtures_execute_with_expected_exit_statuses(self):
         expected = json.loads((FIXTURES / "manifest.json").read_text())
@@ -99,6 +117,20 @@ class CompilerTests(unittest.TestCase):
         self.assertIn("gives", html)
         self.assertIn("highlight", html)
 
+    @unittest.skipUnless(importlib.util.find_spec("pygments"), "Pygments is not installed")
+    def test_highlight_accepts_full_v0_token_surface(self):
+        from inscription.highlighting import highlight_source
+
+        source = "\n".join(
+            [
+                (GOLDENS / "07_average_with_let.ins").read_text(),
+                (GOLDENS / "09_factorial.ins").read_text(),
+                (GOLDENS / "12_equals_boolean.ins").read_text(),
+            ]
+        )
+        html = highlight_source(source, output_format="html")
+        self.assertNotIn('class="err"', html)
+
     def test_phrase_call_lowers_to_func_call(self):
         mlir = compile_source(self.fixture("add.ins"))
         self.assertIn("func.func @add", mlir)
@@ -110,7 +142,7 @@ class CompilerTests(unittest.TestCase):
         mlir = compile_source(self.fixture("phrase_max.ins"))
         self.assertIn("func.func @max", mlir)
         self.assertIn("arith.cmpi sgt", mlir)
-        self.assertRegex(mlir, r"%v\d+ = scf\.if %v\d+ -> \(i32\)")
+        self.assertRegex(mlir, r"%\d+ = scf\.if %\d+ -> \(i32\)")
         self.assertIn("scf.yield", mlir)
 
     def test_multiple_when_lines_lower_to_nested_scf_if_results(self):
@@ -137,6 +169,16 @@ main gives i32:
         except ToolchainError as exc:
             self.skipTest(str(exc))
         self.assertEqual(result.exit_status, 5)
+
+    def test_i64_literals_can_take_type_from_numeric_neighbor(self):
+        source = """negate of n: i64 gives i64:
+  let flipped be 0 minus n
+  flipped when 0 is less than n
+  otherwise n
+"""
+        mlir = compile_source(source)
+        self.assertIn("arith.subi %0, %n : i64", mlir)
+        self.assertIn("arith.cmpi slt, %0, %n : i64", mlir)
 
     def test_recursive_phrase_call(self):
         mlir = compile_source(self.fixture("recursive_factorial.ins"))
@@ -202,11 +244,11 @@ main gives i32:
     def test_phrase_definitions_reject_unsupported_types(self):
         self.assertCompileError(
             "identity of x: f64 gives i32:\n  x\n\nmain gives i32:\n  0\n",
-            "only support i32",
+            "only support",
         )
         self.assertCompileError(
             "identity of x: i32 gives f64:\n  x\n\nmain gives i32:\n  0\n",
-            "only support i32 return",
+            "only support",
         )
 
     def test_value_block_requires_otherwise_after_when(self):
@@ -243,9 +285,8 @@ main gives i32:
                 "add a: i32 and a: i32 gives i32:\n  a\n\nmain gives i32:\n  add 1 and 2\n",
                 "duplicate parameter",
             ),
-            "missing main": ("one gives i32:\n  1\n", "must define main"),
             "invalid main": ("main of argc: i32 gives i32:\n  argc\n", "main must take no parameters"),
-            "unsupported operator": ("main gives i32:\n  4 divided by 2\n", "unexpected token"),
+            "unsupported operator": ("main gives i32:\n  4 modulo 2\n", "unexpected token"),
             "glued plus operator": ("main gives i32:\n  1plus 2\n", "missing whitespace"),
             "glued times operator": ("main gives i32:\n  3times 2\n", "missing whitespace"),
             "glued phrase connector": (
@@ -258,7 +299,7 @@ main gives i32:
             "pointers": ("main gives i32:\n  pointer\n", "unexpected token"),
             "memrefs": ("main gives i32:\n  memref\n", "unexpected token"),
             "reserved hole name": ("echo of let: i32 gives i32:\n  let\n\nmain gives i32:\n  0\n", "reserved word"),
-            "out of range literal": ("main gives i32:\n  2147483648\n", "outside signed i32"),
+            "out of range literal": ("main gives i64:\n  9223372036854775808\n", "outside signed 64-bit"),
         }
         for name, (source, contains) in cases.items():
             with self.subTest(name=name):

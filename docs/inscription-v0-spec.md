@@ -6,12 +6,14 @@ Inscription v0 is a deterministic, fixed-pattern, phrase-shaped compiler. It is 
 
 - A program is a list of phrase definitions.
 - A phrase definition introduces a callable phrase template with zero or more typed holes.
-- All user-visible values are signed `i32` integers.
-- Comparisons produce internal `i1` values used by conditional value blocks.
-- Every phrase definition returns `i32`.
-- `main gives i32:` must exist, take no holes, and lower to `func.func @main() -> i32`.
-- v0 has no source I/O. For executable fixtures, the only observable result is the LLVM `lli` process exit status.
+- Source-visible scalar types are `i1`, `i32`, and `i64`.
+- Arithmetic operates on numeric values: `i32` and `i64`.
+- Comparisons produce `i1` values and may be used in conditions or returned from phrases.
+- Each phrase block evaluates to a value, which is the phrase result.
+- Library compilation does not require `main`.
+- If `main` exists, it must take no holes. Executable fixtures use `main gives i32:` and observe the LLVM `lli` process exit status.
 - Fixture expected exits must be in `0..255`.
+- v0 has no source I/O.
 
 ## Toolchain contract
 
@@ -37,7 +39,7 @@ lli output.ll
 - Phrase headers end with `:`.
 - Body lines are bare lines without statement terminators.
 - Identifiers match `[a-z][a-z0-9_]*` and cannot be reserved words.
-- Integer literals are base-10 signed i32 literals.
+- Integer literals are base-10 signed 64-bit literals and are typed by context; untyped integer-only arithmetic defaults to `i32`.
 - `zero` is sugar for integer literal `0`.
 - Keywords are fixed English words shown in the grammar.
 
@@ -57,7 +59,9 @@ The template's literal words define the callable surface. Typed holes (`a: i32`,
 max of 7 and 3
 ```
 
-The compiler lowers the example above to a `func.func @max(%..., %...) -> i32` and an `scf.if` result expression.
+The compiler lowers the example above to a `func.func @max(%a: i32, %b: i32) -> i32` and an `scf.if` result expression.
+
+Phrase names are generated from the leading literal words in a phrase definition. v0 has no overloads, so generated phrase names must be unique.
 
 ## Value blocks
 
@@ -81,17 +85,19 @@ Rules:
 
 ## Expressions
 
-Expressions are deterministic and have only integer results:
+Expressions are deterministic and statically typed:
 
 - integer literal: `120`
 - zero literal: `zero`
 - variable reference: `result`
 - phrase call: `max of 7 and 3`
-- binary arithmetic: `plus`, `minus`, `times`
+- binary arithmetic: `plus`, `minus`, `times`, `divided by`
+- parenthesized expression: `(a plus b) times 2`
+- comparison expression: `x is equal to 0`
 
-Precedence is `times` before `plus`/`minus`; operators are left-associative. Parentheses are not part of v0.
+Precedence is `times` and `divided by` before `plus` and `minus`; operators are left-associative. Parentheses override precedence.
 
-Comparisons are used by `when` clauses:
+Comparisons are expressions returning `i1` and are also used by `when` clauses:
 
 - `left is equal to right`
 - `left is not equal to right`
@@ -106,8 +112,11 @@ Comparisons are used by `when` clauses:
 - Parameter names are unique.
 - Calls must match a known phrase template.
 - Variables must be initialized by a phrase hole or prior `let` before use.
-- `main` must exist and take no holes.
-- All holes and return values must be `i32`.
+- If `main` exists, it must take no holes.
+- Types are exactly `i1`, `i32`, and `i64`.
+- Arithmetic requires matching numeric operand types (`i32` or `i64`).
+- Comparisons require matching numeric operand types and return `i1`.
+- Integer literals are coerced to the numeric type required by their context when possible.
 - Conditional value blocks require `otherwise` and lower through `scf.if` results.
 - Unsupported `Function`, `End function`, `Set`, `Return`, `call ... with`, I/O, arrays, floats, pointers, memrefs, structs, proof prose, natural-language requests, and custom dialect syntax are rejected.
 
@@ -119,14 +128,19 @@ The phrase-only v0 emitter uses only:
 builtin.module
 func.func
 func.call
-func.return
+return
 arith.constant
 arith.addi
 arith.subi
 arith.muli
+arith.divsi
 arith.cmpi
 scf.if
 scf.yield
 ```
 
 No memory or storage lowering is permitted: no `memref`, `alloca`, globals, heap objects, stack slots, mutable storage dialects, or `scf.while`.
+
+## Golden conformance suite
+
+The minimum v0 quality bar is the exact-output golden suite in `tests/goldens`. Each `*.ins` source file must compile byte-for-byte to its sibling `*.mlir`; the unit test suite enforces this with unified diffs on mismatch.

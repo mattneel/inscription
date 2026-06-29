@@ -3,8 +3,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal
 
+TypeName = Literal["i1", "i32", "i64"]
 CmpPredicate = Literal["eq", "ne", "slt", "sle", "sgt", "sge"]
-BinOp = Literal["plus", "minus", "times"]
+BinOp = Literal["plus", "minus", "times", "divided by"]
 
 
 @dataclass(frozen=True)
@@ -13,9 +14,16 @@ class Program:
 
 
 @dataclass(frozen=True)
+class Parameter:
+    name: str
+    type_name: TypeName
+
+
+@dataclass(frozen=True)
 class Function:
     name: str
-    params: tuple[str, ...]
+    params: tuple[Parameter, ...]
+    return_type: TypeName
     body: tuple["Stmt", ...]
     line: int
 
@@ -69,7 +77,7 @@ class WhenExpr:
     line: int
 
 
-Expr = Integer | Variable | Binary | Call | WhenExpr
+Expr = Integer | Variable | Binary | Call | Comparison | WhenExpr
 
 
 @dataclass(frozen=True)

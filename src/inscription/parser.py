@@ -3,14 +3,14 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-from .ast import Binary, Call, Comparison, Expr, Function, Integer, Program, ReturnStmt, SetStmt, Variable, WhenCase, WhenExpr
+from .ast import Binary, Call, Comparison, Expr, Function, Integer, Parameter, Program, ReturnStmt, SetStmt, TypeName, Variable, WhenCase, WhenExpr
 from .diagnostics import InscriptionError
 
 NAME_RE = re.compile(r"[a-z][a-z0-9_]*")
-TOKEN_RE = re.compile(r"\s*(-?\d+|[a-z][a-z0-9_]*|,)")
+TOKEN_RE = re.compile(r"\s*(-?\d+|[a-z][a-z0-9_]*|[(),])")
 RESERVED = {
-    "address", "and", "arguments", "array", "be", "call", "do", "else", "end", "equal", "float",
-    "function", "gives", "greater", "i32", "if", "input", "is", "less", "let", "memref", "minus",
+    "address", "and", "arguments", "array", "be", "by", "call", "divided", "do", "else", "end", "equal", "float",
+    "function", "gives", "greater", "i1", "i32", "i64", "if", "input", "is", "less", "let", "memref", "minus",
     "no", "not", "or", "otherwise", "output", "parameters", "pointer", "plus", "print", "return",
     "set", "takes", "than", "then", "times", "to", "when", "while", "with", "zero",
 }
@@ -39,7 +39,7 @@ class Line:
 @dataclass(frozen=True)
 class PhraseHole:
     name: str
-    type_name: str
+    type_name: TypeName
 
 
 PhrasePart = str | PhraseHole
@@ -49,7 +49,7 @@ PhrasePart = str | PhraseHole
 class PhraseTemplate:
     symbol: str
     parts: tuple[PhrasePart, ...]
-    params: tuple[str, ...]
+    params: tuple[Parameter, ...]
     line: int
 
 
@@ -91,9 +91,9 @@ class Parser:
             line = self.lines[index]
             if not self._looks_like_phrase_header(line):
                 raise InscriptionError("expected phrase definition", line.number)
-            template, _return_type = self._parse_phrase_header(line)
+            template, return_type = self._parse_phrase_header(line)
             body, index = self._parse_phrase_body(index + 1, template.symbol, line.number)
-            functions.append(Function(template.symbol, template.params, tuple(body), line.number))
+            functions.append(Function(template.symbol, template.params, return_type, tuple(body), line.number))
         if not functions:
             raise InscriptionError("program must contain at least one phrase definition")
         return Program(tuple(functions))
@@ -101,31 +101,29 @@ class Parser:
     def _looks_like_phrase_header(self, line: Line) -> bool:
         return line.is_header and re.fullmatch(r".+? gives [a-z][a-z0-9_]*", line.text) is not None
 
-    def _parse_phrase_header(self, line: Line) -> tuple[PhraseTemplate, str]:
+    def _parse_phrase_header(self, line: Line) -> tuple[PhraseTemplate, TypeName]:
         match = re.fullmatch(r"(.+?) gives ([a-z][a-z0-9_]*)", line.text)
         if not line.is_header or not match:
             raise InscriptionError("expected phrase definition", line.number)
         phrase_text = match.group(1).strip()
-        return_type = match.group(2)
-        if return_type != "i32":
-            raise InscriptionError("v0 phrase definitions only support i32 return values", line.number)
+        return_type = self._type_name(match.group(2), line.number)
         template = self._parse_phrase_template(phrase_text, line.number)
         return template, return_type
 
     def _parse_phrase_template(self, text: str, line: int) -> PhraseTemplate:
         parts: list[PhrasePart] = []
-        params: list[str] = []
+        params: list[Parameter] = []
+        param_names: set[str] = set()
         pos = 0
         holes = list(re.finditer(r"\b([a-z][a-z0-9_]*):\s*([a-z][a-z0-9_]*)\b", text))
         for match in holes:
             self._append_literal_parts(parts, text[pos : match.start()], line)
             name = self._name(match.group(1), line)
-            type_name = match.group(2)
-            if type_name != "i32":
-                raise InscriptionError("v0 phrase holes only support i32", line)
-            if name in params:
+            type_name = self._type_name(match.group(2), line)
+            if name in param_names:
                 raise InscriptionError(f"duplicate parameter '{name}'", line)
-            params.append(name)
+            param_names.add(name)
+            params.append(Parameter(name, type_name))
             parts.append(PhraseHole(name, type_name))
             pos = match.end()
         self._append_literal_parts(parts, text[pos:], line)
@@ -239,6 +237,11 @@ class Parser:
             raise InscriptionError(f"reserved word '{value}' cannot be an identifier", line)
         return value
 
+    def _type_name(self, value: str, line: int) -> TypeName:
+        if value in {"i1", "i32", "i64"}:
+            return value  # type: ignore[return-value]
+        raise InscriptionError("v0 phrase definitions only support i1, i32, and i64", line)
+
 
 def tokenize(text: str, line: int) -> list[str]:
     tokens: list[str] = []
@@ -251,7 +254,8 @@ def tokenize(text: str, line: int) -> list[str]:
             raise InscriptionError(f"invalid token near '{text[pos:].strip()}'", line)
         token_start = match.start(1)
         token = match.group(1).lower()
-        if tokens and token_start == pos and tokens[-1] != "," and token != ",":
+        punctuation = {",", "(", ")"}
+        if tokens and token_start == pos and tokens[-1] not in punctuation and token not in punctuation:
             raise InscriptionError("missing whitespace between expression tokens", line)
         tokens.append(token)
         pos = match.end()
@@ -261,14 +265,13 @@ def tokenize(text: str, line: int) -> list[str]:
 
 
 def parse_expression(text: str, line: int, phrases: tuple[PhraseTemplate, ...] = ()) -> Expr:
-    parser = ExpressionParser(tokenize(text, line), line, phrases)
-    expr = parser.parse_expression()
-    if not parser.at_end():
-        raise InscriptionError(f"unexpected token '{parser.peek()}' in expression", line)
-    return expr
+    return parse_expression_tokens(tokenize(text, line), line, phrases)
 
 
 def parse_expression_tokens(tokens: list[str], line: int, phrases: tuple[PhraseTemplate, ...] = ()) -> Expr:
+    comparison_index = _top_level_is_index(tokens)
+    if comparison_index is not None:
+        return parse_comparison_tokens(tokens, line, phrases, comparison_index)
     parser = ExpressionParser(tokens, line, phrases)
     expr = parser.parse_expression()
     if not parser.at_end():
@@ -278,10 +281,27 @@ def parse_expression_tokens(tokens: list[str], line: int, phrases: tuple[PhraseT
 
 def parse_comparison(text: str, line: int, phrases: tuple[PhraseTemplate, ...] = ()) -> Comparison:
     tokens = tokenize(text, line)
-    try:
-        is_index = tokens.index("is")
-    except ValueError as exc:
-        raise InscriptionError("comparison must contain 'is'", line) from exc
+    is_index = _top_level_is_index(tokens)
+    if is_index is None:
+        raise InscriptionError("comparison must contain 'is'", line)
+    return parse_comparison_tokens(tokens, line, phrases, is_index)
+
+
+def _top_level_is_index(tokens: list[str]) -> int | None:
+    depth = 0
+    for index, token in enumerate(tokens):
+        if token == "(":
+            depth += 1
+        elif token == ")":
+            depth -= 1
+        elif token == "is" and depth == 0 and index > 0:
+            return index
+    return None
+
+
+def parse_comparison_tokens(
+    tokens: list[str], line: int, phrases: tuple[PhraseTemplate, ...], is_index: int
+) -> Comparison:
     left_tokens = tokens[:is_index]
     rest = tokens[is_index + 1 :]
     if not left_tokens or not rest:
@@ -302,7 +322,7 @@ def parse_comparison(text: str, line: int, phrases: tuple[PhraseTemplate, ...] =
 
 
 class ExpressionParser:
-    PRECEDENCE = {"plus": 10, "minus": 10, "times": 20}
+    PRECEDENCE = {"plus": 10, "minus": 10, "times": 20, "divided by": 20}
 
     def __init__(self, tokens: list[str], line: int, phrases: tuple[PhraseTemplate, ...] = ()):
         self.tokens = tokens
@@ -332,13 +352,28 @@ class ExpressionParser:
             token = self.peek()
             if token in stop or token == ",":
                 break
-            prec = self.PRECEDENCE.get(token or "")
+            operator = self.peek_operator()
+            if operator is None:
+                if token == "divided":
+                    raise InscriptionError("operator 'divided' must be followed by 'by'", self.line)
+                break
+            op, prec, width = operator
             if prec is None or prec < min_prec:
                 break
-            op = self.pop()
+            self.pos += width
             right = self.parse_expression(prec + 1, stop)
             left = Binary(op, left, right, self.line)  # type: ignore[arg-type]
         return left
+
+    def peek_operator(self) -> tuple[str, int, int] | None:
+        token = self.peek()
+        if token == "divided":
+            if self.pos + 1 < len(self.tokens) and self.tokens[self.pos + 1] == "by":
+                return "divided by", self.PRECEDENCE["divided by"], 2
+            return None
+        if token in {"plus", "minus", "times"}:
+            return token, self.PRECEDENCE[token], 1
+        return None
 
     def parse_primary(self, stop: set[str]) -> Expr:
         token = self.peek()
@@ -348,10 +383,17 @@ class ExpressionParser:
         if phrase_call is not None:
             return phrase_call
         token = self.pop()
+        if token == "(":
+            inner = self.parse_expression(stop={")"})
+            if self.at_end() or self.pop() != ")":
+                raise InscriptionError("missing closing ')'", self.line)
+            return inner
+        if token == ")":
+            raise InscriptionError("unexpected token ')' in expression", self.line)
         if re.fullmatch(r"-?\d+", token):
             value = int(token)
-            if not -(2**31) <= value <= 2**31 - 1:
-                raise InscriptionError("integer literal is outside signed i32 range", self.line)
+            if not -(2**63) <= value <= 2**63 - 1:
+                raise InscriptionError("integer literal is outside signed 64-bit range", self.line)
             return Integer(value, self.line)
         if token == "zero":
             return Integer(0, self.line)
@@ -393,7 +435,17 @@ class ExpressionParser:
                 self.pos = end
             else:
                 end = self.pos
-                while end < len(self.tokens) and self.tokens[end] not in stop and self.tokens[end] != ",":
+                depth = 0
+                while end < len(self.tokens):
+                    token = self.tokens[end]
+                    if token == "(":
+                        depth += 1
+                    elif token == ")":
+                        if depth == 0:
+                            break
+                        depth -= 1
+                    elif depth == 0 and (token in stop or token == ","):
+                        break
                     end += 1
                 arg_tokens = self.tokens[self.pos:end]
                 self.pos = end
@@ -414,7 +466,17 @@ class ExpressionParser:
     def _find_literal_sequence(self, literals: tuple[str, ...], start: int) -> int | None:
         if not literals:
             return None
+        depth = 0
         for index in range(start, len(self.tokens) - len(literals) + 1):
+            token = self.tokens[index]
+            if token == "(":
+                depth += 1
+                continue
+            if token == ")":
+                depth -= 1
+                continue
+            if depth != 0:
+                continue
             if tuple(self.tokens[index : index + len(literals)]) == literals:
                 return index
         return None
