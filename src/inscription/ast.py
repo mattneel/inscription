@@ -55,7 +55,21 @@ class Comparison:
     line: int
 
 
-Expr = Integer | Variable | Binary | Call
+@dataclass(frozen=True)
+class WhenCase:
+    expr: "Expr"
+    condition: Comparison
+    line: int
+
+
+@dataclass(frozen=True)
+class WhenExpr:
+    cases: tuple[WhenCase, ...]
+    otherwise: "Expr"
+    line: int
+
+
+Expr = Integer | Variable | Binary | Call | WhenExpr
 
 
 @dataclass(frozen=True)
@@ -66,24 +80,9 @@ class SetStmt:
 
 
 @dataclass(frozen=True)
-class IfStmt:
-    condition: Comparison
-    then_body: tuple["Stmt", ...]
-    else_body: tuple["Stmt", ...]
-    line: int
-
-
-@dataclass(frozen=True)
-class WhileStmt:
-    condition: Comparison
-    body: tuple["Stmt", ...]
-    line: int
-
-
-@dataclass(frozen=True)
 class ReturnStmt:
     expr: Expr
     line: int
 
 
-Stmt = SetStmt | IfStmt | WhileStmt | ReturnStmt
+Stmt = SetStmt | ReturnStmt

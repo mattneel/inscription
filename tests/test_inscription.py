@@ -65,7 +65,7 @@ class CompilerTests(unittest.TestCase):
         )
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertIn("\x1b[", proc.stdout)
-        self.assertIn("Function", proc.stdout)
+        self.assertIn("gives", proc.stdout)
         self.assertEqual(proc.stderr, "")
 
     @unittest.skipUnless(importlib.util.find_spec("pygments"), "Pygments is not installed")
@@ -96,38 +96,72 @@ class CompilerTests(unittest.TestCase):
             self.assertEqual(proc.stdout, "")
             html = output.read_text()
         self.assertIn("<html", html.lower())
-        self.assertIn("Function", html)
+        self.assertIn("gives", html)
         self.assertIn("highlight", html)
 
-    def test_emits_required_core_ops_without_memory_or_custom_dialects(self):
-        mlir = compile_source(self.fixture("while_factorial.ins"))
+    def test_phrase_call_lowers_to_func_call(self):
+        mlir = compile_source(self.fixture("add.ins"))
+        self.assertIn("func.func @add", mlir)
         self.assertIn("func.func @main() -> i32", mlir)
-        self.assertIn("scf.while", mlir)
-        self.assertIn("arith.muli", mlir)
-        forbidden = ["memref", "alloca", "llvm.alloca", "global", "store", "load"]
-        for needle in forbidden:
-            self.assertNotIn(needle, mlir)
+        self.assertIn("func.call @add", mlir)
+        self.assertIn("arith.addi", mlir)
 
-    def test_if_joins_lower_through_scf_if_results(self):
-        mlir = compile_source(self.fixture("max_call.ins"))
+    def test_value_block_lowers_to_scf_if_result(self):
+        mlir = compile_source(self.fixture("phrase_max.ins"))
+        self.assertIn("func.func @max", mlir)
+        self.assertIn("arith.cmpi sgt", mlir)
         self.assertRegex(mlir, r"%v\d+ = scf\.if %v\d+ -> \(i32\)")
         self.assertIn("scf.yield", mlir)
 
-    def test_while_reassignment_lowers_as_loop_carried_values(self):
-        mlir = compile_source(self.fixture("while_factorial.ins"))
-        self.assertRegex(mlir, r"%v\d+:2 = scf\.while \(")
-        self.assertIn("scf.condition", mlir)
-        self.assertIn("scf.yield", mlir)
+    def test_multiple_when_lines_lower_to_nested_scf_if_results(self):
+        mlir = compile_source(self.fixture("clamp.ins"))
+        self.assertIn("func.func @clamp", mlir)
+        self.assertEqual(mlir.count("scf.if"), 2)
+        try:
+            result = run_source(self.fixture("clamp.ins"))
+        except ToolchainError as exc:
+            self.skipTest(str(exc))
+        self.assertEqual(result.exit_status, 255)
 
+    def test_phrase_body_supports_let_and_word_zero(self):
+        source = """absolute value of n: i32 gives i32:
+  let flipped be zero minus n
+  flipped when n is less than zero
+  otherwise n
+
+main gives i32:
+  absolute value of -5
+"""
+        try:
+            result = run_source(source)
+        except ToolchainError as exc:
+            self.skipTest(str(exc))
+        self.assertEqual(result.exit_status, 5)
+
+    def test_recursive_phrase_call(self):
+        mlir = compile_source(self.fixture("recursive_factorial.ins"))
+        self.assertIn("func.call @factorial", mlir)
+        try:
+            result = run_source(self.fixture("recursive_factorial.ins"))
+        except ToolchainError as exc:
+            self.skipTest(str(exc))
+        self.assertEqual(result.exit_status, 120)
+
+    def test_emits_required_core_ops_without_memory_or_custom_dialects(self):
+        mlir = compile_source(self.fixture("phrase_max.ins"))
+        self.assertIn("func.func @main() -> i32", mlir)
+        self.assertIn("arith.cmpi", mlir)
+        self.assertIn("scf.if", mlir)
+        forbidden = ["memref", "alloca", "llvm.alloca", "global", "store", "load", "scf.while"]
+        for needle in forbidden:
+            self.assertNotIn(needle, mlir)
 
     def test_valid_identifier_cannot_collide_with_generated_ssa_names(self):
-        source = """Function echo takes v0.
-Return v0.
-End function.
+        source = """echo of v0: i32 gives i32:
+  v0
 
-Function main takes no parameters.
-Return call echo with 7.
-End function.
+main gives i32:
+  echo of 7
 """
         mlir = compile_source(source)
         self.assertIn("func.func @echo(%v0: i32) -> i32", mlir)
@@ -136,115 +170,6 @@ End function.
         except ToolchainError as exc:
             self.skipTest(str(exc))
         self.assertEqual(result.exit_status, 7)
-
-    def test_tail_expression_is_implicit_return_and_can_close_function(self):
-        source = """Function add takes a and b.
-a plus b.
-
-Function main takes no parameters.
-call add with 2 and 3.
-"""
-        mlir = compile_source(source)
-        self.assertIn("func.func @add", mlir)
-        self.assertIn("func.return", mlir)
-        try:
-            result = run_source(source)
-        except ToolchainError as exc:
-            self.skipTest(str(exc))
-        self.assertEqual(result.exit_status, 5)
-
-    def test_explicit_return_can_close_function_without_end_function(self):
-        source = """Function one takes no parameters.
-Return 1.
-
-Function main takes no parameters.
-Return call one with no arguments.
-"""
-        try:
-            result = run_source(source)
-        except ToolchainError as exc:
-            self.skipTest(str(exc))
-        self.assertEqual(result.exit_status, 1)
-
-    def test_implicit_return_can_follow_ordinary_statements(self):
-        source = """Function main takes no parameters.
-Set x to 2.
-x plus 3.
-"""
-        try:
-            result = run_source(source)
-        except ToolchainError as exc:
-            self.skipTest(str(exc))
-        self.assertEqual(result.exit_status, 5)
-
-    def test_implicit_return_must_be_final_function_sentence(self):
-        self.assertCompileError(
-            "Function main takes no parameters.\n1.\nSet x to 2.\n",
-            "return must be the final function sentence",
-        )
-
-    def test_implicit_return_does_not_apply_inside_blocks(self):
-        self.assertCompileError(
-            "Function main takes no parameters.\nIf 1 is equal to 1 then.\n1.\nOtherwise.\n2.\nEnd if.\nEnd function.\n",
-            "unsupported or malformed",
-        )
-
-    def test_unreturned_function_still_needs_explicit_end_or_tail_return(self):
-        self.assertCompileError(
-            "Function f takes no parameters.\nSet x to 1.\nFunction main takes no parameters.\n0.\n",
-            "missing 'End function.' or a final return expression",
-        )
-
-    def test_empty_while_body_is_rejected_before_mlir_verification(self):
-        self.assertCompileError(
-            "Function main takes no parameters.\nSet n to 1.\nWhile n is greater than 0 do.\nEnd while.\nReturn n.\nEnd function.\n",
-            "while body must reassign",
-        )
-
-    def test_name_list_matches_frozen_grammar(self):
-        valid = """Function f takes a, b, and c.
-Return a plus b plus c.
-End function.
-Function main takes no parameters.
-Return call f with 1, 2, and 3.
-End function.
-"""
-        self.assertIn("func.func @f", compile_source(valid))
-        for source in (
-            "Function f takes a and b and c.\nReturn a.\nEnd function.\nFunction main takes no parameters.\nReturn call f with 1, 2, and 3.\nEnd function.\n",
-            "Function f takes a, b and c.\nReturn a.\nEnd function.\nFunction main takes no parameters.\nReturn call f with 1, 2, and 3.\nEnd function.\n",
-            "Function f takes a, and b.\nReturn a.\nEnd function.\nFunction main takes no parameters.\nReturn call f with 1 and 2.\nEnd function.\n",
-            "Function f takes a, b, and c, d.\nReturn a.\nEnd function.\nFunction main takes no parameters.\nReturn call f with 1, 2, 3, and 4.\nEnd function.\n",
-            "Function f takes a, b, and c, and d.\nReturn a.\nEnd function.\nFunction main takes no parameters.\nReturn call f with 1, 2, 3, and 4.\nEnd function.\n",
-        ):
-            with self.subTest(source=source):
-                self.assertCompileError(source, "malformed name list")
-
-    def test_call_argument_list_matches_frozen_grammar(self):
-        valid = """Function f takes a, b, and c.
-Return a plus b plus c.
-End function.
-Function main takes no parameters.
-Return call f with 1, 2, and 3.
-End function.
-"""
-        try:
-            result = run_source(valid)
-        except ToolchainError as exc:
-            self.skipTest(str(exc))
-        self.assertEqual(result.exit_status, 6)
-        for source in (
-            "Function f takes a and b.\nReturn a plus b.\nEnd function.\nFunction main takes no parameters.\nReturn call f with 1, and 2.\nEnd function.\n",
-            "Function f takes a, b, and c.\nReturn a plus b plus c.\nEnd function.\nFunction main takes no parameters.\nReturn call f with 1 and 2 and 3.\nEnd function.\n",
-        ):
-            with self.subTest(source=source):
-                self.assertCompileError(source, "malformed call argument list")
-
-    def test_block_terminators_are_case_sensitive(self):
-        self.assertCompileError(
-            "Function main takes no parameters.\nReturn 0.\nend function.\n",
-            "unsupported or malformed",
-        )
 
     def test_output_is_deterministic(self):
         source = self.fixture("recursive_factorial.ins")
@@ -274,79 +199,66 @@ End function.
             compile_source(source)
         self.assertIn(contains, str(ctx.exception))
 
+    def test_phrase_definitions_reject_unsupported_types(self):
+        self.assertCompileError(
+            "identity of x: f64 gives i32:\n  x\n\nmain gives i32:\n  0\n",
+            "only support i32",
+        )
+        self.assertCompileError(
+            "identity of x: i32 gives f64:\n  x\n\nmain gives i32:\n  0\n",
+            "only support i32 return",
+        )
+
+    def test_value_block_requires_otherwise_after_when(self):
+        self.assertCompileError(
+            "max of a: i32 and b: i32 gives i32:\n  a when a is greater than b\n\nmain gives i32:\n  max of 1 and 2\n",
+            "requires an otherwise",
+        )
+
+    def test_let_bindings_must_precede_value_block(self):
+        self.assertCompileError(
+            "main gives i32:\n  1\n  let x be 2\n",
+            "let bindings must appear before",
+        )
+
+    def test_legacy_statement_ceremony_is_rejected(self):
+        self.assertCompileError(
+            "Function main takes no parameters.\nReturn 0.\nEnd function.\n",
+            "expected phrase definition",
+        )
+        self.assertCompileError("main gives i32:\n  Return 0\n", "invalid token")
+        self.assertCompileError(
+            "add a: i32 and b: i32 gives i32:\n  a plus b\n\nmain gives i32:\n  call add with 1 and 2\n",
+            "unexpected token 'call'",
+        )
+        self.assertCompileError("main gives i32:\n  Set result to 1\n", "invalid token")
+
     def test_negative_diagnostics(self):
         cases = {
-            "malformed sentence": ("Please add two numbers.\n", "expected function definition"),
-            "unsupported free prose": (
-                "Function main takes no parameters.\nPlease understand this naturally.\nReturn 0.\nEnd function.\n",
-                "unsupported or malformed",
-            ),
-            "undefined variable": (
-                "Function main takes no parameters.\nReturn missing.\nEnd function.\n",
-                "used before initialization",
-            ),
-            "duplicate function": (
-                "Function main takes no parameters.\nReturn 0.\nEnd function.\nFunction main takes no parameters.\nReturn 0.\nEnd function.\n",
-                "duplicate function",
-            ),
+            "malformed top level": ("Please add two numbers\n", "expected phrase definition"),
+            "unsupported free prose": ("main gives i32:\n  Please understand this naturally\n", "invalid token"),
+            "undefined variable": ("main gives i32:\n  missing\n", "used before initialization"),
+            "duplicate phrase": ("main gives i32:\n  0\nmain gives i32:\n  0\n", "duplicate phrase"),
             "duplicate parameter": (
-                "Function f takes a and a.\nReturn a.\nEnd function.\nFunction main takes no parameters.\nReturn call f with 1 and 2.\nEnd function.\n",
+                "add a: i32 and a: i32 gives i32:\n  a\n\nmain gives i32:\n  add 1 and 2\n",
                 "duplicate parameter",
             ),
-            "wrong arity": (
-                "Function f takes a.\nReturn a.\nEnd function.\nFunction main takes no parameters.\nReturn call f with 1 and 2.\nEnd function.\n",
-                "expects 1 argument",
-            ),
-            "unknown function": (
-                "Function main takes no parameters.\nReturn call nope with no arguments.\nEnd function.\n",
-                "unknown function",
-            ),
-            "missing main": ("Function f takes no parameters.\nReturn 0.\nEnd function.\n", "must define main"),
-            "invalid main": ("Function main takes argc.\nReturn argc.\nEnd function.\n", "main must take no parameters"),
-            "unsupported operator": (
-                "Function main takes no parameters.\nReturn 4 divided by 2.\nEnd function.\n",
-                "unexpected token",
-            ),
-            "glued plus operator": (
-                "Function main takes no parameters.\nReturn 1plus 2.\nEnd function.\n",
+            "missing main": ("one gives i32:\n  1\n", "must define main"),
+            "invalid main": ("main of argc: i32 gives i32:\n  argc\n", "main must take no parameters"),
+            "unsupported operator": ("main gives i32:\n  4 divided by 2\n", "unexpected token"),
+            "glued plus operator": ("main gives i32:\n  1plus 2\n", "missing whitespace"),
+            "glued times operator": ("main gives i32:\n  3times 2\n", "missing whitespace"),
+            "glued phrase connector": (
+                "add a: i32 and b: i32 gives i32:\n  a plus b\n\nmain gives i32:\n  add 2and 3\n",
                 "missing whitespace",
             ),
-            "glued times operator": (
-                "Function main takes no parameters.\nReturn 3times 2.\nEnd function.\n",
-                "missing whitespace",
-            ),
-            "glued call separator": (
-                "Function add takes a and b.\nReturn a plus b.\nEnd function.\nFunction main takes no parameters.\nReturn call add with 2and 3.\nEnd function.\n",
-                "missing whitespace",
-            ),
-            "unsupported io": (
-                "Function main takes no parameters.\nPrint 1.\nReturn 0.\nEnd function.\n",
-                "unsupported or malformed",
-            ),
-            "arrays": (
-                "Function main takes no parameters.\nSet xs to array of 1.\nReturn 0.\nEnd function.\n",
-                "unexpected token",
-            ),
-            "floats": (
-                "Function main takes no parameters.\nReturn 1.5.\nEnd function.\n",
-                "invalid token",
-            ),
-            "pointers": (
-                "Function main takes no parameters.\nSet pointer to address.\nReturn pointer.\nEnd function.\n",
-                "reserved word",
-            ),
-            "memrefs": (
-                "Function main takes no parameters.\nSet memref to 1.\nReturn memref.\nEnd function.\n",
-                "reserved word",
-            ),
-            "reserved arguments keyword": (
-                "Function echo takes arguments.\nReturn arguments.\nEnd function.\nFunction main takes no parameters.\nReturn call echo with 1.\nEnd function.\n",
-                "reserved word",
-            ),
-            "out of range literal": (
-                "Function main takes no parameters.\nReturn 2147483648.\nEnd function.\n",
-                "outside signed i32",
-            ),
+            "unsupported io": ("main gives i32:\n  print 1\n", "unexpected token"),
+            "arrays": ("main gives i32:\n  array of 1\n", "unexpected token"),
+            "floats": ("main gives i32:\n  1.5\n", "invalid token"),
+            "pointers": ("main gives i32:\n  pointer\n", "unexpected token"),
+            "memrefs": ("main gives i32:\n  memref\n", "unexpected token"),
+            "reserved hole name": ("echo of let: i32 gives i32:\n  let\n\nmain gives i32:\n  0\n", "reserved word"),
+            "out of range literal": ("main gives i32:\n  2147483648\n", "outside signed i32"),
         }
         for name, (source, contains) in cases.items():
             with self.subTest(name=name):

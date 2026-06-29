@@ -1,7 +1,7 @@
 {
+  "absolute_value.ins": 5,
   "add.ins": 5,
-  "implicit_add.ins": 5,
-  "max_call.ins": 7,
-  "recursive_factorial.ins": 120,
-  "while_factorial.ins": 120
+  "clamp.ins": 255,
+  "phrase_max.ins": 7,
+  "recursive_factorial.ins": 120
 }

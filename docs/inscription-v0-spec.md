@@ -1,14 +1,15 @@
 # Inscription v0 specification
 
-Inscription v0 is a deterministic, fixed-pattern, plain-text compiler. It is prose-shaped, but it is not a natural-language system: every accepted source line matches one grammar production exactly. Unsupported prose is rejected with a diagnostic.
+Inscription v0 is a deterministic, fixed-pattern, phrase-shaped compiler. It is prose-like, but it is not a natural-language system: every accepted source line matches one grammar production exactly. Unsupported prose is rejected with a diagnostic.
 
 ## Execution model
 
-- A program is a list of function definitions.
+- A program is a list of phrase definitions.
+- A phrase definition introduces a callable phrase template with zero or more typed holes.
 - All user-visible values are signed `i32` integers.
-- Comparisons produce internal `i1` values used only by `if` and `while`.
-- Every function returns `i32`.
-- `main` must exist, take no parameters, and lower to `func.func @main() -> i32`.
+- Comparisons produce internal `i1` values used by conditional value blocks.
+- Every phrase definition returns `i32`.
+- `main gives i32:` must exist, take no holes, and lower to `func.func @main() -> i32`.
 - v0 has no source I/O. For executable fixtures, the only observable result is the LLVM `lli` process exit status.
 - Fixture expected exits must be in `0..255`.
 
@@ -33,39 +34,64 @@ lli output.ll
 ## Lexical rules
 
 - Blank lines are ignored.
-- Every nonblank source line ends with `.`.
+- Phrase headers end with `:`.
+- Body lines are bare lines without statement terminators.
 - Identifiers match `[a-z][a-z0-9_]*` and cannot be reserved words.
 - Integer literals are base-10 signed i32 literals.
+- `zero` is sugar for integer literal `0`.
 - Keywords are fixed English words shown in the grammar.
 
-## Statements
+## Phrase definitions
 
-- `Function name takes no parameters.`
-- `Function name takes a and b.`
-- `Function name takes a, b, and c.`
-- `End function.` remains valid, but can be omitted when a function's final sentence is an explicit `Return ...` or a top-level implicit return expression.
-- `Set name to expression.`
-- `If comparison then.` ... `Otherwise.` ... `End if.`
-- `While comparison do.` ... `End while.`
-- `Return expression.`
-- top-level tail expression sugar: `expression.`
+A phrase definition has a template and a value block:
 
-`Return` is a tail statement for the function body in v0. A bare expression as the final top-level function sentence is sugar for `Return expression.` and closes the function at EOF or immediately before the next `Function` header. Branching return-code programs use `Set result ...` in branches and a single final `Return result.` or final `result.` expression after `End if.`
+```text
+max of a: i32 and b: i32 gives i32:
+  a when a is greater than b
+  otherwise b
+```
+
+The template's literal words define the callable surface. Typed holes (`a: i32`, `b: i32`) define parameters. A call fills those holes with expressions:
+
+```text
+max of 7 and 3
+```
+
+The compiler lowers the example above to a `func.func @max(%..., %...) -> i32` and an `scf.if` result expression.
+
+## Value blocks
+
+An Inscription block evaluates to a value. v0 supports:
+
+```text
+expression
+expression when condition
+otherwise expression
+let name be expression
+```
+
+Rules:
+
+- A block may contain zero or more `let` bindings before its value lines.
+- A block with one unconditional expression evaluates to that expression.
+- A block with `when` lines must end with exactly one `otherwise` line.
+- `otherwise` is the fallback value.
+- `let` bindings cannot appear after value lines.
+- There is no statement-level `return` in v0.
 
 ## Expressions
 
 Expressions are deterministic and have only integer results:
 
 - integer literal: `120`
+- zero literal: `zero`
 - variable reference: `result`
-- function call: `call add with 2 and 3`
-- three-or-more names and call arguments use comma-separated or Oxford-comma forms, not repeated bare `and`
-- function call with no arguments: `call main with no arguments`
+- phrase call: `max of 7 and 3`
 - binary arithmetic: `plus`, `minus`, `times`
 
 Precedence is `times` before `plus`/`minus`; operators are left-associative. Parentheses are not part of v0.
 
-Comparisons are used only by `if` and `while`:
+Comparisons are used by `when` clauses:
 
 - `left is equal to right`
 - `left is not equal to right`
@@ -76,20 +102,18 @@ Comparisons are used only by `if` and `while`:
 
 ## Semantic rules
 
-- Function names are unique.
+- Generated phrase names are unique; v0 has no overloads.
 - Parameter names are unique.
-- Calls must target known functions with the exact arity.
-- Variables must be initialized before use.
-- `if` requires `Otherwise` and joins variables through `scf.if` results.
-- Variables assigned inside `while` must be initialized before the loop and lower as loop-carried SSA values through `scf.while`.
-- New variables cannot be introduced only inside a loop.
-- v0 has no block-local scope and no early `Return` inside `if`, `otherwise`, or `while` blocks.
-- Implicit return expressions are accepted only at top-level function scope and must be the final function sentence.
-- Unsupported I/O, arrays, floats, pointers, memrefs, structs, proof prose, natural-language requests, and custom dialect syntax are rejected.
+- Calls must match a known phrase template.
+- Variables must be initialized by a phrase hole or prior `let` before use.
+- `main` must exist and take no holes.
+- All holes and return values must be `i32`.
+- Conditional value blocks require `otherwise` and lower through `scf.if` results.
+- Unsupported `Function`, `End function`, `Set`, `Return`, `call ... with`, I/O, arrays, floats, pointers, memrefs, structs, proof prose, natural-language requests, and custom dialect syntax are rejected.
 
 ## MLIR subset
 
-The emitter uses only:
+The phrase-only v0 emitter uses only:
 
 ```text
 builtin.module
@@ -102,9 +126,7 @@ arith.subi
 arith.muli
 arith.cmpi
 scf.if
-scf.while
-scf.condition
 scf.yield
 ```
 
-No memory or storage lowering is permitted: no `memref`, `alloca`, globals, heap objects, stack slots, or mutable storage dialects.
+No memory or storage lowering is permitted: no `memref`, `alloca`, globals, heap objects, stack slots, mutable storage dialects, or `scf.while`.

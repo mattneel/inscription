@@ -30,27 +30,19 @@ def _make_lexer():
         tokens = {
             "root": [
                 (r"\s+", Text.Whitespace),
-                (r"(Function)(\s+)([a-z][a-z0-9_]*)(\s+)(takes)\b", bygroups(
-                    Keyword.Declaration,
+                (r"([a-z][a-z0-9_]*)(:)(\s*)(i32)\b", bygroups(
+                    Name.Variable,
+                    Punctuation,
                     Text.Whitespace,
-                    Name.Function,
-                    Text.Whitespace,
-                    Keyword,
+                    Keyword.Type,
                 )),
-                (r"(call)(\s+)([a-z][a-z0-9_]*)(\s+)(with)\b", bygroups(
-                    Keyword,
-                    Text.Whitespace,
-                    Name.Function,
-                    Text.Whitespace,
-                    Keyword,
-                )),
-                (r"\b(Set|Return|If|Otherwise|While|End)\b", Keyword),
-                (r"\b(function|takes|then|do|to|with|no|parameters|arguments)\b", Keyword),
+                (r"\b(gives)(\s+)(i32)\b", bygroups(Keyword.Declaration, Text.Whitespace, Keyword.Type)),
+                (r"\b(let|be|when|otherwise|zero)\b", Keyword),
                 (r"\b(plus|minus|times)\b", Operator.Word),
                 (r"\b(is|not|equal|less|greater|than|or)\b", Operator.Word),
                 (r"\band\b", Keyword),
                 (r"-?\d+", Number.Integer),
-                (r"[,.]", Punctuation),
+                (r"[:,]", Punctuation),
                 (r"[a-z][a-z0-9_]*", Name.Variable),
                 (r".", Error),
             ]
