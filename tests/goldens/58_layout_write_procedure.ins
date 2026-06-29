@@ -1,0 +1,12 @@
+packed layout record Pair:
+  left: u8
+  right: u8
+
+write pair pair: Pair into bytes: buffer of 2 u8 does:
+  write pair into bytes at 0
+
+main gives i32:
+  let bytes be buffer of 2 u8 filled with 0
+  let pair be Pair with left be 5 and right be 6
+  write pair pair into bytes
+  (bytes at 0 as i32) plus (bytes at 1 as i32)

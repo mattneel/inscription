@@ -24,12 +24,17 @@ from .ast import (
     Function,
     IfStmt,
     Integer,
+    AlignmentOfType,
     LengthOf,
+    LayoutRead,
+    LayoutWriteStmt,
+    OffsetOfField,
     Program,
     RecordConstructor,
     RecordType,
     ReturnStmt,
     SetStmt,
+    SizeOfType,
     Stmt,
     TypeName,
     Unary,
@@ -42,10 +47,12 @@ from .semantic import (
     ValueType,
     all_ones_constant_value,
     analyze,
+    byte_width,
     function_table,
     infer_comparison_operand_type,
     infer_expr_type,
     is_signed_type,
+    layout_info,
     memref_type,
     mlir_type,
     record_table,
@@ -240,6 +247,9 @@ class MlirEmitter:
         if isinstance(stmt, FieldAssignStmt):
             self.emit_field_assign(stmt, env, lines, indent)
             return
+        if isinstance(stmt, LayoutWriteStmt):
+            self.emit_layout_write(stmt, env, lines, indent)
+            return
         if isinstance(stmt, CallStmt):
             self.emit_call_stmt(stmt, env, lines, indent)
             return
@@ -281,10 +291,18 @@ class MlirEmitter:
         if isinstance(expr, LengthOf):
             buffer = self.require_buffer(env[expr.name])
             return self.emit_integer(buffer.buffer_type.length, "i32", lines, indent)
+        if isinstance(expr, SizeOfType):
+            return self.emit_integer(layout_info(self.records[expr.type_name]).size, "i32", lines, indent)
+        if isinstance(expr, AlignmentOfType):
+            return self.emit_integer(layout_info(self.records[expr.type_name]).alignment, "i32", lines, indent)
+        if isinstance(expr, OffsetOfField):
+            return self.emit_integer(layout_info(self.records[expr.type_name]).field_offsets[expr.field], "i32", lines, indent)
         if isinstance(expr, FieldAccess):
             return self.require_record(env[expr.name]).fields[expr.field]
         if isinstance(expr, RecordConstructor):
             raise AssertionError("record constructor used where scalar value was expected")  # pragma: no cover
+        if isinstance(expr, LayoutRead):
+            raise AssertionError("layout read used where scalar value was expected")  # pragma: no cover
         if isinstance(expr, Unary):
             return self.emit_unary(expr, env, lines, indent, type_name)
         if isinstance(expr, Cast):
@@ -424,6 +442,103 @@ class MlirEmitter:
         index = self.emit_index(stmt.index, env, lines, indent)
         lines.append(f"{indent}memref.store {value.name}, {buffer.name}[{index}] : {memref_type(buffer.buffer_type)}")
 
+    def emit_layout_read(
+        self,
+        expr: LayoutRead,
+        env: dict[str, EnvValue],
+        lines: list[str],
+        indent: str,
+        *,
+        expected: RecordType,
+    ) -> RecordStorage:
+        record = self.records[expected.name]
+        info = layout_info(record)
+        buffer = self.require_buffer(env[expr.buffer_name])
+        base = self.emit_index(expr.index, env, lines, indent)
+        fields: dict[str, Value] = {}
+        for field in record.fields:
+            assert isinstance(field.type_name, str)
+            offset = info.field_offsets[field.name]
+            fields[field.name] = self.emit_layout_field_read(buffer, base, offset, field.type_name, lines, indent)
+        return RecordStorage(expected, fields)
+
+    def emit_layout_field_read(
+        self,
+        buffer: BufferStorage,
+        base: str,
+        offset: int,
+        type_name: TypeName,
+        lines: list[str],
+        indent: str,
+    ) -> Value:
+        width = byte_width(type_name)
+        result: Value | None = None
+        for byte_index in range(width):
+            index_value = self.emit_index_offset(base, offset + byte_index, lines, indent)
+            byte = Value(self.fresh(), "u8")
+            lines.append(f"{indent}{byte.name} = memref.load {buffer.name}[{index_value}] : {memref_type(buffer.buffer_type)}")
+            if width == 1:
+                return Value(byte.name, type_name)
+            extended = Value(self.fresh(), type_name)
+            lines.append(f"{indent}{extended.name} = arith.extui {byte.name} : i8 to {mlir_type(type_name)}")
+            part = extended
+            if byte_index:
+                shift = self.emit_integer(8 * byte_index, type_name, lines, indent)
+                shifted = Value(self.fresh(), type_name)
+                lines.append(f"{indent}{shifted.name} = arith.shli {extended.name}, {shift.name} : {mlir_type(type_name)}")
+                part = shifted
+            if result is None:
+                result = part
+            else:
+                combined = Value(self.fresh(), type_name)
+                lines.append(f"{indent}{combined.name} = arith.ori {result.name}, {part.name} : {mlir_type(type_name)}")
+                result = combined
+        assert result is not None
+        return result
+
+    def emit_layout_write(self, stmt: LayoutWriteStmt, env: dict[str, EnvValue], lines: list[str], indent: str) -> None:
+        record = self.require_record(env[stmt.record_name])
+        record_decl = self.records[record.record_type.name]
+        info = layout_info(record_decl)
+        buffer = self.require_buffer(env[stmt.buffer_name])
+        base = self.emit_index(stmt.index, env, lines, indent)
+        field_bytes: dict[int, tuple[str, int]] = {}
+        for field in record_decl.fields:
+            assert isinstance(field.type_name, str)
+            field_offset = info.field_offsets[field.name]
+            for byte_index in range(byte_width(field.type_name)):
+                field_bytes[field_offset + byte_index] = (field.name, byte_index)
+        for byte_offset in range(info.size):
+            index_value = self.emit_index_offset(base, byte_offset, lines, indent)
+            field_byte = field_bytes.get(byte_offset)
+            if field_byte is None:
+                value = self.emit_integer(0, "u8", lines, indent)
+            else:
+                field_name, byte_index = field_byte
+                value = self.emit_layout_field_byte(record.fields[field_name], byte_index, lines, indent)
+            lines.append(f"{indent}memref.store {value.name}, {buffer.name}[{index_value}] : {memref_type(buffer.buffer_type)}")
+
+    def emit_layout_field_byte(self, value: Value, byte_index: int, lines: list[str], indent: str) -> Value:
+        if byte_index == 0 and byte_width(value.type_name) == 1:
+            return Value(value.name, "u8")
+        source = value
+        if byte_index:
+            shift = self.emit_integer(8 * byte_index, value.type_name, lines, indent)
+            shifted = Value(self.fresh(), value.type_name)
+            lines.append(f"{indent}{shifted.name} = arith.shrui {value.name}, {shift.name} : {mlir_type(value.type_name)}")
+            source = shifted
+        out = Value(self.fresh(), "u8")
+        lines.append(f"{indent}{out.name} = arith.trunci {source.name} : {mlir_type(source.type_name)} to i8")
+        return out
+
+    def emit_index_offset(self, base: str, offset: int, lines: list[str], indent: str) -> str:
+        if offset == 0:
+            return base
+        offset_value = self.emit_index_constant(offset, lines, indent)
+        out = self.fresh()
+        lines.append(f"{indent}{out} = arith.addi {base}, {offset_value} : index")
+        return out
+
     def emit_record_expr(
         self,
         expr: Expr,
@@ -443,6 +558,8 @@ class MlirEmitter:
                 assert isinstance(field.type_name, str)
                 fields[field.name] = self.emit_expr(initializer.expr, env, lines, indent, expected=field.type_name)
             return RecordStorage(expected, fields)
+        if isinstance(expr, LayoutRead):
+            return self.emit_layout_read(expr, env, lines, indent, expected=expected)
         raise AssertionError("unsupported record expression")  # pragma: no cover
 
     def emit_field_assign(self, stmt: FieldAssignStmt, env: dict[str, EnvValue], lines: list[str], indent: str) -> None:

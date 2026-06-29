@@ -24,13 +24,19 @@ from .ast import (
     Function,
     IfStmt,
     Integer,
+    AlignmentOfType,
     LengthOf,
+    LayoutInfo,
+    LayoutRead,
+    LayoutWriteStmt,
+    OffsetOfField,
     Program,
     RecordConstructor,
     RecordDecl,
     RecordType,
     ReturnStmt,
     SetStmt,
+    SizeOfType,
     TypeName,
     Unary,
     ValueType,
@@ -95,17 +101,25 @@ def record_table(program: Program) -> dict[str, RecordDecl]:
         if record.name in records:
             raise InscriptionError(f"record {record.name} is already defined", record.line)
         if not record.fields:
-            raise InscriptionError(f"record {record.name} must declare at least one field", record.line)
+            prefix = "record" if record.layout_kind == "value" else "layout record"
+            raise InscriptionError(f"{prefix} {record.name} must declare at least one field", record.line)
         seen_fields: set[str] = set()
         for field in record.fields:
             if field.name in seen_fields:
-                raise InscriptionError(f"record {record.name} has duplicate field {field.name}", field.line)
+                prefix = "record" if record.layout_kind == "value" else "layout record"
+                raise InscriptionError(f"{prefix} {record.name} has duplicate field {field.name}", field.line)
             seen_fields.add(field.name)
-            if not isinstance(field.type_name, str) or field.type_name not in SCALAR_TYPES:
+            if record.layout_kind == "value":
+                if not isinstance(field.type_name, str) or field.type_name not in SCALAR_TYPES:
+                    raise InscriptionError(
+                        f"record fields must be scalar types, got {format_type(field.type_name)}", field.line
+                    )
+            elif not isinstance(field.type_name, str) or field.type_name not in INTEGER_TYPES:
                 raise InscriptionError(
-                    f"record fields must be scalar types, got {format_type(field.type_name)}", field.line
+                    f"layout record fields must be integer types, got {format_type(field.type_name)}", field.line
                 )
-        records[record.name] = record
+        layout_info = compute_layout_info(record) if record.layout_kind != "value" else None
+        records[record.name] = RecordDecl(record.name, record.fields, record.line, record.layout_kind, layout_info)
     return records
 
 
@@ -151,6 +165,39 @@ def is_signed_type(type_name: TypeName) -> bool:
 
 def type_width(type_name: TypeName) -> int:
     return TYPE_WIDTHS[type_name]
+
+
+def byte_width(type_name: TypeName) -> int:
+    return TYPE_WIDTHS[type_name] // 8
+
+
+def _align_up(value: int, alignment: int) -> int:
+    return ((value + alignment - 1) // alignment) * alignment
+
+
+def compute_layout_info(record: RecordDecl) -> LayoutInfo:
+    offset = 0
+    alignment = 1
+    field_offsets: dict[str, int] = {}
+    occupied: set[int] = set()
+    for field in record.fields:
+        assert isinstance(field.type_name, str)
+        field_size = byte_width(field.type_name)
+        field_alignment = 1 if record.layout_kind == "packed" else field_size
+        alignment = max(alignment, field_alignment)
+        offset = _align_up(offset, field_alignment)
+        field_offsets[field.name] = offset
+        occupied.update(range(offset, offset + field_size))
+        offset += field_size
+    size = offset if record.layout_kind == "packed" else _align_up(offset, alignment)
+    padding_offsets = tuple(byte for byte in range(size) if byte not in occupied)
+    return LayoutInfo(size, alignment, field_offsets, padding_offsets)
+
+
+def layout_info(record: RecordDecl) -> LayoutInfo:
+    if record.layout_info is None:
+        raise AssertionError("layout info requested for non-layout record")  # pragma: no cover
+    return record.layout_info
 
 
 def all_ones_constant_value(_type_name: TypeName) -> int:
@@ -239,6 +286,9 @@ def _check_body_stmt(
         return
     if isinstance(stmt, FieldAssignStmt):
         _check_field_assignment(stmt, bindings, functions, records)
+        return
+    if isinstance(stmt, LayoutWriteStmt):
+        _check_layout_write(stmt, bindings, functions, records)
         return
     if isinstance(stmt, CallStmt):
         _check_call_stmt(stmt, bindings, functions, records)
@@ -364,6 +414,38 @@ def _check_field_assignment(
         raise InscriptionError(
             f"field {stmt.field} of {record_type.name} must have type {field_type}, got {format_type(actual)}", stmt.line
         )
+
+
+def _check_layout_write(
+    stmt: LayoutWriteStmt,
+    bindings: dict[str, Binding],
+    functions: dict[str, Function],
+    records: dict[str, RecordDecl],
+) -> None:
+    record_type = _require_record_type(stmt.record_name, stmt.line, _env_types(bindings))
+    record = _record_decl(record_type, stmt.line, records)
+    if record.layout_kind == "value":
+        raise InscriptionError(f"write {stmt.record_name} requires a layout record value, got {record_type.name}", stmt.line)
+    buffer_binding = _require_buffer_binding(stmt.buffer_name, stmt.line, bindings)
+    buffer_type = buffer_binding.type_name
+    if buffer_type.element_type != "u8":
+        raise InscriptionError(
+            f"write {record_type.name} requires a u8 buffer, got {format_type(buffer_type)}", stmt.line
+        )
+    if not buffer_binding.writable:
+        raise InscriptionError(f"cannot write to read-only buffer parameter {stmt.buffer_name}", stmt.line)
+    _check_layout_index(
+        "layout write",
+        "write",
+        record_type.name,
+        stmt.buffer_name,
+        layout_info(record).size,
+        buffer_type,
+        stmt.index,
+        _env_types(bindings),
+        functions,
+        records,
+    )
 
 
 def _check_call_stmt(
@@ -700,6 +782,26 @@ def infer_expr_type(
             assert isinstance(expected, str)
             require_type("i32", expected, expr.line)
         return "i32"
+    if isinstance(expr, SizeOfType):
+        _require_layout_record_decl(expr.type_name, expr.line, records, f"size of {expr.type_name}")
+        if expected is not None:
+            assert isinstance(expected, str)
+            require_type("i32", expected, expr.line)
+        return "i32"
+    if isinstance(expr, AlignmentOfType):
+        _require_layout_record_decl(expr.type_name, expr.line, records, f"alignment of {expr.type_name}")
+        if expected is not None:
+            assert isinstance(expected, str)
+            require_type("i32", expected, expr.line)
+        return "i32"
+    if isinstance(expr, OffsetOfField):
+        record = _require_layout_record_decl(expr.type_name, expr.line, records, f"offset of {expr.field} in {expr.type_name}")
+        if expr.field not in layout_info(record).field_offsets:
+            raise InscriptionError(f"layout record {expr.type_name} has no field {expr.field}", expr.line)
+        if expected is not None:
+            assert isinstance(expected, str)
+            require_type("i32", expected, expr.line)
+        return "i32"
     if isinstance(expr, FieldAccess):
         record_type = _require_record_type(expr.name, expr.line, env)
         field_type = _require_record_field(record_type, expr.field, expr.line, records)
@@ -709,6 +811,11 @@ def infer_expr_type(
         return field_type
     if isinstance(expr, RecordConstructor):
         actual = infer_record_constructor_type(expr, env, functions, records)
+        if expected is not None and actual != expected:
+            raise InscriptionError(f"expected {format_type(expected)}, got {format_type(actual)}", expr.line)
+        return actual
+    if isinstance(expr, LayoutRead):
+        actual = infer_layout_read_type(expr, env, functions, records)
         if expected is not None and actual != expected:
             raise InscriptionError(f"expected {format_type(expected)}, got {format_type(actual)}", expr.line)
         return actual
@@ -969,6 +1076,20 @@ def _record_decl(record_type: RecordType, line: int, records: dict[str, RecordDe
     return record
 
 
+def _require_layout_record_decl(
+    type_name: str,
+    line: int,
+    records: dict[str, RecordDecl],
+    context: str,
+) -> RecordDecl:
+    record = records.get(type_name)
+    if record is None:
+        raise InscriptionError(f"unknown record type {type_name}", line)
+    if record.layout_kind == "value":
+        raise InscriptionError(f"{context} requires a layout record", line)
+    return record
+
+
 def _require_record_field(record_type: RecordType, field: str, line: int, records: dict[str, RecordDecl]) -> TypeName:
     record = _record_decl(record_type, line, records)
     for field_decl in record.fields:
@@ -1016,6 +1137,31 @@ def infer_record_constructor_type(
     return record_type
 
 
+def infer_layout_read_type(
+    expr: LayoutRead,
+    env: dict[str, ValueType],
+    functions: dict[str, Function],
+    records: dict[str, RecordDecl],
+) -> RecordType:
+    record = _require_layout_record_decl(expr.type_name, expr.line, records, f"read {expr.type_name}")
+    buffer_type = _require_buffer_type(expr.buffer_name, expr.line, env)
+    if buffer_type.element_type != "u8":
+        raise InscriptionError(f"read {expr.type_name} requires a u8 buffer, got {format_type(buffer_type)}", expr.line)
+    _check_layout_index(
+        "layout read",
+        "read",
+        expr.type_name,
+        expr.buffer_name,
+        layout_info(record).size,
+        buffer_type,
+        expr.index,
+        env,
+        functions,
+        records,
+    )
+    return RecordType(expr.type_name)
+
+
 def _check_buffer_index(
     name: str,
     buffer_type: BufferType,
@@ -1032,6 +1178,30 @@ def _check_buffer_index(
     if not is_integer_type(index_type):
         raise InscriptionError(
             f"buffer index must be an integer type, got {format_type(index_type)}", getattr(index, "line", None)
+        )
+
+
+def _check_layout_index(
+    index_label: str,
+    action: str,
+    type_name: str,
+    buffer_name: str,
+    record_size: int,
+    buffer_type: BufferType,
+    index: Expr,
+    env: dict[str, ValueType],
+    functions: dict[str, Function],
+    records: dict[str, RecordDecl],
+) -> None:
+    if isinstance(index, Integer) and not 0 <= index.value <= buffer_type.length - record_size:
+        raise InscriptionError(
+            f"{action} {type_name} at index {index.value} exceeds buffer {buffer_name} of length {buffer_type.length}",
+            index.line,
+        )
+    index_type = infer_expr_type(index, env, functions, records)
+    if not is_integer_type(index_type):
+        raise InscriptionError(
+            f"{index_label} index must be an integer type, got {format_type(index_type)}", getattr(index, "line", None)
         )
 
 

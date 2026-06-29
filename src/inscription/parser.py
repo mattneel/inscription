@@ -24,7 +24,11 @@ from .ast import (
     Function,
     IfStmt,
     Integer,
+    AlignmentOfType,
     LengthOf,
+    LayoutRead,
+    LayoutWriteStmt,
+    OffsetOfField,
     Parameter,
     Program,
     RecordConstructor,
@@ -35,6 +39,7 @@ from .ast import (
     ReturnType,
     ReturnStmt,
     SetStmt,
+    SizeOfType,
     TypeName,
     Unary,
     ValueType,
@@ -49,12 +54,12 @@ NAME_RE = re.compile(r"[a-z][a-z0-9_]*")
 RECORD_NAME_RE = re.compile(r"[A-Z][A-Za-z0-9_]*")
 TOKEN_RE = re.compile(r"\s*(-?\d+|[A-Z][A-Za-z0-9_]*|[a-z][a-z0-9_]*|[().,])")
 RESERVED = {
-    "address", "and", "arguments", "array", "as", "at", "be", "becomes", "bitwise", "buffer", "by", "call",
+    "address", "alignment", "and", "arguments", "array", "as", "at", "be", "becomes", "bitwise", "buffer", "by", "call",
     "divided", "do", "does", "each", "else", "equal", "false", "filled", "float", "for", "from",
-    "function", "gives", "greater", "i1", "i32", "i64", "if", "index", "input",
-    "i8", "i16", "is", "length", "less", "let", "memref", "minus", "no", "not", "or", "otherwise", "output", "parameters",
-    "pointer", "plus", "print", "remainder", "return", "set", "shifted", "takes", "than", "then", "times", "to",
-    "track", "true", "u8", "u16", "u32", "u64", "up", "record", "when", "while", "with", "xor", "zero",
+    "function", "gives", "greater", "i1", "i32", "i64", "if", "in", "index", "input", "into",
+    "i8", "i16", "is", "layout", "length", "less", "let", "memref", "minus", "no", "not", "or", "otherwise", "output", "packed", "parameters",
+    "pointer", "plus", "print", "read", "remainder", "return", "set", "shifted", "size", "takes", "than", "then", "times", "to",
+    "track", "true", "u8", "u16", "u32", "u64", "up", "record", "when", "while", "with", "write", "xor", "zero",
 }
 TYPE_NAMES: set[str] = {"i1", "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64"}
 COMPARATORS: tuple[tuple[tuple[str, ...], str], ...] = (
@@ -165,14 +170,19 @@ class Parser:
         return Program(tuple(records), tuple(functions))
 
     def _looks_like_record_header(self, line: Line) -> bool:
-        return line.is_header and re.fullmatch(r"record [A-Za-z][A-Za-z0-9_]*", line.text) is not None
+        return (
+            line.is_header
+            and re.fullmatch(r"(?:record|layout record|packed layout record) [A-Za-z][A-Za-z0-9_]*", line.text)
+            is not None
+        )
 
     def _parse_record_decl(self, index: int) -> tuple[RecordDecl, int]:
         line = self.lines[index]
-        match = re.fullmatch(r"record ([A-Za-z][A-Za-z0-9_]*)", line.text)
+        match = re.fullmatch(r"(record|layout record|packed layout record) ([A-Za-z][A-Za-z0-9_]*)", line.text)
         if not line.is_header or match is None:
             raise InscriptionError("malformed record declaration", line.number)
-        name = self._record_name(match.group(1), line.number)
+        layout_kind = {"record": "value", "layout record": "natural", "packed layout record": "packed"}[match.group(1)]
+        name = self._record_name(match.group(2), line.number)
         fields: list[RecordFieldDecl] = []
         field_index = index + 1
         while field_index < len(self.lines):
@@ -194,8 +204,9 @@ class Parser:
             )
             field_index += 1
         if not fields:
-            raise InscriptionError(f"record {name} must declare at least one field", line.number)
-        return RecordDecl(name, tuple(fields), line.number), field_index
+            prefix = "record" if layout_kind == "value" else "layout record"
+            raise InscriptionError(f"{prefix} {name} must declare at least one field", line.number)
+        return RecordDecl(name, tuple(fields), line.number, layout_kind), field_index
 
     def _looks_like_phrase_header(self, line: Line) -> bool:
         return line.is_header and re.fullmatch(r".+? (?:gives [A-Za-z][A-Za-z0-9_]*|does)", line.text) is not None
@@ -336,6 +347,7 @@ class Parser:
         return (
             line.text.startswith("let ")
             or line.text.startswith("track ")
+            or self._layout_write_match(line) is not None
             or self._field_assignment_match(line) is not None
             or self._buffer_store_match(line) is not None
             or self._assignment_match(line) is not None
@@ -351,6 +363,9 @@ class Parser:
             return self._parse_let(current), index + 1
         if current.text.startswith("track "):
             raise InscriptionError("`track` is not valid Inscription syntax; use `let name be ...`", current.number)
+        layout_write = self._layout_write_match(current)
+        if layout_write is not None:
+            return self._parse_layout_write(current, layout_write), index + 1
         field_assignment = self._field_assignment_match(current)
         if field_assignment is not None:
             return self._parse_field_assignment(current, field_assignment), index + 1
@@ -538,6 +553,11 @@ class Parser:
             return None
         return re.fullmatch(r"([a-z][a-z0-9_]*)\.([a-z][a-z0-9_]*) becomes (.+)", line.text)
 
+    def _layout_write_match(self, line: Line) -> re.Match[str] | None:
+        if line.is_header:
+            return None
+        return re.fullmatch(r"write ([a-z][a-z0-9_]*) into ([a-z][a-z0-9_]*) at (.+)", line.text)
+
     def _parse_assignment(self, line: Line, match: re.Match[str]) -> AssignStmt:
         return AssignStmt(
             self._name(match.group(1), line.number),
@@ -557,6 +577,14 @@ class Parser:
         return FieldAssignStmt(
             self._name(match.group(1), line.number),
             self._field_name(match.group(2), line.number),
+            self._parse_expression(match.group(3), line.number),
+            line.number,
+        )
+
+    def _parse_layout_write(self, line: Line, match: re.Match[str]) -> LayoutWriteStmt:
+        return LayoutWriteStmt(
+            self._name(match.group(1), line.number),
+            self._name(match.group(2), line.number),
             self._parse_expression(match.group(3), line.number),
             line.number,
         )
@@ -845,6 +873,32 @@ class ExpressionParser:
         token = self.peek()
         if token is None or token in stop or token == ",":
             raise InscriptionError("expected expression", self.line)
+        if token == "size" and tuple(self.tokens[self.pos : self.pos + 2]) == ("size", "of"):
+            self.pop()
+            self.pop()
+            type_name = self.pop()
+            if not RECORD_NAME_RE.fullmatch(type_name):
+                raise InscriptionError(f"invalid record name '{type_name}'", self.line)
+            return SizeOfType(type_name, self.line)
+        if token == "alignment" and tuple(self.tokens[self.pos : self.pos + 2]) == ("alignment", "of"):
+            self.pop()
+            self.pop()
+            type_name = self.pop()
+            if not RECORD_NAME_RE.fullmatch(type_name):
+                raise InscriptionError(f"invalid record name '{type_name}'", self.line)
+            return AlignmentOfType(type_name, self.line)
+        if token == "offset" and tuple(self.tokens[self.pos : self.pos + 2]) == ("offset", "of"):
+            self.pop()
+            self.pop()
+            field = self.pop()
+            if not NAME_RE.fullmatch(field):
+                raise InscriptionError(f"invalid field name '{field}'", self.line)
+            if self.at_end() or self.pop() != "in":
+                raise InscriptionError("offset expression must use 'in'", self.line)
+            type_name = self.pop()
+            if not RECORD_NAME_RE.fullmatch(type_name):
+                raise InscriptionError(f"invalid record name '{type_name}'", self.line)
+            return OffsetOfField(field, type_name, self.line)
         if token == "length" and tuple(self.tokens[self.pos : self.pos + 2]) == ("length", "of"):
             self.pop()
             self.pop()
@@ -852,12 +906,16 @@ class ExpressionParser:
             if not NAME_RE.fullmatch(name) or name in RESERVED:
                 raise InscriptionError(f"invalid buffer name '{name}'", self.line)
             return LengthOf(name, self.line)
+        if token == "read" and self.pos + 4 < len(self.tokens) and RECORD_NAME_RE.fullmatch(self.tokens[self.pos + 1]):
+            return self.parse_layout_read(stop)
         if token is not None and RECORD_NAME_RE.fullmatch(token) and tuple(self.tokens[self.pos + 1 : self.pos + 2]) == ("with",):
             return self.parse_record_constructor(stop)
         phrase_call = self.try_parse_phrase_call(stop)
         if phrase_call is not None:
             return phrase_call
         token = self.pop()
+        if token == "write":
+            raise InscriptionError("write is a step and cannot be used as an expression", self.line)
         if token == "(":
             inner = self.parse_expression(stop={")"})
             if self.at_end() or self.pop() != ")":
@@ -902,6 +960,19 @@ class ExpressionParser:
                 continue
             break
         return RecordConstructor(type_name, tuple(fields), self.line)
+
+    def parse_layout_read(self, stop: set[str]) -> LayoutRead:
+        self.pop()  # read
+        type_name = self.pop()
+        if self.at_end() or self.pop() != "from":
+            raise InscriptionError("layout read expression must use 'from'", self.line)
+        buffer_name = self.pop()
+        if not NAME_RE.fullmatch(buffer_name) or buffer_name in RESERVED:
+            raise InscriptionError(f"invalid buffer name '{buffer_name}'", self.line)
+        if self.at_end() or self.pop() != "at":
+            raise InscriptionError("layout read expression must use 'at'", self.line)
+        index = self.parse_expression(stop)
+        return LayoutRead(type_name, buffer_name, index, self.line)
 
     def consume_record_initializer_tokens(self, stop: set[str]) -> list[str]:
         start = self.pos

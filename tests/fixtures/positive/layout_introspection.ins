@@ -1,0 +1,7 @@
+layout record Header:
+  tag: u8
+  length: u16
+  flags: u8
+
+main gives i32:
+  size of Header plus alignment of Header plus offset of flags in Header

@@ -20,6 +20,7 @@ BinOp = Literal[
     "or",
 ]
 UnaryOp = Literal["not", "bitwise not"]
+RecordLayoutKind = Literal["value", "natural", "packed"]
 
 
 @dataclass(frozen=True)
@@ -40,6 +41,16 @@ class RecordDecl:
     name: str
     fields: tuple[RecordFieldDecl, ...]
     line: int
+    layout_kind: RecordLayoutKind = "value"
+    layout_info: "LayoutInfo | None" = None
+
+
+@dataclass(frozen=True)
+class LayoutInfo:
+    size: int
+    alignment: int
+    field_offsets: dict[str, int]
+    padding_offsets: tuple[int, ...]
 
 
 @dataclass(frozen=True)
@@ -105,6 +116,25 @@ class LengthOf:
 
 
 @dataclass(frozen=True)
+class SizeOfType:
+    type_name: str
+    line: int
+
+
+@dataclass(frozen=True)
+class AlignmentOfType:
+    type_name: str
+    line: int
+
+
+@dataclass(frozen=True)
+class OffsetOfField:
+    field: str
+    type_name: str
+    line: int
+
+
+@dataclass(frozen=True)
 class FieldAccess:
     name: str
     field: str
@@ -122,6 +152,14 @@ class RecordFieldInit:
 class RecordConstructor:
     type_name: str
     fields: tuple[RecordFieldInit, ...]
+    line: int
+
+
+@dataclass(frozen=True)
+class LayoutRead:
+    type_name: str
+    buffer_name: str
+    index: "Expr"
     line: int
 
 
@@ -182,8 +220,12 @@ Expr = (
     | Variable
     | BufferLoad
     | LengthOf
+    | SizeOfType
+    | AlignmentOfType
+    | OffsetOfField
     | FieldAccess
     | RecordConstructor
+    | LayoutRead
     | Unary
     | Cast
     | Binary
@@ -229,6 +271,14 @@ class FieldAssignStmt:
     name: str
     field: str
     expr: Expr
+    line: int
+
+
+@dataclass(frozen=True)
+class LayoutWriteStmt:
+    record_name: str
+    buffer_name: str
+    index: Expr
     line: int
 
 
@@ -283,6 +333,7 @@ BodyStmt = (
     | AssignStmt
     | BufferStoreStmt
     | FieldAssignStmt
+    | LayoutWriteStmt
     | CallStmt
     | WhileStmt
     | ForStmt

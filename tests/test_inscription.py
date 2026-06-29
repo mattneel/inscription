@@ -143,6 +143,9 @@ class CompilerTests(unittest.TestCase):
                 (GOLDENS / "43_for_each_fill.ins").read_text(),
                 (GOLDENS / "46_record_field_access.ins").read_text(),
                 (GOLDENS / "52_record_buffer_interop.ins").read_text(),
+                (GOLDENS / "53_layout_introspection.ins").read_text(),
+                (GOLDENS / "55_layout_roundtrip.ins").read_text(),
+                (GOLDENS / "58_layout_write_procedure.ins").read_text(),
                 "highlight new widths a: i8 and b: i16 and c: u64 gives u64:\n  c bitwise xor c\n",
             ]
         )
@@ -307,6 +310,20 @@ main gives i32:
         interop_mlir = compile_source(self.fixture("record_buffer_interop.ins"))
         self.assertIn("func.func @write_offset(%offset_index: i32, %offset_value: i32, %cells: memref<4xi32>)", interop_mlir)
         self.assertIn("memref.store %offset_value", interop_mlir)
+
+    def test_v08_layout_records_lower_to_byte_serialization(self):
+        introspection_mlir = compile_source(self.fixture("layout_introspection.ins"))
+        self.assertIn("arith.constant 6 : i32", introspection_mlir)
+        self.assertIn("arith.constant 2 : i32", introspection_mlir)
+        self.assertIn("arith.constant 4 : i32", introspection_mlir)
+
+        roundtrip_mlir = compile_source(self.fixture("layout_roundtrip.ins"))
+        self.assertIn("memref.store", roundtrip_mlir)
+        self.assertIn("memref.load", roundtrip_mlir)
+        self.assertIn("arith.extui", roundtrip_mlir)
+        self.assertIn("arith.shrui", roundtrip_mlir)
+        self.assertIn("arith.trunci", roundtrip_mlir)
+        self.assertNotIn("llvm.struct", roundtrip_mlir)
 
     def test_record_parameter_rebinding_does_not_mutate_caller(self):
         source = """record Point:
@@ -734,6 +751,76 @@ main gives i32:
             "branch local record does not escape": (
                 "record Point:\n  x: i32\n  y: i32\n\nbad gives i32:\n  let flag be true\n  if flag:\n    let p be Point with x be 1 and y be 2\n  otherwise:\n    let p be Point with x be 3 and y be 4\n  p.x\n",
                 "unknown binding p",
+            ),
+            "duplicate record and layout record name": (
+                "record Point:\n  x: i32\n\nlayout record Point:\n  x: i32\n\nmain gives i32:\n  0\n",
+                "record Point is already defined",
+            ),
+            "empty layout record": ("layout record Empty:\n\nmain gives i32:\n  0\n", "layout record Empty must declare at least one field"),
+            "duplicate layout field": (
+                "layout record Header:\n  tag: u8\n  tag: u8\n\nmain gives i32:\n  0\n",
+                "layout record Header has duplicate field tag",
+            ),
+            "layout i1 field unsupported": (
+                "layout record Bad:\n  flag: i1\n\nmain gives i32:\n  0\n",
+                "layout record fields must be integer types, got i1",
+            ),
+            "layout buffer field unsupported": (
+                "layout record Bad:\n  bytes: buffer of 4 u8\n\nmain gives i32:\n  0\n",
+                "layout record fields must be integer types, got buffer of 4 u8",
+            ),
+            "ordinary record has no layout size": (
+                "record Point:\n  x: i32\n  y: i32\n\nbad gives i32:\n  size of Point\n",
+                "size of Point requires a layout record",
+            ),
+            "size unknown record type": ("bad gives i32:\n  size of Missing\n", "unknown record type Missing"),
+            "offset unknown layout field": (
+                "layout record Header:\n  tag: u8\n\nbad gives i32:\n  offset of length in Header\n",
+                "layout record Header has no field length",
+            ),
+            "read unknown layout type": (
+                "bad gives i32:\n  let bytes be buffer of 4 u8 filled with 0\n  let header be read Missing from bytes at 0\n  0\n",
+                "unknown record type Missing",
+            ),
+            "read ordinary record": (
+                "record Point:\n  x: i32\n  y: i32\n\nbad gives i32:\n  let bytes be buffer of 8 u8 filled with 0\n  let p be read Point from bytes at 0\n  0\n",
+                "read Point requires a layout record",
+            ),
+            "read non u8 buffer": (
+                "packed layout record Word:\n  value: u16\n\nbad gives i32:\n  let cells be buffer of 2 i32 filled with 0\n  let word be read Word from cells at 0\n  0\n",
+                "read Word requires a u8 buffer, got buffer of 2 i32",
+            ),
+            "write ordinary record": (
+                "record Point:\n  x: i32\n  y: i32\n\nbad gives i32:\n  let bytes be buffer of 8 u8 filled with 0\n  let p be Point with x be 1 and y be 2\n  write p into bytes at 0\n  0\n",
+                "write p requires a layout record value, got Point",
+            ),
+            "write non u8 buffer": (
+                "packed layout record Word:\n  value: u16\n\nbad gives i32:\n  let cells be buffer of 2 i32 filled with 0\n  let word be Word with value be 1\n  write word into cells at 0\n  0\n",
+                "write Word requires a u8 buffer, got buffer of 2 i32",
+            ),
+            "write readonly buffer parameter": (
+                "packed layout record Word:\n  value: u16\n\nbad bytes: buffer of 2 u8 gives i32:\n  let word be Word with value be 1\n  write word into bytes at 0\n  0\n",
+                "cannot write to read-only buffer parameter bytes",
+            ),
+            "layout read static out of bounds": (
+                "packed layout record Word:\n  value: u16\n\nbad gives i32:\n  let bytes be buffer of 2 u8 filled with 0\n  let word be read Word from bytes at 1\n  0\n",
+                "read Word at index 1 exceeds buffer bytes of length 2",
+            ),
+            "layout write static out of bounds": (
+                "packed layout record Word:\n  value: u16\n\nbad gives i32:\n  let bytes be buffer of 2 u8 filled with 0\n  let word be Word with value be 1\n  write word into bytes at 1\n  0\n",
+                "write Word at index 1 exceeds buffer bytes of length 2",
+            ),
+            "layout read boolean index": (
+                "packed layout record Word:\n  value: u16\n\nbad gives i32:\n  let bytes be buffer of 2 u8 filled with 0\n  let word be read Word from bytes at true\n  0\n",
+                "layout read index must be an integer type, got i1",
+            ),
+            "layout write boolean index": (
+                "packed layout record Word:\n  value: u16\n\nbad gives i32:\n  let bytes be buffer of 2 u8 filled with 0\n  let word be Word with value be 1\n  write word into bytes at false\n  0\n",
+                "layout write index must be an integer type, got i1",
+            ),
+            "write used as expression": (
+                "packed layout record Word:\n  value: u16\n\nbad gives i32:\n  let bytes be buffer of 2 u8 filled with 0\n  let word be Word with value be 1\n  let result be write word into bytes at 0\n  0\n",
+                "write is a step and cannot be used as an expression",
             ),
         }
         for name, (source, contains) in cases.items():

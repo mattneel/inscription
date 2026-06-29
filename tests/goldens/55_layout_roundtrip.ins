@@ -1,0 +1,14 @@
+layout record Header:
+  tag: u8
+  length: u16
+  flags: u8
+
+roundtrip gives i32:
+  let bytes be buffer of 6 u8 filled with 0
+  let header be Header with tag be 7 and length be 9 and flags be 3
+  write header into bytes at 0
+  let copy be read Header from bytes at 0
+  copy.tag as i32 plus copy.length as i32 plus copy.flags as i32
+
+main gives i32:
+  roundtrip

@@ -1,0 +1,13 @@
+layout record Header:
+  tag: u8
+  length: u16
+  flags: u8
+
+padding zero gives i32:
+  let bytes be buffer of 6 u8 filled with 255
+  let header be Header with tag be 1 and length be 2 and flags be 3
+  write header into bytes at 0
+  bytes at 1 as i32
+
+main gives i32:
+  padding zero
