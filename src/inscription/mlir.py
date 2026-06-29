@@ -199,7 +199,7 @@ class MlirEmitter:
         self.for_counter = 0
         self.for_depth = 0
         args = ", ".join(self.function_argument_decls(fn))
-        return_suffix = "" if fn.return_type is None else f" -> {mlir_type(fn.return_type)}"
+        return_suffix = "" if fn.return_type is None else f" -> {self.return_type_list(fn.return_type)}"
         lines.append(f"  func.func @{fn.name}({args}){return_suffix} {{")
         env: dict[str, EnvValue] = {}
         for param in fn.params:
@@ -269,12 +269,21 @@ class MlirEmitter:
         env: dict[str, EnvValue],
         lines: list[str],
         indent: str,
-        return_type: TypeName,
+        return_type: TypeName | RecordType,
     ) -> None:
         for stmt in statements:
             if isinstance(stmt, ReturnStmt):
-                value = self.emit_expr(stmt.expr, env, lines, indent, expected=return_type)
-                lines.append(f"{indent}return {value.name} : {mlir_type(return_type)}")
+                if isinstance(return_type, RecordType):
+                    record = self.emit_record_expr(stmt.expr, env, lines, indent, expected=return_type)
+                    fields = self.record_fields(return_type)
+                    values = [record.fields[field.name] for field in fields]
+                    lines.append(
+                        f"{indent}return {', '.join(value.name for value in values)} : "
+                        f"{', '.join(mlir_type(value.type_name) for value in values)}"
+                    )
+                else:
+                    value = self.emit_expr(stmt.expr, env, lines, indent, expected=return_type)
+                    lines.append(f"{indent}return {value.name} : {mlir_type(return_type)}")
             else:
                 self.emit_body_stmt(stmt, env, lines, indent)
 
@@ -760,7 +769,93 @@ class MlirEmitter:
             return RecordStorage(expected, fields)
         if isinstance(expr, LayoutRead):
             return self.emit_layout_read(expr, env, lines, indent, expected=expected)
+        if isinstance(expr, Call):
+            target = self.functions[expr.name]
+            assert target.return_type == expected
+            args = self.emit_call_arguments(expr, target, env, lines, indent)
+            fields = self.record_fields(expected)
+            result_types = [field.type_name for field in fields]
+            assert all(isinstance(type_name, str) for type_name in result_types)
+            result_base = self.fresh()
+            assignment = f"{result_base}:{len(fields)} = " if len(fields) > 1 else f"{result_base} = "
+            arg_values = ", ".join(arg.name for arg in args)
+            arg_types = ", ".join(arg.mlir_type for arg in args)
+            lines.append(
+                f"{indent}{assignment}func.call @{expr.name}({arg_values}) : ({arg_types}) -> "
+                f"{self.result_type_list(result_types)}"
+            )
+            return RecordStorage(
+                expected,
+                {
+                    field.name: Value(result_base if len(fields) == 1 else f"{result_base}#{index}", field.type_name)  # type: ignore[arg-type]
+                    for index, field in enumerate(fields)
+                },
+            )
+        if isinstance(expr, WhenExpr):
+            return self.emit_record_when_expr(expr, env, lines, indent, expected)
         raise AssertionError("unsupported record expression")  # pragma: no cover
+
+    def emit_record_when_expr(
+        self,
+        expr: WhenExpr,
+        env: dict[str, EnvValue],
+        lines: list[str],
+        indent: str,
+        record_type: RecordType,
+    ) -> RecordStorage:
+        return self.emit_record_when_cases(list(expr.cases), expr.otherwise, env, lines, indent, record_type)
+
+    def emit_record_when_cases(
+        self,
+        cases: list[WhenCase],
+        otherwise: Expr,
+        env: dict[str, EnvValue],
+        lines: list[str],
+        indent: str,
+        record_type: RecordType,
+    ) -> RecordStorage:
+        if not cases:
+            return self.emit_record_expr(otherwise, env, lines, indent, expected=record_type)
+        case = cases[0]
+        cond = self.emit_expr(case.condition, env, lines, indent, expected="i1")
+        fields = self.record_fields(record_type)
+        result_types = [field.type_name for field in fields]
+        result_base = self.fresh()
+        assignment = f"{result_base}:{len(fields)} = " if len(fields) > 1 else f"{result_base} = "
+        lines.append(f"{indent}{assignment}scf.if {cond.name} -> ({self.type_list(result_types)}) {{")
+        then_holder: dict[str, RecordStorage] = {}
+        self.emit_with_local_constants(
+            lambda: then_holder.setdefault(
+                "record",
+                self.emit_record_expr(case.expr, dict(env), lines, indent + "  ", expected=record_type),
+            )
+        )
+        then_record = then_holder["record"]
+        then_values = [then_record.fields[field.name] for field in fields]
+        lines.append(
+            f"{indent}  scf.yield {', '.join(value.name for value in then_values)} : {self.type_list(result_types)}"
+        )
+        lines.append(f"{indent}}} else {{")
+        else_holder: dict[str, RecordStorage] = {}
+        self.emit_with_local_constants(
+            lambda: else_holder.setdefault(
+                "record",
+                self.emit_record_when_cases(cases[1:], otherwise, dict(env), lines, indent + "  ", record_type),
+            )
+        )
+        else_record = else_holder["record"]
+        else_values = [else_record.fields[field.name] for field in fields]
+        lines.append(
+            f"{indent}  scf.yield {', '.join(value.name for value in else_values)} : {self.type_list(result_types)}"
+        )
+        lines.append(f"{indent}}}")
+        return RecordStorage(
+            record_type,
+            {
+                field.name: Value(result_base if len(fields) == 1 else f"{result_base}#{index}", field.type_name)  # type: ignore[arg-type]
+                for index, field in enumerate(fields)
+            },
+        )
 
     def emit_field_assign(self, stmt: FieldAssignStmt, env: dict[str, EnvValue], lines: list[str], indent: str) -> None:
         record = self.require_record(env[stmt.name])
@@ -1347,6 +1442,18 @@ class MlirEmitter:
 
     def record_fields(self, record_type: RecordType):
         return self.records[record_type.name].fields
+
+    def return_types(self, return_type: TypeName | RecordType) -> list[TypeName]:
+        if isinstance(return_type, RecordType):
+            result: list[TypeName] = []
+            for field in self.record_fields(return_type):
+                assert isinstance(field.type_name, str)
+                result.append(field.type_name)
+            return result
+        return [return_type]
+
+    def return_type_list(self, return_type: TypeName | RecordType) -> str:
+        return self.result_type_list(self.return_types(return_type))
 
     def type_list(self, types: list[TypeName]) -> str:
         return ", ".join(mlir_type(type_name) for type_name in types)

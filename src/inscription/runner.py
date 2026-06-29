@@ -7,7 +7,11 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
-from .compiler import compile_file, compile_source
+from .ast import Program
+from .compiler import load_program
+from .diagnostics import InscriptionError
+from .mlir import emit_mlir
+from .semantic import INTEGER_TYPES, constant_table, format_type, function_table, record_table, resolve_function_table
 
 LOWERING_PASSES = [
     "--convert-scf-to-cf",
@@ -68,8 +72,10 @@ def run_source(
     module_root: Path | None = None,
     runtime_checks: bool = False,
 ) -> RunResult:
+    program = load_program(source, source_path=source_path, module_root=module_root)
+    validate_runnable_main(program)
     toolchain = toolchain or resolve_toolchain()
-    mlir = compile_source(source, source_path=source_path, module_root=module_root, runtime_checks=runtime_checks)
+    mlir = emit_mlir(program, runtime_checks=runtime_checks)
     with tempfile.TemporaryDirectory(prefix="inscription-run-") as tmp:
         tmp_path = Path(tmp)
         input_mlir = tmp_path / "input.mlir"
@@ -97,8 +103,11 @@ def run_file(
     module_root: Path | None = None,
     runtime_checks: bool = False,
 ) -> RunResult:
+    source_path = source_path.resolve()
+    program = load_program(source_path.read_text(), source_path=source_path, module_root=module_root)
+    validate_runnable_main(program)
     toolchain = toolchain or resolve_toolchain()
-    mlir = compile_file(source_path, module_root=module_root, runtime_checks=runtime_checks)
+    mlir = emit_mlir(program, runtime_checks=runtime_checks)
     with tempfile.TemporaryDirectory(prefix="inscription-run-") as tmp:
         tmp_path = Path(tmp)
         input_mlir = tmp_path / "input.mlir"
@@ -116,6 +125,20 @@ def run_file(
         )
         executed = subprocess.run([str(toolchain.lli), str(llvm_ir)], check=False)
         return RunResult(executed.returncode, mlir, lowered_mlir.read_text(), llvm_ir.read_text())
+
+
+def validate_runnable_main(program: Program) -> None:
+    records = record_table(program)
+    functions = function_table(program)
+    constants = constant_table(program, records, functions)
+    functions = resolve_function_table(functions, records, constants)
+    main = functions.get("main")
+    if main is None:
+        return
+    if main.params:
+        return
+    if main.return_type not in INTEGER_TYPES:
+        raise InscriptionError(f"program main must return an integer scalar, got {format_type(main.return_type)}", main.line)
 
 
 def _run_checked(command: list[str], message: str) -> None:

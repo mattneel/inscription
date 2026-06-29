@@ -58,6 +58,7 @@ from .diagnostics import InscriptionError
 
 NAME_RE = re.compile(r"[a-z][a-z0-9_]*")
 RECORD_NAME_RE = re.compile(r"[A-Z][A-Za-z0-9_]*")
+QUALIFIED_RECORD_NAME_RE = re.compile(r"(?:[A-Za-z][A-Za-z0-9_]*\.)*[A-Z][A-Za-z0-9_]*")
 TOKEN_RE = re.compile(r"\s*(-?\d+|[A-Z][A-Za-z0-9_]*|[a-z][a-z0-9_]*|[().,])")
 RESERVED = {
     "address", "alignment", "and", "arguments", "array", "as", "at", "be", "becomes", "bitwise", "buffer", "by", "call",
@@ -78,8 +79,8 @@ COMPARATORS: tuple[tuple[tuple[str, ...], str], ...] = (
 )
 CONNECTOR_WORDS = {"of", "from", "to", "at", "in", "into", "between", "and", "with", "by"}
 BUFFER_LENGTH_PATTERN = r"(?:-?\d+|[a-z][a-z0-9_]*|\([^)]*\))"
-TYPE_PATTERN = rf"(?:buffer\s+of\s+{BUFFER_LENGTH_PATTERN}\s+[A-Za-z][A-Za-z0-9_]*|view\s+of\s+[a-z][a-z0-9_]*|[A-Za-z][A-Za-z0-9_]*|[a-z][a-z0-9_]*)"
-MODULE_RE = re.compile(r"[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)*")
+TYPE_PATTERN = rf"(?:buffer\s+of\s+{BUFFER_LENGTH_PATTERN}\s+(?:[A-Za-z][A-Za-z0-9_]*(?:\.[A-Z][A-Za-z0-9_]*)?|[a-z][a-z0-9_]*)|view\s+of\s+[a-z][a-z0-9_]*|(?:[A-Za-z][A-Za-z0-9_]*\.)*[A-Z][A-Za-z0-9_]*|[a-z][a-z0-9_]*)"
+MODULE_RE = re.compile(r"[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z][A-Za-z0-9_]*)*")
 
 
 def parse_source(
@@ -603,7 +604,7 @@ class Parser:
 
     def _parse_let(self, line: Line) -> SetStmt | BufferBinding | ViewBinding:
         buffer_match = re.fullmatch(
-            rf"let ([a-z][a-z0-9_]*) be buffer of ({BUFFER_LENGTH_PATTERN}) ([A-Za-z][A-Za-z0-9_]*|[a-z][a-z0-9_]*) filled with (.+)",
+            rf"let ([a-z][a-z0-9_]*) be buffer of ({BUFFER_LENGTH_PATTERN}) ((?:(?:[A-Za-z][A-Za-z0-9_]*\.)*[A-Z][A-Za-z0-9_]*)|[a-z][a-z0-9_]*) filled with (.+)",
             line.text,
         )
         if buffer_match:
@@ -622,7 +623,7 @@ class Parser:
                 self._parse_expression(view_match.group(4), line.number),
                 line.number,
             )
-        match = re.fullmatch(r"let ([a-z][a-z0-9_]*)(?::\s*([A-Za-z][A-Za-z0-9_]*|[a-z][a-z0-9_]*))? be (.+)", line.text)
+        match = re.fullmatch(r"let ([a-z][a-z0-9_]*)(?::\s*((?:[A-Za-z][A-Za-z0-9_]*\.)*[A-Z][A-Za-z0-9_]*|[a-z][a-z0-9_]*))? be (.+)", line.text)
         if not match:
             raise InscriptionError("malformed let binding", line.number)
         return SetStmt(
@@ -735,7 +736,7 @@ class Parser:
 
     def _value_type(self, value: str, line: int) -> ValueType:
         value = " ".join(value.split())
-        buffer_match = re.fullmatch(rf"buffer of ({BUFFER_LENGTH_PATTERN}) ([A-Za-z][A-Za-z0-9_]*|[a-z][a-z0-9_]*)", value)
+        buffer_match = re.fullmatch(rf"buffer of ({BUFFER_LENGTH_PATTERN}) ((?:(?:[A-Za-z][A-Za-z0-9_]*\.)*[A-Z][A-Za-z0-9_]*)|[a-z][a-z0-9_]*)", value)
         if buffer_match is not None:
             return BufferType(self._buffer_length(buffer_match.group(1), line), self._return_type(buffer_match.group(2), line))
         view_match = re.fullmatch(r"view of ([a-z][a-z0-9_]*)", value)
@@ -754,9 +755,11 @@ class Parser:
         raise InscriptionError("malformed buffer length", line)
 
     def _return_type(self, value: str, line: int) -> TypeName | RecordType:
+        if value.startswith("buffer of "):
+            raise InscriptionError("buffer return types are not supported", line)
         if value.startswith("view of "):
             return ViewType(self._type_name(value[len("view of ") :].strip(), line))
-        if RECORD_NAME_RE.fullmatch(value):
+        if QUALIFIED_RECORD_NAME_RE.fullmatch(value):
             return RecordType(value)
         return self._type_name(value, line)
 

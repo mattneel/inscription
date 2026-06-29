@@ -1,0 +1,11 @@
+record Pair:
+  left: i32
+  right: i32
+
+make pair left: i32 and right: i32 gives Pair:
+  Pair with left be left and right be right
+
+main gives i32:
+  let p be Pair with left be 1 and right be 2
+  p becomes make pair 5 and 6
+  p.left times 10 plus p.right

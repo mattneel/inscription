@@ -57,7 +57,7 @@ from .diagnostics import InscriptionError
 from .mlir import emit_mlir
 from .parser import Parser, PhrasePart, PhraseTemplate, parse_source
 
-MODULE_RE = re.compile(r"[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)*")
+MODULE_RE = re.compile(r"[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z][A-Za-z0-9_]*)*")
 
 
 def compile_source(
@@ -67,10 +67,19 @@ def compile_source(
     module_root: Path | None = None,
     runtime_checks: bool = False,
 ) -> str:
+    return emit_mlir(load_program(source, source_path=source_path, module_root=module_root), runtime_checks=runtime_checks)
+
+
+def load_program(
+    source: str,
+    *,
+    source_path: Path | None = None,
+    module_root: Path | None = None,
+) -> Program:
     if source_path is None and module_root is None and not _source_has_imports(source):
-        return emit_mlir(parse_source(source), runtime_checks=runtime_checks)
+        return parse_source(source)
     resolver = ModuleResolver(module_root or (source_path.parent if source_path is not None else None))
-    return emit_mlir(resolver.load_entry(source, source_path=source_path), runtime_checks=runtime_checks)
+    return resolver.load_entry(source, source_path=source_path)
 
 
 def compile_file(source_path: Path, *, module_root: Path | None = None, runtime_checks: bool = False) -> str:

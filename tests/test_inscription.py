@@ -435,6 +435,67 @@ main gives i32:
         checked_layout = compile_source(self.fixture("checked_dynamic_layout.ins"), runtime_checks=True)
         self.assertIn("storage range check failed", checked_layout)
 
+    def test_v013_record_returns_lower_to_flattened_results(self):
+        mlir = compile_source(self.fixture("record_return_constructor.ins"))
+        self.assertIn("func.func @make_point(%x: i32, %y: i32) -> (i32, i32)", mlir)
+        self.assertIn("return %x, %y : i32, i32", mlir)
+        self.assertIn("func.call @make_point", mlir)
+        self.assertIn("-> (i32, i32)", mlir)
+        self.assertNotIn("llvm.struct", mlir)
+        self.assertNotIn("tensor", mlir)
+
+        guarded_mlir = compile_source(self.fixture("record_return_guarded.ins"))
+        self.assertIn("scf.if %flag -> (i32, i32)", guarded_mlir)
+        self.assertIn("scf.yield", guarded_mlir)
+
+        layout_mlir = compile_source(self.fixture("layout_record_return.ins"))
+        self.assertIn("func.func @parse_word", layout_mlir)
+        self.assertIn("memref.load", layout_mlir)
+        self.assertIn("return %", layout_mlir)
+
+    def test_v013_module_record_return_uses_qualified_nominal_type(self):
+        fixture = FIXTURES / "module_record_return" / "main.ins"
+        mlir = compile_file(fixture, module_root=fixture.parent)
+        self.assertIn("func.func @Geometry__make_point", mlir)
+        self.assertIn("func.call @Geometry__make_point", mlir)
+        try:
+            result = run_file(fixture, module_root=fixture.parent)
+        except ToolchainError as exc:
+            self.skipTest(str(exc))
+        self.assertEqual(result.exit_status, 30)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "Geometry.ins").write_text(
+                "module Geometry\n\n"
+                "record Point:\n  x: i32\n  y: i32\n\n"
+                "make point gives Point:\n  Point with x be 1 and y be 2\n"
+            )
+            (root / "Other.ins").write_text("module Other\n\nrecord Point:\n  x: i32\n  y: i32\n")
+            self.assertIn(
+                "let p must have type Other.Point, got Geometry.Point",
+                self._compile_file_error(
+                    root,
+                    "import Geometry\nimport Other\n\nmain gives i32:\n  let p: Other.Point be Geometry.make point\n  p.x\n",
+                ),
+            )
+
+    def test_v013_run_rejects_record_returning_main(self):
+        source = """record Point:
+  x: i32
+  y: i32
+
+main gives Point:
+  Point with x be 1 and y be 2
+"""
+        with self.assertRaises(InscriptionError) as ctx:
+            run_source(source)
+        self.assertIn("program main must return an integer scalar, got Point", str(ctx.exception))
+
+        with self.assertRaises(InscriptionError) as bool_ctx:
+            run_source("main gives i1:\n  true\n")
+        self.assertIn("program main must return an integer scalar, got i1", str(bool_ctx.exception))
+
     def test_v010_module_diagnostics(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -904,9 +965,38 @@ main gives i32:
                 "record Point:\n  x: i32\n  y: i32\n\nrecord Pair:\n  x: i32\n  y: i32\n\nsum point p: Point gives i32:\n  p.x plus p.y\n\nbad gives i32:\n  let pair be Pair with x be 1 and y be 2\n  sum point pair\n",
                 "argument pair must have type Point, got Pair",
             ),
-            "record return type unsupported": (
-                "record Point:\n  x: i32\n  y: i32\n\nmake point gives Point:\n  Point with x be 1 and y be 2\n",
-                "record return types are not supported in v0.7",
+            "unknown record return type": ("make thing gives Missing:\n  0\n", "unknown type Missing"),
+            "buffer return type unsupported": (
+                "bad gives buffer of 4 i32:\n  0\n",
+                "buffer return types are not supported",
+            ),
+            "scalar returned from record phrase": (
+                "record Point:\n  x: i32\n  y: i32\n\nbad gives Point:\n  0\n",
+                "phrase bad must return Point, got i32",
+            ),
+            "record returned from scalar phrase": (
+                "record Point:\n  x: i32\n  y: i32\n\nbad gives i32:\n  Point with x be 1 and y be 2\n",
+                "phrase bad must return i32, got Point",
+            ),
+            "guarded record branches mismatch": (
+                "record Point:\n  x: i32\n  y: i32\n\nrecord Pair:\n  left: i32\n  right: i32\n\nbad flag: i1 gives Point:\n  Point with x be 1 and y be 2 when flag\n  otherwise Pair with left be 1 and right be 2\n",
+                "guarded value branches must have matching types, got Point and Pair",
+            ),
+            "guarded record scalar branch mismatch": (
+                "record Point:\n  x: i32\n  y: i32\n\nbad flag: i1 gives Point:\n  Point with x be 1 and y be 2 when flag\n  otherwise 0\n",
+                "guarded value branches must have matching types, got Point and i32",
+            ),
+            "record returning phrase used as scalar": (
+                "record Point:\n  x: i32\n  y: i32\n\nmake point gives Point:\n  Point with x be 1 and y be 2\n\nbad gives i32:\n  make point plus 1\n",
+                "plus requires integer operands, got Point and i32",
+            ),
+            "scalar returning phrase used as record initializer": (
+                "record Point:\n  x: i32\n  y: i32\n\nmake number gives i32:\n  1\n\nbad gives i32:\n  let p: Point be make number\n  p.x\n",
+                "let p must have type Point, got i32",
+            ),
+            "record returning phrase used as step": (
+                "record Point:\n  x: i32\n  y: i32\n\nmake point gives Point:\n  Point with x be 1 and y be 2\n\nbad gives i32:\n  make point\n  0\n",
+                "phrase `make point` returns Point and cannot be used as a step",
             ),
             "record buffer element unsupported": (
                 "record Point:\n  x: i32\n  y: i32\n\nbad gives i32:\n  let points be buffer of 4 Point filled with Point with x be 0 and y be 0\n  0\n",
@@ -1130,7 +1220,7 @@ main gives i32:
             ),
             "view return type unsupported": (
                 "bad gives view of i32:\n  0\n",
-                "view return types are not supported in v0.11",
+                "view return types are not supported",
             ),
         }
         for name, (source, contains) in cases.items():

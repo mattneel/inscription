@@ -1,0 +1,11 @@
+record Point:
+  x: i32
+  y: i32
+
+choose point flag: i1 gives Point:
+  Point with x be 7 and y be 0 when flag
+  otherwise Point with x be 0 and y be 3
+
+main gives i32:
+  let p be choose point true
+  p.x plus p.y

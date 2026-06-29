@@ -6,7 +6,7 @@ The language is readable, but it is **not** natural-language interpretation: eve
 
 ## Status
 
-This repository currently implements **Inscription v0.12**:
+This repository currently implements **Inscription v0.13**:
 
 - source-visible scalar types: `i1`, signed integers `i8`/`i16`/`i32`/`i64`, and unsigned integers `u8`/`u16`/`u32`/`u64`
 - phrase-shaped function definitions and phrase-shaped calls
@@ -33,6 +33,7 @@ This repository currently implements **Inscription v0.12**:
 - compile-time layout introspection with `size of TypeName`, `alignment of TypeName`, and `offset of field in TypeName`
 - explicit layout serialization with `read TypeName from bytes at index` and `write value into bytes at index` for `u8` buffers or `view of u8`
 - record parameters passed by value and flattened into scalar MLIR operands
+- record return values from `gives` phrases, flattened into scalar MLIR results
 - side-effect-only `does` phrases used as standalone steps
 - counted `for name from start up to end:` loops, with optional positive literal `by step`
 - buffer/view index loops with `for each index name of buffer_or_view:`
@@ -49,11 +50,11 @@ This repository currently implements **Inscription v0.12**:
 - parenthesized expressions
 - deterministic parsing and semantic checks
 - exact MLIR golden conformance tests in [`tests/goldens`](tests/goldens)
-- MLIR emission using `func`, `arith`, `scf.if`, `scf.for`, `scf.while`, flattened scalar SSA for records, local `memref.alloca`/`memref.load`/`memref.store` for buffers, and `cf.assert` when runtime assertions are emitted
+- MLIR emission using `func`, `arith`, `scf.if`, `scf.for`, `scf.while`, flattened scalar SSA and flattened scalar function results for records, local `memref.alloca`/`memref.load`/`memref.store` for buffers, and `cf.assert` when runtime assertions are emitted
 - LLVM 22 lowering and execution through `mlir-opt`, `mlir-translate`, and `lli`
 - no source-level I/O, heap allocation, pointers, dynamic-size buffers, buffer/view return values, buffer/view aliasing beyond conservative same-root rejection, slices, LLVM/C ABI structs, floats, strings, statement-level `return`, `break`, `continue`, macros, import aliases, wildcard imports, generics, global storage, exceptions, result/error values, source strings, source-level runtime assertion messages, overloading, type coercions, or natural-language inference
 
-See [`docs/inscription-v0.12-spec.md`](docs/inscription-v0.12-spec.md) and [`grammar/inscription-v0.12.ebnf`](grammar/inscription-v0.12.ebnf) for the exact current language contract. The immutable previous contracts remain in [`docs/`](docs) and [`grammar/`](grammar), including the v0.11 borrowed-views contract.
+See [`docs/inscription-v0.13-spec.md`](docs/inscription-v0.13-spec.md) and [`grammar/inscription-v0.13.ebnf`](grammar/inscription-v0.13.ebnf) for the exact current language contract. The immutable previous contracts remain in [`docs/`](docs) and [`grammar/`](grammar), including the v0.12 runtime-requirements contract.
 
 ## Requirements
 
@@ -107,7 +108,7 @@ inscription highlight tests/fixtures/positive/for_each_fill.ins
 inscription run tests/fixtures/positive/for_each_fill.ins
 ```
 
-`compile` accepts library-style source files without `main`. `run` executes the lowered module through `lli`; executable fixtures define a no-hole `main` and return an exit status in `0..255`.
+`compile` accepts library-style source files without `main`, including record-returning library phrases. `run` executes the lowered module through `lli`; executable fixtures define a no-hole `main` that returns an integer scalar exit status in `0..255`.
 
 ## Example program
 
@@ -277,9 +278,16 @@ let header_bytes be buffer of (size of Header) u8 filled with 0
 Buffers are initialized with `filled with`, read with `name at index`, and written with `name at index becomes value`. Borrowed views are introduced with `let window be view of cells from start for count`, read with `window at index`, and written with `window at index becomes value` when writable. `length of name` returns a buffer's static length or a view's runtime `i32` length. Buffer storage lowers to `memref.alloca`, `memref.load`, and `memref.store`; views lower to a memref base plus `i32` start and length. Literal/static indices are checked at compile time when the length is known. Dynamic storage bounds remain unchecked by default for v0.11 compatibility; pass `--runtime-checks` to emit runtime assertions for dynamic buffer indices, view creation ranges, view indices, and layout read/write bounds. Buffers can be borrowed by phrase calls through buffer parameters or view parameters. Views cannot be returned, stored in scalar bindings, dynamically sized, heap allocated, rebound, cast, compared, or used as scalar values.
 
 
-`gives` phrases return scalar values and can accept read-only buffer parameters:
+`gives` phrases return scalar values or nominal record values and can accept read-only buffer parameters:
 
 ```text
+record Point:
+  x: i32
+  y: i32
+
+make point x: i32 and y: i32 gives Point:
+  Point with x be x and y be y
+
 sum buffer cells: buffer of 4 i32 gives i32:
   let total be 0
   let i be 0
@@ -404,7 +412,7 @@ left is greater than right
 left is greater than or equal to right
 ```
 
-Important v0.12 rules:
+Important v0.13 rules:
 
 - function names are generated from the leading literal words in a phrase definition
 - phrase names are unique; there is no overloading
@@ -420,7 +428,10 @@ Important v0.12 rules:
 - `size of TypeName`, `alignment of TypeName`, and `offset of field in TypeName` are compile-time `i32` constants
 - layout read/write operations require `u8` buffers or `view of u8`, encode multi-byte fields little-endian, and zero padding bytes on write
 - ordinary value-only `record` declarations cannot be used with layout introspection or layout read/write
-- records cannot be returned, stored in buffers, nested, addressed, referenced, or lowered as LLVM/C ABI structs
+- records can be returned by value from `gives` phrases and lower as flattened scalar MLIR results
+- record-returning calls can initialize record lets or whole-record rebindings
+- record-returning `main` is compile-only; `run` requires integer-scalar `main`
+- records cannot be stored in buffers, nested, addressed, referenced, or lowered as LLVM/C ABI structs
 - rebinding a phrase hole does not mutate the caller
 - each scalar binding type is fixed after initialization or annotation
 - typed `let` initializers and rebinding right-hand sides must match the binding type
@@ -463,7 +474,7 @@ Important v0.12 rules:
 - phrase calls must match a declared phrase template exactly
 - conditional value blocks require `otherwise`
 - removed ceremony words such as `Function`, `End function`, `Set`, `Return`, and `call ... with` are not valid Inscription syntax
-- unsupported `track`, I/O, dynamic arrays, floats, pointers, heap allocation, source-level memrefs, record returns, record buffers, nested records, and free prose are rejected
+- unsupported `track`, I/O, dynamic arrays, floats, pointers, heap allocation, source-level memrefs, buffer/view returns, record buffers, nested records, and free prose are rejected
 
 ## Tests
 
@@ -546,7 +557,8 @@ docs/inscription-v0.8-spec.md v0.8 language and toolchain specification
 docs/inscription-v0.9-spec.md v0.9 language and toolchain specification
 docs/inscription-v0.10-spec.md v0.10 language and toolchain specification
 docs/inscription-v0.11-spec.md v0.11 language and toolchain specification
-docs/inscription-v0.12-spec.md current v0.12 language and toolchain specification
+docs/inscription-v0.12-spec.md v0.12 language and toolchain specification
+docs/inscription-v0.13-spec.md current v0.13 language and toolchain specification
 grammar/inscription-v0.ebnf   original v0 grammar
 grammar/inscription-v0.1.ebnf v0.1 grammar
 grammar/inscription-v0.2.ebnf v0.2 grammar
@@ -559,7 +571,8 @@ grammar/inscription-v0.8.ebnf v0.8 grammar
 grammar/inscription-v0.9.ebnf v0.9 grammar
 grammar/inscription-v0.10.ebnf v0.10 grammar
 grammar/inscription-v0.11.ebnf v0.11 grammar
-grammar/inscription-v0.12.ebnf current v0.12 grammar
+grammar/inscription-v0.12.ebnf v0.12 grammar
+grammar/inscription-v0.13.ebnf current v0.13 grammar
 tests/goldens/                exact MLIR conformance goldens
 tests/                        unit tests and executable fixtures
 ```

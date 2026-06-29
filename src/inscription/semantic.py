@@ -215,7 +215,12 @@ def resolve_function_table(
             Parameter(param.name, resolve_value_type(param.type_name, fn.line, records, constants, functions, {}))
             for param in fn.params
         )
-        resolved[name] = Function(fn.name, params, fn.return_type, fn.body, fn.line, fn.display_name)
+        return_type = (
+            None
+            if fn.return_type is None
+            else resolve_value_type(fn.return_type, fn.line, records, constants, functions, {})
+        )
+        resolved[name] = Function(fn.name, params, return_type, fn.body, fn.line, fn.display_name)
     return resolved
 
 
@@ -294,6 +299,7 @@ def _check_function(
     records: dict[str, RecordDecl],
     constants: dict[str, ConstValue],
 ) -> None:
+    fn = functions[fn.name]
     resolved_params: list[tuple[str, ValueType]] = []
     for param in fn.params:
         if param.name in constants:
@@ -305,9 +311,10 @@ def _check_function(
         _check_does_function(fn, functions, records, constants, resolved_params)
         return
     if isinstance(fn.return_type, RecordType):
-        raise InscriptionError("record return types are not supported in v0.7", fn.line)
+        if fn.return_type.name not in records:
+            raise InscriptionError(f"unknown type {fn.return_type.name}", fn.line)
     if isinstance(fn.return_type, ViewType):
-        raise InscriptionError("view return types are not supported in v0.11", fn.line)
+        raise InscriptionError("view return types are not supported", fn.line)
     if not fn.body:
         raise InscriptionError(f"phrase '{fn.name}' must evaluate to a value", fn.line)
     bindings = _constant_bindings(constants)
@@ -327,8 +334,14 @@ def _check_function(
         if isinstance(stmt, ReturnStmt):
             if not is_last:
                 raise InscriptionError("value expression must be the final phrase body form", stmt.line)
-            actual = infer_expr_type(stmt.expr, _env_types(bindings), functions, records, expected=fn.return_type, constants=constants)
-            require_type(actual, fn.return_type, stmt.line)
+            actual = _infer_declared_type(stmt.expr, fn.return_type, _env_types(bindings), functions, records, constants)
+            if actual != fn.return_type:
+                if isinstance(actual, RecordType) or isinstance(fn.return_type, RecordType):
+                    raise InscriptionError(
+                        f"phrase {fn.display_name} must return {format_type(fn.return_type)}, got {format_type(actual)}",
+                        stmt.line,
+                    )
+                require_type(actual, fn.return_type, stmt.line)
             returned = True
         else:
             _check_body_stmt(stmt, bindings, functions, records, constants)
@@ -672,7 +685,7 @@ def _check_call_stmt(
     target = _lookup_phrase(stmt.call.name, stmt.line, functions)
     if target.return_type is not None:
         raise InscriptionError(
-            f"phrase `{target.display_name}` returns {target.return_type} and cannot be used as a step", stmt.line
+            f"phrase `{target.display_name}` returns {format_type(target.return_type)} and cannot be used as a step", stmt.line
         )
     _check_call_arguments(stmt.call, target, bindings, functions, records, constants, effectful=True)
 
@@ -990,6 +1003,8 @@ def _infer_declared_type(
     try:
         return infer_expr_type(expr, env, functions, records, expected=expected, constants=constants)
     except InscriptionError as expected_error:
+        if isinstance(expr, Variable) and "record " in str(expected_error) and "cannot be used as a scalar value" in str(expected_error):
+            raise
         if _should_preserve_expected_error(expected_error):
             raise
         try:
@@ -1000,7 +1015,10 @@ def _infer_declared_type(
 
 def _should_preserve_expected_error(error: InscriptionError) -> bool:
     message = str(error)
-    return ("integer literal" in message and "out of range" in message) or message.startswith("cannot cast")
+    return (
+        ("integer literal" in message and "out of range" in message)
+        or message.startswith("cannot cast")
+    )
 
 
 def _env_types(bindings: dict[str, Binding]) -> dict[str, ValueType]:
@@ -1387,11 +1405,8 @@ def infer_expr_type(
         target = _lookup_phrase(expr.name, expr.line, functions)
         if target.return_type is None:
             raise InscriptionError(f"phrase `{target.display_name}` does not return a value", expr.line)
-        if isinstance(target.return_type, RecordType):
-            raise InscriptionError("record return types are not supported in v0.7", expr.line)
         _check_call_argument_types(expr, target, env, functions, records, constants)
         if expected is not None:
-            assert isinstance(expected, str)
             require_type(target.return_type, expected, expr.line)
         return target.return_type
     if isinstance(expr, Comparison):
@@ -1403,16 +1418,22 @@ def infer_expr_type(
     if isinstance(expr, WhenExpr):
         if expected is None:
             expected = infer_expr_type(expr.otherwise, env, functions, records)
-        if not isinstance(expected, str):
-            raise InscriptionError(f"record values cannot be used in value blocks, got {format_type(expected)}", expr.line)
         for case in expr.cases:
-            actual = infer_expr_type(case.expr, env, functions, records, expected=expected)
-            require_type(actual, expected, case.line)
+            actual = _infer_declared_type(case.expr, expected, env, functions, records)
+            if actual != expected:
+                raise InscriptionError(
+                    f"guarded value branches must have matching types, got {format_type(expected)} and {format_type(actual)}",
+                    case.line,
+                )
             condition_type = infer_i1_operand_type(case.condition, env, functions, records)
             if condition_type != "i1":
                 raise InscriptionError(f"value block condition must be i1, got {condition_type}", case.line)
-        otherwise_type = infer_expr_type(expr.otherwise, env, functions, records, expected=expected)
-        require_type(otherwise_type, expected, expr.line)
+        otherwise_type = _infer_declared_type(expr.otherwise, expected, env, functions, records)
+        if otherwise_type != expected:
+            raise InscriptionError(
+                f"guarded value branches must have matching types, got {format_type(expected)} and {format_type(otherwise_type)}",
+                expr.line,
+            )
         return expected
     raise AssertionError(expr)  # pragma: no cover
 
