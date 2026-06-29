@@ -12,12 +12,14 @@ from .ast import (
     Comparison,
     Expr,
     Function,
+    IfStmt,
     Integer,
     Program,
     ReturnStmt,
     SetStmt,
     TrackStmt,
     TypeName,
+    Unary,
     Variable,
     WhenExpr,
     WhileStmt,
@@ -94,6 +96,9 @@ def _check_body_stmt(stmt: BodyStmt, bindings: dict[str, Binding], functions: di
     if isinstance(stmt, WhileStmt):
         _check_while(stmt, bindings, functions)
         return
+    if isinstance(stmt, IfStmt):
+        _check_if(stmt, bindings, functions)
+        return
     raise AssertionError(stmt)  # pragma: no cover
 
 
@@ -148,11 +153,25 @@ def _check_while(stmt: WhileStmt, bindings: dict[str, Binding], functions: dict[
         raise InscriptionError("while loop requires at least one body step", stmt.line)
     scoped = dict(bindings)
     for body_stmt in stmt.body:
-        if isinstance(body_stmt, WhileStmt):
-            raise InscriptionError("nested while loops are not supported until v0.2", body_stmt.line)
-        if isinstance(body_stmt, TrackStmt):
-            raise InscriptionError("track bindings inside while bodies are not supported in v0.1", body_stmt.line)
         _check_body_stmt(body_stmt, scoped, functions)
+
+
+def _check_if(stmt: IfStmt, bindings: dict[str, Binding], functions: dict[str, Function]) -> None:
+    condition_type = infer_expr_type(stmt.condition, _env_types(bindings), functions)
+    if condition_type != "i1":
+        raise InscriptionError(f"if condition must be i1, got {condition_type}", stmt.line)
+    if not stmt.then_body:
+        raise InscriptionError("if branch must contain at least one step", stmt.line)
+    if not stmt.else_body:
+        raise InscriptionError("otherwise branch must contain at least one step", stmt.line)
+
+    then_scope = dict(bindings)
+    for body_stmt in stmt.then_body:
+        _check_body_stmt(body_stmt, then_scope, functions)
+
+    else_scope = dict(bindings)
+    for body_stmt in stmt.else_body:
+        _check_body_stmt(body_stmt, else_scope, functions)
 
 
 def _infer_declared_type(
@@ -200,7 +219,24 @@ def infer_expr_type(
         if expected is not None:
             require_type(actual, expected, expr.line)
         return actual
+    if isinstance(expr, Unary):
+        if expr.op == "not":
+            actual = infer_i1_operand_type(expr.expr, env, functions)
+            if actual != "i1":
+                raise InscriptionError("not requires i1 operand", expr.line)
+            if expected is not None:
+                require_type("i1", expected, expr.line)
+            return "i1"
+        raise AssertionError(expr)  # pragma: no cover
     if isinstance(expr, Binary):
+        if expr.op in {"and", "or"}:
+            left_type = infer_i1_operand_type(expr.left, env, functions)
+            right_type = infer_i1_operand_type(expr.right, env, functions)
+            if left_type != "i1" or right_type != "i1":
+                raise InscriptionError(f"{expr.op} requires i1 operands", expr.line)
+            if expected is not None:
+                require_type("i1", expected, expr.line)
+            return "i1"
         target = expected if expected in NUMERIC_TYPES else None
         if expr.op == "remainder":
             return infer_remainder_type(expr.left, expr.right, env, functions, expr.line, expected=target)
@@ -230,11 +266,20 @@ def infer_expr_type(
         for case in expr.cases:
             actual = infer_expr_type(case.expr, env, functions, expected=expected)
             require_type(actual, expected, case.line)
-            infer_comparison_operand_type(case.condition, env, functions)
+            condition_type = infer_i1_operand_type(case.condition, env, functions)
+            if condition_type != "i1":
+                raise InscriptionError(f"value block condition must be i1, got {condition_type}", case.line)
         otherwise_type = infer_expr_type(expr.otherwise, env, functions, expected=expected)
         require_type(otherwise_type, expected, expr.line)
         return expected
     raise AssertionError(expr)  # pragma: no cover
+
+
+def infer_i1_operand_type(expr: Expr, env: dict[str, TypeName], functions: dict[str, Function]) -> TypeName:
+    try:
+        return infer_expr_type(expr, env, functions, expected="i1")
+    except InscriptionError:
+        return infer_expr_type(expr, env, functions)
 
 
 def infer_numeric_pair_type(

@@ -1,0 +1,13 @@
+multiply by adding a0: i32 and b0: i32 gives i32:
+  track total: i32 from 0
+  track outer: i32 from 0
+  while outer is less than b0:
+    track inner: i32 from 0
+    while inner is less than a0:
+      total becomes total plus 1
+      inner becomes inner plus 1
+    outer becomes outer plus 1
+  total
+
+main gives i32:
+  multiply by adding 6 and 7

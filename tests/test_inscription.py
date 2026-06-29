@@ -129,6 +129,8 @@ class CompilerTests(unittest.TestCase):
                 (GOLDENS / "14_loop_sum.ins").read_text(),
                 (GOLDENS / "16_gcd.ins").read_text(),
                 (GOLDENS / "17_boolean_literals.ins").read_text(),
+                (GOLDENS / "19_collatz.ins").read_text(),
+                (GOLDENS / "22_boolean_operators.ins").read_text(),
             ]
         )
         html = highlight_source(source, output_format="html")
@@ -333,15 +335,38 @@ main gives i32:
                 "bad gives i32:\n  track x: i32 from 0\n  while x is less than 1:\n  x\n",
                 "while loop requires an indented body",
             ),
-            "nested while rejected": (
-                "bad gives i32:\n  track x: i32 from 0\n  while x is less than 1:\n    while x is less than 1:\n      x becomes x plus 1\n  x\n",
-                "nested while loops are not supported until v0.2",
-            ),
             "remainder on i1": ("bad gives i1:\n  true remainder false\n", "remainder requires numeric operands"),
             "remainder mismatched operands": (
                 "to i64 of x: i32 gives i64:\n  1\n\nbad of y: i32 gives i32:\n  y remainder to i64 of y\n",
                 "remainder operands must have same type",
             ),
+            "if condition is not i1": (
+                "bad gives i32:\n  track x: i32 from 0\n  if x:\n    x becomes 1\n  otherwise:\n    x becomes 2\n  x\n",
+                "if condition must be i1",
+            ),
+            "missing if otherwise": (
+                "bad gives i32:\n  track x: i32 from 0\n  if x is equal to 0:\n    x becomes 1\n  x\n",
+                "if block requires otherwise",
+            ),
+            "empty if branch": (
+                "bad gives i32:\n  track x: i32 from 0\n  if x is equal to 0:\n  otherwise:\n    x becomes 1\n  x\n",
+                "if branch must contain at least one step",
+            ),
+            "empty otherwise branch": (
+                "bad gives i32:\n  track x: i32 from 0\n  if x is equal to 0:\n    x becomes 1\n  otherwise:\n  x\n",
+                "otherwise branch must contain at least one step",
+            ),
+            "branch let does not escape": (
+                "bad gives i32:\n  track x: i32 from 0\n  if x is equal to 0:\n    let y be 1\n  otherwise:\n    let y be 2\n  y\n",
+                "unknown binding y",
+            ),
+            "branch track does not escape": (
+                "bad gives i32:\n  track x: i32 from 0\n  if x is equal to 0:\n    track y: i32 from 1\n  otherwise:\n    track y: i32 from 2\n  y\n",
+                "unknown binding y",
+            ),
+            "boolean and requires i1": ("bad gives i1:\n  1 and 2\n", "and requires i1 operands"),
+            "boolean or requires i1": ("bad gives i1:\n  1 or 2\n", "or requires i1 operands"),
+            "boolean not requires i1": ("bad gives i1:\n  not 1\n", "not requires i1 operand"),
         }
         for name, (source, contains) in cases.items():
             with self.subTest(name=name):

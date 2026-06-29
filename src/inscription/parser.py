@@ -12,6 +12,7 @@ from .ast import (
     Comparison,
     Expr,
     Function,
+    IfStmt,
     Integer,
     Parameter,
     Program,
@@ -19,6 +20,7 @@ from .ast import (
     SetStmt,
     TrackStmt,
     TypeName,
+    Unary,
     Variable,
     WhenCase,
     WhenExpr,
@@ -209,6 +211,7 @@ class Parser:
             line.text.startswith("let ")
             or line.text.startswith("track ")
             or self._assignment_match(line) is not None
+            or (line.is_header and line.text.startswith("if "))
             or (line.is_header and line.text.startswith("while "))
         )
 
@@ -217,15 +220,13 @@ class Parser:
         if current.text.startswith("let "):
             return self._parse_let(current), index + 1
         if current.text.startswith("track "):
-            if in_while:
-                raise InscriptionError("track bindings inside while bodies are not supported in v0.1", current.number)
             return self._parse_track(current), index + 1
         assignment = self._assignment_match(current)
         if assignment is not None:
             return self._parse_assignment(current, assignment), index + 1
+        if current.is_header and current.text.startswith("if "):
+            return self._parse_if(index)
         if current.is_header and current.text.startswith("while "):
-            if in_while:
-                raise InscriptionError("nested while loops are not supported until v0.2", current.number)
             return self._parse_while(index)
         raise InscriptionError("expected phrase body item", current.number)
 
@@ -235,23 +236,44 @@ class Parser:
         if not line.is_header or not match:
             raise InscriptionError("malformed while loop", line.number)
         condition = self._parse_expression(match.group(1), line.number)
-        body: list[BodyStmt] = []
-        body_index = index + 1
-        if body_index >= len(self.lines) or self.lines[body_index].indent <= line.indent:
+        body, body_index = self._parse_step_block(index + 1, line.indent, "while body")
+        if not body:
             raise InscriptionError("while loop requires an indented body", line.number)
+        return WhileStmt(condition, tuple(body), line.number), body_index
+
+    def _parse_if(self, index: int) -> tuple[IfStmt, int]:
+        line = self.lines[index]
+        match = re.fullmatch(r"if (.+)", line.text)
+        if not line.is_header or not match:
+            raise InscriptionError("malformed if block", line.number)
+        condition = self._parse_expression(match.group(1), line.number)
+        then_body, otherwise_index = self._parse_step_block(index + 1, line.indent, "if branch")
+        if not then_body:
+            raise InscriptionError("if branch must contain at least one step", line.number)
+        if otherwise_index >= len(self.lines):
+            raise InscriptionError("if block requires otherwise", line.number)
+        otherwise = self.lines[otherwise_index]
+        if not otherwise.is_header or otherwise.text != "otherwise" or otherwise.indent != line.indent:
+            raise InscriptionError("if block requires otherwise", line.number)
+        else_body, next_index = self._parse_step_block(otherwise_index + 1, otherwise.indent, "otherwise branch")
+        if not else_body:
+            raise InscriptionError("otherwise branch must contain at least one step", otherwise.number)
+        return IfStmt(condition, tuple(then_body), tuple(else_body), line.number), next_index
+
+    def _parse_step_block(self, index: int, parent_indent: int, name: str) -> tuple[list[BodyStmt], int]:
+        body: list[BodyStmt] = []
+        body_index = index
         while body_index < len(self.lines):
             current = self.lines[body_index]
-            if current.indent <= line.indent:
+            if current.indent <= parent_indent:
                 break
             if self._looks_like_phrase_header(current):
-                raise InscriptionError("phrase definitions cannot appear inside while bodies", current.number)
+                raise InscriptionError(f"phrase definitions cannot appear inside {name}", current.number)
             if not self._is_body_item_start(current):
-                raise InscriptionError("while body only supports let bindings, assignments, and while loops", current.number)
+                raise InscriptionError(f"{name} only supports let bindings, track bindings, assignments, while loops, and if blocks", current.number)
             item, body_index = self._parse_body_item(body_index, in_while=True)
             body.append(item)
-        if not body:
-            raise InscriptionError("while loop requires at least one body step", line.number)
-        return WhileStmt(condition, tuple(body), line.number), body_index
+        return body, body_index
 
     def _parse_value_block(self, lines: list[Line]) -> Expr:
         cases: list[WhenCase] = []
@@ -275,7 +297,7 @@ class Parser:
                 cases.append(
                     WhenCase(
                         self._parse_expression(expr_text, line.number),
-                        self._parse_comparison(condition_text, line.number),
+                        self._parse_expression(condition_text, line.number),
                         line.number,
                     )
                 )
@@ -369,9 +391,6 @@ def parse_expression(text: str, line: int, phrases: tuple[PhraseTemplate, ...] =
 
 
 def parse_expression_tokens(tokens: list[str], line: int, phrases: tuple[PhraseTemplate, ...] = ()) -> Expr:
-    comparison_index = _top_level_is_index(tokens)
-    if comparison_index is not None:
-        return parse_comparison_tokens(tokens, line, phrases, comparison_index)
     parser = ExpressionParser(tokens, line, phrases)
     expr = parser.parse_expression()
     if not parser.at_end():
@@ -380,45 +399,10 @@ def parse_expression_tokens(tokens: list[str], line: int, phrases: tuple[PhraseT
 
 
 def parse_comparison(text: str, line: int, phrases: tuple[PhraseTemplate, ...] = ()) -> Comparison:
-    tokens = tokenize(text, line)
-    is_index = _top_level_is_index(tokens)
-    if is_index is None:
+    expr = parse_expression(text, line, phrases)
+    if not isinstance(expr, Comparison):
         raise InscriptionError("comparison must contain 'is'", line)
-    return parse_comparison_tokens(tokens, line, phrases, is_index)
-
-
-def _top_level_is_index(tokens: list[str]) -> int | None:
-    depth = 0
-    for index, token in enumerate(tokens):
-        if token == "(":
-            depth += 1
-        elif token == ")":
-            depth -= 1
-        elif token == "is" and depth == 0 and index > 0:
-            return index
-    return None
-
-
-def parse_comparison_tokens(
-    tokens: list[str], line: int, phrases: tuple[PhraseTemplate, ...], is_index: int
-) -> Comparison:
-    left_tokens = tokens[:is_index]
-    rest = tokens[is_index + 1 :]
-    if not left_tokens or not rest:
-        raise InscriptionError("malformed comparison", line)
-    for phrase, predicate in COMPARATORS:
-        phrase_len = len(phrase)
-        if tuple(rest[:phrase_len]) == phrase:
-            right_tokens = rest[phrase_len:]
-            if not right_tokens:
-                raise InscriptionError("comparison is missing right-hand expression", line)
-            return Comparison(
-                predicate,
-                parse_expression_tokens(left_tokens, line, phrases),
-                parse_expression_tokens(right_tokens, line, phrases),
-                line,
-            )
-    raise InscriptionError("unsupported comparison operator", line)
+    return expr
 
 
 class ExpressionParser:
@@ -445,12 +429,45 @@ class ExpressionParser:
         self.pos += 1
         return token
 
-    def parse_expression(self, min_prec: int = 0, stop: set[str] | None = None) -> Expr:
-        stop = stop or set()
-        left = self.parse_primary(stop)
+    def parse_expression(self, stop: set[str] | None = None) -> Expr:
+        return self.parse_or(stop or set())
+
+    def parse_or(self, stop: set[str]) -> Expr:
+        left = self.parse_and(stop)
+        while not self.at_end() and self.peek() == "or" and "or" not in stop:
+            self.pop()
+            right = self.parse_and(stop)
+            left = Binary("or", left, right, self.line)
+        return left
+
+    def parse_and(self, stop: set[str]) -> Expr:
+        left = self.parse_comparison(stop)
+        while not self.at_end() and self.peek() == "and" and "and" not in stop:
+            self.pop()
+            right = self.parse_comparison(stop)
+            left = Binary("and", left, right, self.line)
+        return left
+
+    def parse_comparison(self, stop: set[str]) -> Expr:
+        comparison_stop = set(stop) | {"and", "or"}
+        left = self.parse_arithmetic(comparison_stop)
+        if self.at_end() or self.peek() != "is" or "is" in stop:
+            return left
+        self.pop()
+        rest = self.tokens[self.pos :]
+        for phrase, predicate in COMPARATORS:
+            phrase_len = len(phrase)
+            if tuple(rest[:phrase_len]) == phrase:
+                self.pos += phrase_len
+                right = self.parse_arithmetic(comparison_stop)
+                return Comparison(predicate, left, right, self.line)
+        raise InscriptionError("unsupported comparison operator", self.line)
+
+    def parse_arithmetic(self, stop: set[str], min_prec: int = 0) -> Expr:
+        left = self.parse_unary(stop)
         while not self.at_end():
             token = self.peek()
-            if token in stop or token == ",":
+            if token in stop or token in {",", ")", "is", "and", "or"}:
                 break
             operator = self.peek_operator()
             if operator is None:
@@ -458,12 +475,18 @@ class ExpressionParser:
                     raise InscriptionError("operator 'divided' must be followed by 'by'", self.line)
                 break
             op, prec, width = operator
-            if prec is None or prec < min_prec:
+            if prec < min_prec:
                 break
             self.pos += width
-            right = self.parse_expression(prec + 1, stop)
+            right = self.parse_arithmetic(stop, prec + 1)
             left = Binary(op, left, right, self.line)  # type: ignore[arg-type]
         return left
+
+    def parse_unary(self, stop: set[str]) -> Expr:
+        if self.peek() == "not" and "not" not in stop:
+            self.pop()
+            return Unary("not", self.parse_unary(stop), self.line)
+        return self.parse_primary(stop)
 
     def peek_operator(self) -> tuple[str, int, int] | None:
         token = self.peek()
@@ -548,7 +571,7 @@ class ExpressionParser:
                         if depth == 0:
                             break
                         depth -= 1
-                    elif depth == 0 and (token in stop or token == ","):
+                    elif depth == 0 and (token in stop or token in {",", "and", "or"}):
                         break
                     end += 1
                 arg_tokens = self.tokens[self.pos:end]

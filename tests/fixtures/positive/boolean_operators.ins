@@ -1,0 +1,9 @@
+between one and ten x: i32 gives i1:
+  x is greater than or equal to 1 and x is less than or equal to 10
+
+outside one and ten x: i32 gives i1:
+  x is less than 1 or x is greater than 10
+
+main gives i32:
+  7 when between one and ten 7 and not outside one and ten 7
+  otherwise 1

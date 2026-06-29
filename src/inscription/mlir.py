@@ -11,6 +11,7 @@ from .ast import (
     Comparison,
     Expr,
     Function,
+    IfStmt,
     Integer,
     Program,
     ReturnStmt,
@@ -18,6 +19,7 @@ from .ast import (
     Stmt,
     TrackStmt,
     TypeName,
+    Unary,
     Variable,
     WhenCase,
     WhenExpr,
@@ -48,6 +50,8 @@ class MlirEmitter:
         self.constants: dict[ConstantKey, Value] = {}
         self.tracked_types: dict[str, TypeName] = {}
         self.track_order: list[str] = []
+        self.while_counter = 0
+        self.while_depth = 0
 
     def fresh(self) -> str:
         value = f"%{self.counter}"
@@ -68,6 +72,8 @@ class MlirEmitter:
         self.constants = {}
         self.tracked_types = {}
         self.track_order = []
+        self.while_counter = 0
+        self.while_depth = 0
         args = ", ".join(f"%{param.name}: {param.type_name}" for param in fn.params)
         lines.append(f"  func.func @{fn.name}({args}) -> {fn.return_type} {{")
         env = {param.name: Value(f"%{param.name}", param.type_name) for param in fn.params}
@@ -108,6 +114,9 @@ class MlirEmitter:
         if isinstance(stmt, WhileStmt):
             self.emit_while(stmt, env, lines, indent)
             return
+        if isinstance(stmt, IfStmt):
+            self.emit_if(stmt, env, lines, indent)
+            return
         raise AssertionError(stmt)  # pragma: no cover
 
     def emit_expr(
@@ -127,9 +136,18 @@ class MlirEmitter:
             return self.emit_boolean(expr.value, lines, indent)
         if isinstance(expr, Variable):
             return env[expr.name]
+        if isinstance(expr, Unary):
+            if expr.op == "not":
+                operand = self.emit_expr(expr.expr, env, lines, indent, expected="i1")
+                true = self.emit_boolean(True, lines, indent)
+                out = Value(self.fresh(), "i1")
+                lines.append(f"{indent}{out.name} = arith.xori {operand.name}, {true.name} : i1")
+                return out
+            raise AssertionError(expr)  # pragma: no cover
         if isinstance(expr, Binary):
-            left = self.emit_expr(expr.left, env, lines, indent, expected=type_name)
-            right = self.emit_expr(expr.right, env, lines, indent, expected=type_name)
+            operand_type = "i1" if expr.op in {"and", "or"} else type_name
+            left = self.emit_expr(expr.left, env, lines, indent, expected=operand_type)
+            right = self.emit_expr(expr.right, env, lines, indent, expected=operand_type)
             out = Value(self.fresh(), type_name)
             op = {
                 "plus": "addi",
@@ -137,6 +155,8 @@ class MlirEmitter:
                 "times": "muli",
                 "divided by": "divsi",
                 "remainder": "remsi",
+                "and": "andi",
+                "or": "ori",
             }[expr.op]
             lines.append(f"{indent}{out.name} = arith.{op} {left.name}, {right.name} : {type_name}")
             return out
@@ -195,7 +215,7 @@ class MlirEmitter:
         if not cases:
             return self.emit_expr(otherwise, env, lines, indent, expected=type_name)
         case = cases[0]
-        cond = self.emit_comparison(case.condition, env, lines, indent)
+        cond = self.emit_expr(case.condition, env, lines, indent, expected="i1")
         result = Value(self.fresh(), type_name)
         lines.append(f"{indent}{result.name} = scf.if {cond.name} -> ({type_name}) {{")
         then_value = self.emit_expr(case.expr, dict(env), lines, indent + "  ", expected=type_name)
@@ -216,12 +236,17 @@ class MlirEmitter:
         return out
 
     def emit_while(self, stmt: WhileStmt, env: dict[str, Value], lines: list[str], indent: str) -> None:
-        carried_names = self.loop_carried_names(stmt)
+        loop_id = self.while_counter
+        self.while_counter += 1
+        arg_suffix = "" if self.while_depth == 0 else f"_loop{loop_id}"
+        visible_track_order = list(self.track_order)
+        carried_names = self.assigned_tracked_names(stmt.body, visible_track_order)
         carried_values = [env[name] for name in carried_names]
         carried_types = [value.type_name for value in carried_values]
         result_base = self.fresh() if carried_names else None
         initial_operands = ", ".join(
-            f"%{name}_before = {value.name}" for name, value in zip(carried_names, carried_values, strict=True)
+            f"%{name}_before{arg_suffix} = {value.name}"
+            for name, value in zip(carried_names, carried_values, strict=True)
         )
         input_types = self.type_list(carried_types)
         result_types = self.result_type_list(carried_types)
@@ -233,17 +258,30 @@ class MlirEmitter:
 
         before_env = dict(env)
         for name, type_name in zip(carried_names, carried_types, strict=True):
-            before_env[name] = Value(f"%{name}_before", type_name)
+            before_env[name] = Value(f"%{name}_before{arg_suffix}", type_name)
         self.emit_with_local_constants(lambda: self.emit_while_before(stmt, before_env, carried_names, carried_types, lines, indent))
 
         lines.append(f"{indent}}} do {{")
         if carried_names:
-            body_args = ", ".join(f"%{name}_body: {type_name}" for name, type_name in zip(carried_names, carried_types, strict=True))
+            body_args = ", ".join(
+                f"%{name}_body{arg_suffix}: {type_name}"
+                for name, type_name in zip(carried_names, carried_types, strict=True)
+            )
             lines.append(f"{indent}^bb0({body_args}):")
         body_env = dict(env)
         for name, type_name in zip(carried_names, carried_types, strict=True):
-            body_env[name] = Value(f"%{name}_body", type_name)
-        self.emit_with_local_constants(lambda: self.emit_while_body(stmt, body_env, carried_names, carried_types, lines, indent))
+            body_env[name] = Value(f"%{name}_body{arg_suffix}", type_name)
+
+        saved_while_depth = self.while_depth
+        self.while_depth += 1
+        try:
+            self.emit_with_local_constants(
+                lambda: self.emit_with_track_scope(
+                    lambda: self.emit_while_body(stmt, body_env, carried_names, carried_types, lines, indent)
+                )
+            )
+        finally:
+            self.while_depth = saved_while_depth
         lines.append(f"{indent}}}")
 
         if result_base is not None:
@@ -284,6 +322,58 @@ class MlirEmitter:
         else:
             lines.append(f"{indent}  scf.yield")
 
+    def emit_if(self, stmt: IfStmt, env: dict[str, Value], lines: list[str], indent: str) -> None:
+        visible_track_order = list(self.track_order)
+        result_names = self.assigned_tracked_names((*stmt.then_body, *stmt.else_body), visible_track_order)
+        result_values = [env[name] for name in result_names]
+        result_types = [value.type_name for value in result_values]
+
+        cond = self.emit_expr(stmt.condition, env, lines, indent, expected="i1")
+        result_base = self.fresh() if result_names else None
+        if result_names:
+            assignment = f"{result_base}:{len(result_names)} = " if len(result_names) > 1 else f"{result_base} = "
+            lines.append(f"{indent}{assignment}scf.if {cond.name} -> ({self.type_list(result_types)}) {{")
+        else:
+            lines.append(f"{indent}scf.if {cond.name} {{")
+
+        then_env = dict(env)
+        self.emit_with_local_constants(
+            lambda: self.emit_with_track_scope(
+                lambda: self.emit_if_branch(stmt.then_body, then_env, result_names, result_types, lines, indent)
+            )
+        )
+        lines.append(f"{indent}}} else {{")
+        else_env = dict(env)
+        self.emit_with_local_constants(
+            lambda: self.emit_with_track_scope(
+                lambda: self.emit_if_branch(stmt.else_body, else_env, result_names, result_types, lines, indent)
+            )
+        )
+        lines.append(f"{indent}}}")
+
+        if result_base is not None:
+            for index, (name, type_name) in enumerate(zip(result_names, result_types, strict=True)):
+                result_name = result_base if len(result_names) == 1 else f"{result_base}#{index}"
+                env[name] = Value(result_name, type_name)
+
+    def emit_if_branch(
+        self,
+        body: tuple[Stmt, ...],
+        env: dict[str, Value],
+        result_names: list[str],
+        result_types: list[TypeName],
+        lines: list[str],
+        indent: str,
+    ) -> None:
+        branch_indent = indent + "  "
+        for body_stmt in body:
+            self.emit_body_stmt(body_stmt, env, lines, branch_indent)
+        if result_names:
+            yielded = ", ".join(env[name].name for name in result_names)
+            lines.append(f"{branch_indent}scf.yield {yielded} : {self.type_list(result_types)}")
+        else:
+            lines.append(f"{branch_indent}scf.yield")
+
     def emit_with_local_constants(self, emit: Callable[[], None]) -> None:
         saved = self.constants
         self.constants = {}
@@ -292,9 +382,32 @@ class MlirEmitter:
         finally:
             self.constants = saved
 
-    def loop_carried_names(self, stmt: WhileStmt) -> list[str]:
-        assigned = {body_stmt.name for body_stmt in stmt.body if isinstance(body_stmt, AssignStmt)}
-        return [name for name in self.track_order if name in assigned]
+    def emit_with_track_scope(self, emit: Callable[[], None]) -> None:
+        saved_tracked_types = dict(self.tracked_types)
+        saved_track_order = list(self.track_order)
+        try:
+            emit()
+        finally:
+            self.tracked_types = saved_tracked_types
+            self.track_order = saved_track_order
+
+    def assigned_tracked_names(self, body: tuple[Stmt, ...], visible_track_order: list[str]) -> list[str]:
+        visible = set(visible_track_order)
+        assigned: set[str] = set()
+
+        def visit(statements: tuple[Stmt, ...]) -> None:
+            for statement in statements:
+                if isinstance(statement, AssignStmt):
+                    if statement.name in visible:
+                        assigned.add(statement.name)
+                elif isinstance(statement, WhileStmt):
+                    visit(statement.body)
+                elif isinstance(statement, IfStmt):
+                    visit(statement.then_body)
+                    visit(statement.else_body)
+
+        visit(body)
+        return [name for name in visible_track_order if name in assigned]
 
     def type_list(self, types: list[TypeName]) -> str:
         return ", ".join(types)

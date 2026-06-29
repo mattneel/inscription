@@ -2,10 +2,15 @@
   "absolute_value.ins": 5,
   "add.ins": 5,
   "adjust.ins": 3,
+  "boolean_operators.ins": 7,
+  "branch_absolute.ins": 7,
   "clamp.ins": 255,
+  "collatz_steps.ins": 16,
   "gcd.ins": 6,
   "iterative_factorial.ins": 120,
   "loop_sum.ins": 55,
+  "nested_while_multiply.ins": 42,
+  "partial_branch_assignment.ins": 4,
   "phrase_max.ins": 7,
   "recursive_factorial.ins": 120
 }

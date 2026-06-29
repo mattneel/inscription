@@ -5,7 +5,8 @@ from typing import Literal
 
 TypeName = Literal["i1", "i32", "i64"]
 CmpPredicate = Literal["eq", "ne", "slt", "sle", "sgt", "sge"]
-BinOp = Literal["plus", "minus", "times", "divided by", "remainder"]
+BinOp = Literal["plus", "minus", "times", "divided by", "remainder", "and", "or"]
+UnaryOp = Literal["not"]
 
 
 @dataclass(frozen=True)
@@ -55,6 +56,13 @@ class Binary:
 
 
 @dataclass(frozen=True)
+class Unary:
+    op: UnaryOp
+    expr: "Expr"
+    line: int
+
+
+@dataclass(frozen=True)
 class Call:
     name: str
     args: tuple["Expr", ...]
@@ -72,7 +80,7 @@ class Comparison:
 @dataclass(frozen=True)
 class WhenCase:
     expr: "Expr"
-    condition: Comparison
+    condition: "Expr"
     line: int
 
 
@@ -83,7 +91,7 @@ class WhenExpr:
     line: int
 
 
-Expr = Integer | Boolean | Variable | Binary | Call | Comparison | WhenExpr
+Expr = Integer | Boolean | Variable | Unary | Binary | Call | Comparison | WhenExpr
 
 
 @dataclass(frozen=True)
@@ -116,10 +124,18 @@ class WhileStmt:
 
 
 @dataclass(frozen=True)
+class IfStmt:
+    condition: Expr
+    then_body: tuple["BodyStmt", ...]
+    else_body: tuple["BodyStmt", ...]
+    line: int
+
+
+@dataclass(frozen=True)
 class ReturnStmt:
     expr: Expr
     line: int
 
 
-BodyStmt = SetStmt | TrackStmt | AssignStmt | WhileStmt
+BodyStmt = SetStmt | TrackStmt | AssignStmt | WhileStmt | IfStmt
 Stmt = BodyStmt | ReturnStmt

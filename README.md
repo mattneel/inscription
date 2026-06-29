@@ -6,7 +6,7 @@ The language is readable, but it is **not** natural-language interpretation: eve
 
 ## Status
 
-This repository currently implements **Inscription v0.1**:
+This repository currently implements **Inscription v0.2**:
 
 - source-visible scalar types: `i1`, `i32`, and `i64`
 - phrase-shaped function definitions and phrase-shaped calls
@@ -16,8 +16,11 @@ This repository currently implements **Inscription v0.1**:
 - tracked mutable source bindings with `track name: type from expression`
 - assignment to tracked bindings with `name becomes expression`
 - `while condition:` step blocks lowered as loop-carried SSA values through `scf.while`
+- nested `while` loops
+- step-level `if condition:` / `otherwise:` blocks lowered through `scf.if` SSA results
 - integer arithmetic: `plus`, `minus`, `times`, `divided by`, and `remainder`
 - boolean literals: `true` and `false`
+- boolean operators: `and`, `or`, and `not`
 - comparison expressions that evaluate to `i1`
 - parenthesized expressions
 - deterministic parsing and semantic checks
@@ -26,7 +29,7 @@ This repository currently implements **Inscription v0.1**:
 - LLVM 22 lowering and execution through `mlir-opt`, `mlir-translate`, and `lli`
 - no source-level I/O, arrays, floats, pointers, memrefs, storage allocation, statement-level `return`, `break`, `continue`, or natural-language inference
 
-See [`docs/inscription-v0.1-spec.md`](docs/inscription-v0.1-spec.md) and [`grammar/inscription-v0.1.ebnf`](grammar/inscription-v0.1.ebnf) for the exact current language contract. The original v0 contract remains in [`docs/inscription-v0-spec.md`](docs/inscription-v0-spec.md) and [`grammar/inscription-v0.ebnf`](grammar/inscription-v0.ebnf).
+See [`docs/inscription-v0.2-spec.md`](docs/inscription-v0.2-spec.md) and [`grammar/inscription-v0.2.ebnf`](grammar/inscription-v0.2.ebnf) for the exact current language contract. The immutable v0 and v0.1 contracts remain in [`docs/inscription-v0-spec.md`](docs/inscription-v0-spec.md), [`docs/inscription-v0.1-spec.md`](docs/inscription-v0.1-spec.md), [`grammar/inscription-v0.ebnf`](grammar/inscription-v0.ebnf), and [`grammar/inscription-v0.1.ebnf`](grammar/inscription-v0.1.ebnf).
 
 ## Requirements
 
@@ -142,16 +145,20 @@ main gives i32:
   square of 12
 ```
 
-Body items may introduce immutable lets, tracked bindings, assignments, or while loops:
+Body items may introduce immutable lets, tracked bindings, assignments, while loops, or step-level if/otherwise blocks:
 
 ```text
 track total: i32 from 0
 total becomes total plus 1
 while total is less than 10:
   total becomes total plus 1
+if total is greater than 10:
+  total becomes 10
+otherwise:
+  total becomes total
 ```
 
-Tracked bindings are source-level mutable names, but they lower to SSA values and `scf.while` loop-carried results, not memory.
+Tracked bindings are source-level mutable names, but they lower to SSA values, `scf.while` loop-carried results, and `scf.if` results, not memory.
 
 Conditional value blocks return the first matching line, with a required fallback:
 
@@ -186,11 +193,14 @@ factorial of n: i64 gives i64:
   otherwise n times factorial of (n minus 1)
 ```
 
-Comparison expressions return `i1`, and boolean literals are `true` and `false`:
+Comparison expressions return `i1`; boolean literals are `true` and `false`; boolean operators are strict `i1` expressions:
 
 ```text
 is zero x: i32 gives i1:
   x is equal to 0
+
+between one and ten x: i32 gives i1:
+  x is greater than or equal to 1 and x is less than or equal to 10
 ```
 
 Expressions:
@@ -208,6 +218,9 @@ left minus right
 left times right
 left divided by right
 left remainder right
+not done
+left and right
+left or right
 (a plus b) times 2
 x is equal to 0
 ```
@@ -223,7 +236,7 @@ left is greater than right
 left is greater than or equal to right
 ```
 
-Important v0.1 rules:
+Important v0.2 rules:
 
 - function names are generated from the leading literal words in a phrase definition
 - phrase names are unique; there is no overloading
@@ -232,11 +245,15 @@ Important v0.1 rules:
 - assignment is valid only for tracked bindings
 - tracked binding initializers and assignments must match the declared tracked type
 - while conditions must be `i1`
-- while-body lets are scoped to that loop iteration and do not escape
-- nested while loops are intentionally rejected until v0.2
+- while-body lets and tracks are scoped to that loop iteration and do not escape
+- nested while loops are supported
+- if/otherwise conditions must be `i1`, and both branches must contain at least one step
+- branch-local lets and tracks do not escape
+- tracked bindings assigned in if branches lower to `scf.if` results in track declaration order
 - arithmetic operands must be numeric (`i32` or `i64`)
 - `remainder` requires matching numeric operands and lowers to `arith.remsi`
 - comparisons require numeric operands and return `i1`
+- boolean `and`, `or`, and `not` require `i1` operands and return `i1`
 - variables must be initialized by a phrase hole, prior `let`, or prior `track`
 - phrase calls must match a declared phrase template exactly
 - conditional value blocks require `otherwise`
@@ -261,6 +278,8 @@ PYTHONPATH=src python -m inscription run tests/fixtures/positive/adjust.ins     
 PYTHONPATH=src python -m inscription run tests/fixtures/positive/loop_sum.ins            # exits 55
 PYTHONPATH=src python -m inscription run tests/fixtures/positive/iterative_factorial.ins # exits 120
 PYTHONPATH=src python -m inscription run tests/fixtures/positive/gcd.ins                 # exits 6
+PYTHONPATH=src python -m inscription run tests/fixtures/positive/collatz_steps.ins       # exits 16
+PYTHONPATH=src python -m inscription run tests/fixtures/positive/nested_while_multiply.ins # exits 42
 ```
 
 ## Repository layout
@@ -268,9 +287,11 @@ PYTHONPATH=src python -m inscription run tests/fixtures/positive/gcd.ins        
 ```text
 src/inscription/              compiler implementation
 docs/inscription-v0-spec.md   original v0 language and toolchain specification
-docs/inscription-v0.1-spec.md current v0.1 language and toolchain specification
+docs/inscription-v0.1-spec.md v0.1 language and toolchain specification
+docs/inscription-v0.2-spec.md current v0.2 language and toolchain specification
 grammar/inscription-v0.ebnf   original v0 grammar
-grammar/inscription-v0.1.ebnf current v0.1 grammar
+grammar/inscription-v0.1.ebnf v0.1 grammar
+grammar/inscription-v0.2.ebnf current v0.2 grammar
 tests/goldens/                exact MLIR conformance goldens
 tests/                        unit tests and executable fixtures
 ```
