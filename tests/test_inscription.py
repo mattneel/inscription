@@ -138,6 +138,9 @@ class CompilerTests(unittest.TestCase):
                 (GOLDENS / "28_unsigned_comparison.ins").read_text(),
                 (GOLDENS / "29_buffer_sum.ins").read_text(),
                 (GOLDENS / "35_fill_buffer_procedure.ins").read_text(),
+                (GOLDENS / "39_counted_loop_sum.ins").read_text(),
+                (GOLDENS / "41_buffer_length.ins").read_text(),
+                (GOLDENS / "43_for_each_fill.ins").read_text(),
                 "highlight new widths a: i8 and b: i16 and c: u64 gives u64:\n  c bitwise xor c\n",
             ]
         )
@@ -264,6 +267,28 @@ main gives i32:
         self.assertIn(": (memref<4xi32>, i32) -> ()", mlir)
         self.assertIn("memref.store %value, %cells", mlir)
         self.assertIn("func.func @sum_buffer(%cells: memref<4xi32>) -> i32", mlir)
+
+    def test_v06_for_loops_and_length_lower_to_scf_for(self):
+        mlir = compile_source(self.fixture("for_each_fill.ins"))
+        self.assertIn("func.func @fill_each(%cells: memref<4xi32>, %value: i32)", mlir)
+        self.assertIn("scf.for", mlir)
+        self.assertIn("iter_args", mlir)
+        self.assertIn("arith.index_cast", mlir)
+        self.assertIn("memref.store %value, %cells", mlir)
+
+        length_mlir = compile_source(self.fixture("buffer_length.ins"))
+        self.assertIn("arith.constant 4 : i32", length_mlir)
+        self.assertNotIn("memref.dim", length_mlir)
+
+        length_bound_mlir = compile_source(
+            "sum by length cells: buffer of 4 i32 gives i32:\n"
+            "  let total be 0\n"
+            "  for i from 0 up to length of cells:\n"
+            "    total becomes total plus cells at i\n"
+            "  total\n"
+        )
+        self.assertIn("arith.constant 4 : i32", length_bound_mlir)
+        self.assertIn("scf.for", length_bound_mlir)
 
     def test_valid_identifier_cannot_collide_with_generated_ssa_names(self):
         source = """echo of v0: i32 gives i32:
@@ -540,6 +565,59 @@ main gives i32:
             ),
             "does phrase with final scalar value": ("bad does:\n  1\n", "does phrase body cannot end with a value expression"),
             "empty does phrase": ("bad does:\n", "does phrase body must contain at least one step"),
+            "for bounds type mismatch": (
+                "bad gives i32:\n  let end: i64 be 10\n  for i from 0 up to end:\n    let x be i\n  0\n",
+                "for loop bounds must have matching integer types, got i32 and i64",
+            ),
+            "for bounds boolean": (
+                "bad gives i32:\n  for i from false up to true:\n    let x be 0\n  0\n",
+                "for loop bounds must be integer types, got i1 and i1",
+            ),
+            "for zero step": (
+                "bad gives i32:\n  for i from 0 up to 10 by 0:\n    let x be i\n  0\n",
+                "for loop step must be at least 1",
+            ),
+            "for missing body": (
+                "bad gives i32:\n  for i from 0 up to 10:\n  0\n",
+                "for loop body must contain at least one step",
+            ),
+            "for index escapes": (
+                "bad gives i32:\n  for i from 0 up to 10:\n    let x be i\n  i\n",
+                "unknown binding i",
+            ),
+            "for index cannot be rebound": (
+                "bad gives i32:\n  for i from 0 up to 10:\n    i becomes i plus 1\n  0\n",
+                "cannot rebind for-loop index i",
+            ),
+            "for index cannot shadow": (
+                "bad gives i32:\n  let i be 0\n  for i from 0 up to 10:\n    let x be i\n  0\n",
+                "binding i already exists",
+            ),
+            "length of unknown": ("bad gives i32:\n  length of cells\n", "unknown binding cells"),
+            "length of scalar": (
+                "bad gives i32:\n  let cells be 0\n  length of cells\n",
+                "length of cells requires a buffer, got i32",
+            ),
+            "for each unknown": (
+                "bad gives i32:\n  for each index i of cells:\n    let x be i\n  0\n",
+                "unknown binding cells",
+            ),
+            "for each scalar": (
+                "bad gives i32:\n  let cells be 0\n  for each index i of cells:\n    let x be i\n  0\n",
+                "for each index requires a buffer, got i32",
+            ),
+            "for each index shadowing": (
+                "bad gives i32:\n  let i be 0\n  let cells be buffer of 4 i32 filled with 0\n  for each index i of cells:\n    cells at i becomes 1\n  0\n",
+                "binding i already exists",
+            ),
+            "for each missing body": (
+                "bad gives i32:\n  let cells be buffer of 4 i32 filled with 0\n  for each index i of cells:\n  0\n",
+                "for loop body must contain at least one step",
+            ),
+            "length used as guard": (
+                "bad cells: buffer of 4 i32 gives i32:\n  1 when length of cells\n  otherwise 0\n",
+                "value block condition must be i1, got i32",
+            ),
         }
         for name, (source, contains) in cases.items():
             with self.subTest(name=name):

@@ -78,6 +78,12 @@ class BufferLoad:
 
 
 @dataclass(frozen=True)
+class LengthOf:
+    name: str
+    line: int
+
+
+@dataclass(frozen=True)
 class Binary:
     op: BinOp
     left: "Expr"
@@ -128,7 +134,7 @@ class WhenExpr:
     line: int
 
 
-Expr = Integer | Boolean | Variable | BufferLoad | Unary | Cast | Binary | Call | Comparison | WhenExpr
+Expr = Integer | Boolean | Variable | BufferLoad | LengthOf | Unary | Cast | Binary | Call | Comparison | WhenExpr
 
 
 @dataclass(frozen=True)
@@ -176,6 +182,24 @@ class WhileStmt:
 
 
 @dataclass(frozen=True)
+class ForStmt:
+    name: str
+    start: Expr
+    end: Expr
+    step: int
+    body: tuple["BodyStmt", ...]
+    line: int
+
+
+@dataclass(frozen=True)
+class ForEachStmt:
+    name: str
+    buffer_name: str
+    body: tuple["BodyStmt", ...]
+    line: int
+
+
+@dataclass(frozen=True)
 class IfStmt:
     condition: Expr
     then_body: tuple["BodyStmt", ...]
@@ -189,5 +213,5 @@ class ReturnStmt:
     line: int
 
 
-BodyStmt = SetStmt | BufferBinding | AssignStmt | BufferStoreStmt | CallStmt | WhileStmt | IfStmt
+BodyStmt = SetStmt | BufferBinding | AssignStmt | BufferStoreStmt | CallStmt | WhileStmt | ForStmt | ForEachStmt | IfStmt
 Stmt = BodyStmt | ReturnStmt

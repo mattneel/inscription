@@ -1,0 +1,13 @@
+sum buffer each cells: buffer of 4 i32 gives i32:
+  let total be 0
+  for each index i of cells:
+    total becomes total plus cells at i
+  total
+
+main gives i32:
+  let cells be buffer of 4 i32 filled with 0
+  cells at 0 becomes 1
+  cells at 1 becomes 2
+  cells at 2 becomes 3
+  cells at 3 becomes 4
+  sum buffer each cells

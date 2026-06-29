@@ -17,9 +17,12 @@ from .ast import (
     Cast,
     Comparison,
     Expr,
+    ForEachStmt,
+    ForStmt,
     Function,
     IfStmt,
     Integer,
+    LengthOf,
     Parameter,
     Program,
     ReturnStmt,
@@ -38,11 +41,11 @@ NAME_RE = re.compile(r"[a-z][a-z0-9_]*")
 TOKEN_RE = re.compile(r"\s*(-?\d+|[a-z][a-z0-9_]*|[(),])")
 RESERVED = {
     "address", "and", "arguments", "array", "as", "at", "be", "becomes", "bitwise", "buffer", "by", "call",
-    "divided", "do", "does", "else", "end", "equal", "false", "filled", "float", "from", "function", "gives",
-    "greater", "i1", "i32", "i64", "if", "input",
-    "i8", "i16", "is", "less", "let", "memref", "minus", "no", "not", "or", "otherwise", "output", "parameters",
+    "divided", "do", "does", "each", "else", "equal", "false", "filled", "float", "for", "from",
+    "function", "gives", "greater", "i1", "i32", "i64", "if", "index", "input",
+    "i8", "i16", "is", "length", "less", "let", "memref", "minus", "no", "not", "or", "otherwise", "output", "parameters",
     "pointer", "plus", "print", "remainder", "return", "set", "shifted", "takes", "than", "then", "times", "to",
-    "track", "true", "u8", "u16", "u32", "u64", "when", "while", "with", "xor", "zero",
+    "track", "true", "u8", "u16", "u32", "u64", "up", "when", "while", "with", "xor", "zero",
 }
 TYPE_NAMES: set[str] = {"i1", "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64"}
 COMPARATORS: tuple[tuple[tuple[str, ...], str], ...] = (
@@ -287,6 +290,7 @@ class Parser:
             or self._assignment_match(line) is not None
             or (line.is_header and line.text.startswith("if "))
             or (line.is_header and line.text.startswith("while "))
+            or (line.is_header and line.text.startswith("for "))
             or (include_phrase_calls and self._parse_phrase_call_expr(line) is not None)
         )
 
@@ -306,6 +310,8 @@ class Parser:
             return self._parse_if(index)
         if current.is_header and current.text.startswith("while "):
             return self._parse_while(index)
+        if current.is_header and current.text.startswith("for "):
+            return self._parse_for(index)
         if include_phrase_calls:
             call = self._parse_phrase_call_expr(current)
             if call is not None:
@@ -322,6 +328,44 @@ class Parser:
         if not body:
             raise InscriptionError("while loop requires an indented body", line.number)
         return WhileStmt(condition, tuple(body), line.number), body_index
+
+    def _parse_for(self, index: int) -> tuple[ForStmt | ForEachStmt, int]:
+        line = self.lines[index]
+        if not line.is_header:
+            raise InscriptionError("malformed for loop", line.number)
+        each_match = re.fullmatch(r"for each index ([a-z][a-z0-9_]*) of ([a-z][a-z0-9_]*)", line.text)
+        if each_match:
+            body, body_index = self._parse_step_block(index + 1, line.indent, "for loop body")
+            if not body:
+                raise InscriptionError("for loop body must contain at least one step", line.number)
+            return (
+                ForEachStmt(
+                    self._name(each_match.group(1), line.number),
+                    self._name(each_match.group(2), line.number),
+                    tuple(body),
+                    line.number,
+                ),
+                body_index,
+            )
+
+        match = re.fullmatch(r"for ([a-z][a-z0-9_]*) from (.+) up to (.+?)(?: by (-?\d+))?", line.text)
+        if not match:
+            raise InscriptionError("malformed for loop", line.number)
+        step = int(match.group(4)) if match.group(4) is not None else 1
+        body, body_index = self._parse_step_block(index + 1, line.indent, "for loop body")
+        if not body:
+            raise InscriptionError("for loop body must contain at least one step", line.number)
+        return (
+            ForStmt(
+                self._name(match.group(1), line.number),
+                self._parse_expression(match.group(2), line.number),
+                self._parse_expression(match.group(3), line.number),
+                step,
+                tuple(body),
+                line.number,
+            ),
+            body_index,
+        )
 
     def _parse_if(self, index: int) -> tuple[IfStmt, int]:
         line = self.lines[index]
@@ -353,7 +397,7 @@ class Parser:
                 raise InscriptionError(f"phrase definitions cannot appear inside {name}", current.number)
             if not self._is_body_item_start(current, include_phrase_calls=True):
                 raise InscriptionError(
-                    f"{name} only supports let bindings, assignments, phrase calls, while loops, and if blocks",
+                    f"{name} only supports let bindings, assignments, phrase calls, while loops, for loops, and if blocks",
                     current.number,
                 )
             item, body_index = self._parse_body_item(body_index, include_phrase_calls=True)
@@ -705,6 +749,13 @@ class ExpressionParser:
         token = self.peek()
         if token is None or token in stop or token == ",":
             raise InscriptionError("expected expression", self.line)
+        if token == "length" and tuple(self.tokens[self.pos : self.pos + 2]) == ("length", "of"):
+            self.pop()
+            self.pop()
+            name = self.pop()
+            if not NAME_RE.fullmatch(name) or name in RESERVED:
+                raise InscriptionError(f"invalid buffer name '{name}'", self.line)
+            return LengthOf(name, self.line)
         phrase_call = self.try_parse_phrase_call(stop)
         if phrase_call is not None:
             return phrase_call

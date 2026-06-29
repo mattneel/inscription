@@ -17,9 +17,12 @@ from .ast import (
     Cast,
     Comparison,
     Expr,
+    ForEachStmt,
+    ForStmt,
     Function,
     IfStmt,
     Integer,
+    LengthOf,
     Program,
     ReturnStmt,
     SetStmt,
@@ -87,6 +90,8 @@ class MlirEmitter:
         self.binding_order: list[str] = []
         self.while_counter = 0
         self.while_depth = 0
+        self.for_counter = 0
+        self.for_depth = 0
 
     def fresh(self) -> str:
         value = f"%{self.counter}"
@@ -108,6 +113,8 @@ class MlirEmitter:
         self.binding_order = [param.name for param in fn.params]
         self.while_counter = 0
         self.while_depth = 0
+        self.for_counter = 0
+        self.for_depth = 0
         args = ", ".join(f"%{param.name}: {mlir_value_type(param.type_name)}" for param in fn.params)
         return_suffix = "" if fn.return_type is None else f" -> {mlir_type(fn.return_type)}"
         lines.append(f"  func.func @{fn.name}({args}){return_suffix} {{")
@@ -172,6 +179,12 @@ class MlirEmitter:
         if isinstance(stmt, WhileStmt):
             self.emit_while(stmt, env, lines, indent)
             return
+        if isinstance(stmt, ForStmt):
+            self.emit_for(stmt, env, lines, indent)
+            return
+        if isinstance(stmt, ForEachStmt):
+            self.emit_for_each(stmt, env, lines, indent)
+            return
         if isinstance(stmt, IfStmt):
             self.emit_if(stmt, env, lines, indent)
             return
@@ -196,6 +209,9 @@ class MlirEmitter:
             return self.require_scalar(env[expr.name])
         if isinstance(expr, BufferLoad):
             return self.emit_buffer_load(expr, env, lines, indent)
+        if isinstance(expr, LengthOf):
+            buffer = self.require_buffer(env[expr.name])
+            return self.emit_integer(buffer.buffer_type.length, "i32", lines, indent)
         if isinstance(expr, Unary):
             return self.emit_unary(expr, env, lines, indent, type_name)
         if isinstance(expr, Cast):
@@ -367,6 +383,12 @@ class MlirEmitter:
         lines.append(f"{indent}{out} = arith.{op} {value.name} : {mlir_type(value.type_name)} to index")
         return out
 
+    def emit_index_to_integer(self, index_value: str, type_name: TypeName, lines: list[str], indent: str) -> Value:
+        out = Value(self.fresh(), type_name)
+        op = "index_cast" if is_signed_type(type_name) else "index_castui"
+        lines.append(f"{indent}{out.name} = arith.{op} {index_value} : index to {mlir_type(type_name)}")
+        return out
+
     def emit_when_expr(
         self, expr: WhenExpr, env: dict[str, EnvValue], lines: list[str], indent: str, type_name: TypeName
     ) -> Value:
@@ -498,6 +520,130 @@ class MlirEmitter:
         else:
             lines.append(f"{indent}  scf.yield")
 
+    def emit_for(self, stmt: ForStmt, env: dict[str, EnvValue], lines: list[str], indent: str) -> None:
+        loop_id = self.for_counter
+        self.for_counter += 1
+        arg_suffix = "" if self.for_depth == 0 else f"_for{loop_id}"
+        env_types = self.env_types(env)
+        loop_type = infer_expr_type(stmt.start, env_types, self.functions)
+        start = self.emit_index(stmt.start, env, lines, indent)
+        end = self.emit_index(stmt.end, env, lines, indent)
+        step = self.emit_index_constant(stmt.step, lines, indent)
+        iv = self.fresh()
+
+        visible_binding_order = list(self.binding_order)
+        carried_names = self.assigned_binding_names(stmt.body, visible_binding_order)
+        carried_values = [self.require_scalar(env[name]) for name in carried_names]
+        carried_types = [value.type_name for value in carried_values]
+        result_base = self.fresh() if carried_names else None
+        iter_args = ", ".join(
+            f"%{name}_iter{arg_suffix} = {value.name}"
+            for name, value in zip(carried_names, carried_values, strict=True)
+        )
+
+        if carried_names:
+            assignment = f"{result_base}:{len(carried_names)} = " if len(carried_names) > 1 else f"{result_base} = "
+            lines.append(
+                f"{indent}{assignment}scf.for {iv} = {start} to {end} step {step} "
+                f"iter_args({iter_args}) -> ({self.type_list(carried_types)}) {{"
+            )
+        else:
+            lines.append(f"{indent}scf.for {iv} = {start} to {end} step {step} {{")
+
+        body_env = dict(env)
+        for name, type_name in zip(carried_names, carried_types, strict=True):
+            body_env[name] = Value(f"%{name}_iter{arg_suffix}", type_name)
+
+        saved_for_depth = self.for_depth
+        self.for_depth += 1
+        try:
+            self.emit_with_local_constants(
+                lambda: self.emit_with_binding_scope(
+                    lambda: self.emit_for_body(stmt.name, loop_type, stmt.body, body_env, carried_names, carried_types, iv, lines, indent)
+                )
+            )
+        finally:
+            self.for_depth = saved_for_depth
+
+        lines.append(f"{indent}}}")
+
+        if result_base is not None:
+            for index, (name, type_name) in enumerate(zip(carried_names, carried_types, strict=True)):
+                result_name = result_base if len(carried_names) == 1 else f"{result_base}#{index}"
+                env[name] = Value(result_name, type_name)
+
+    def emit_for_each(self, stmt: ForEachStmt, env: dict[str, EnvValue], lines: list[str], indent: str) -> None:
+        buffer = self.require_buffer(env[stmt.buffer_name])
+        lower = self.emit_index_constant(0, lines, indent)
+        upper = self.emit_index_constant(buffer.buffer_type.length, lines, indent)
+        step = self.emit_index_constant(1, lines, indent)
+        iv = self.fresh()
+
+        loop_id = self.for_counter
+        self.for_counter += 1
+        arg_suffix = "" if self.for_depth == 0 else f"_for{loop_id}"
+        visible_binding_order = list(self.binding_order)
+        carried_names = self.assigned_binding_names(stmt.body, visible_binding_order)
+        carried_values = [self.require_scalar(env[name]) for name in carried_names]
+        carried_types = [value.type_name for value in carried_values]
+        result_base = self.fresh() if carried_names else None
+        iter_args = ", ".join(
+            f"%{name}_iter{arg_suffix} = {value.name}"
+            for name, value in zip(carried_names, carried_values, strict=True)
+        )
+
+        if carried_names:
+            assignment = f"{result_base}:{len(carried_names)} = " if len(carried_names) > 1 else f"{result_base} = "
+            lines.append(
+                f"{indent}{assignment}scf.for {iv} = {lower} to {upper} step {step} "
+                f"iter_args({iter_args}) -> ({self.type_list(carried_types)}) {{"
+            )
+        else:
+            lines.append(f"{indent}scf.for {iv} = {lower} to {upper} step {step} {{")
+
+        body_env = dict(env)
+        for name, type_name in zip(carried_names, carried_types, strict=True):
+            body_env[name] = Value(f"%{name}_iter{arg_suffix}", type_name)
+
+        saved_for_depth = self.for_depth
+        self.for_depth += 1
+        try:
+            self.emit_with_local_constants(
+                lambda: self.emit_with_binding_scope(
+                    lambda: self.emit_for_body(stmt.name, "i32", stmt.body, body_env, carried_names, carried_types, iv, lines, indent)
+                )
+            )
+        finally:
+            self.for_depth = saved_for_depth
+
+        lines.append(f"{indent}}}")
+
+        if result_base is not None:
+            for index, (name, type_name) in enumerate(zip(carried_names, carried_types, strict=True)):
+                result_name = result_base if len(carried_names) == 1 else f"{result_base}#{index}"
+                env[name] = Value(result_name, type_name)
+
+    def emit_for_body(
+        self,
+        name: str,
+        loop_type: TypeName,
+        body: tuple[BodyStmt, ...],
+        env: dict[str, EnvValue],
+        carried_names: list[str],
+        carried_types: list[TypeName],
+        iv: str,
+        lines: list[str],
+        indent: str,
+    ) -> None:
+        body_indent = indent + "  "
+        env[name] = self.emit_index_to_integer(iv, loop_type, lines, body_indent)
+        self.binding_order.append(name)
+        for body_stmt in body:
+            self.emit_body_stmt(body_stmt, env, lines, body_indent)
+        if carried_names:
+            yielded = ", ".join(self.require_scalar(env[name]).name for name in carried_names)
+            lines.append(f"{body_indent}scf.yield {yielded} : {self.type_list(carried_types)}")
+
     def emit_if(self, stmt: IfStmt, env: dict[str, EnvValue], lines: list[str], indent: str) -> None:
         visible_binding_order = list(self.binding_order)
         result_names = self.assigned_binding_names((*stmt.then_body, *stmt.else_body), visible_binding_order)
@@ -575,6 +721,10 @@ class MlirEmitter:
                     if statement.name in visible:
                         assigned.add(statement.name)
                 elif isinstance(statement, WhileStmt):
+                    visit(statement.body)
+                elif isinstance(statement, ForStmt):
+                    visit(statement.body)
+                elif isinstance(statement, ForEachStmt):
                     visit(statement.body)
                 elif isinstance(statement, IfStmt):
                     visit(statement.then_body)

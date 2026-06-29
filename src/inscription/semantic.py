@@ -17,9 +17,12 @@ from .ast import (
     Cast,
     Comparison,
     Expr,
+    ForEachStmt,
+    ForStmt,
     Function,
     IfStmt,
     Integer,
+    LengthOf,
     Program,
     ReturnStmt,
     SetStmt,
@@ -58,7 +61,7 @@ INTEGER_RANGES: dict[TypeName, tuple[int, int]] = {
     "u32": (0, 2**32 - 1),
     "u64": (0, 2**64 - 1),
 }
-BindingKind = Literal["param", "let", "buffer"]
+BindingKind = Literal["param", "let", "buffer", "index"]
 
 
 @dataclass(frozen=True)
@@ -199,6 +202,12 @@ def _check_body_stmt(stmt: BodyStmt, bindings: dict[str, Binding], functions: di
     if isinstance(stmt, WhileStmt):
         _check_while(stmt, bindings, functions)
         return
+    if isinstance(stmt, ForStmt):
+        _check_for(stmt, bindings, functions)
+        return
+    if isinstance(stmt, ForEachStmt):
+        _check_for_each(stmt, bindings, functions)
+        return
     if isinstance(stmt, IfStmt):
         _check_if(stmt, bindings, functions)
         return
@@ -248,6 +257,10 @@ def _check_assignment(stmt: AssignStmt, bindings: dict[str, Binding], functions:
         raise InscriptionError(
             f"cannot rebind buffer {stmt.name}; use `{stmt.name} at index becomes value`", stmt.line
         )
+    if not binding.writable:
+        if binding.kind == "index":
+            raise InscriptionError(f"cannot rebind for-loop index {stmt.name}", stmt.line)
+        raise InscriptionError(f"cannot rebind {stmt.name}", stmt.line)
     actual = _infer_declared_type(stmt.expr, binding.type_name, _env_types(bindings), functions)
     if actual != binding.type_name:
         raise InscriptionError(
@@ -286,6 +299,44 @@ def _check_while(stmt: WhileStmt, bindings: dict[str, Binding], functions: dict[
     scoped = dict(bindings)
     for body_stmt in stmt.body:
         _check_body_stmt(body_stmt, scoped, functions)
+
+
+def _check_for(stmt: ForStmt, bindings: dict[str, Binding], functions: dict[str, Function]) -> None:
+    start_type = infer_expr_type(stmt.start, _env_types(bindings), functions)
+    end_type = infer_expr_type(stmt.end, _env_types(bindings), functions)
+    if not is_integer_type(start_type) or not is_integer_type(end_type):
+        raise InscriptionError(f"for loop bounds must be integer types, got {start_type} and {end_type}", stmt.line)
+    if start_type != end_type:
+        raise InscriptionError(f"for loop bounds must have matching integer types, got {start_type} and {end_type}", stmt.line)
+    if stmt.step < 1:
+        raise InscriptionError("for loop step must be at least 1", stmt.line)
+    if not stmt.body:
+        raise InscriptionError("for loop body must contain at least one step", stmt.line)
+    _check_index_shadow(stmt.name, stmt.line, bindings)
+    scoped = dict(bindings)
+    scoped[stmt.name] = Binding(start_type, "index", stmt.line, writable=False)
+    for body_stmt in stmt.body:
+        _check_body_stmt(body_stmt, scoped, functions)
+
+
+def _check_for_each(stmt: ForEachStmt, bindings: dict[str, Binding], functions: dict[str, Function]) -> None:
+    binding = bindings.get(stmt.buffer_name)
+    if binding is None:
+        raise InscriptionError(f"unknown binding {stmt.buffer_name}", stmt.line)
+    if not isinstance(binding.type_name, BufferType):
+        raise InscriptionError(f"for each index requires a buffer, got {format_type(binding.type_name)}", stmt.line)
+    if not stmt.body:
+        raise InscriptionError("for loop body must contain at least one step", stmt.line)
+    _check_index_shadow(stmt.name, stmt.line, bindings)
+    scoped = dict(bindings)
+    scoped[stmt.name] = Binding("i32", "index", stmt.line, writable=False)
+    for body_stmt in stmt.body:
+        _check_body_stmt(body_stmt, scoped, functions)
+
+
+def _check_index_shadow(name: str, line: int, bindings: dict[str, Binding]) -> None:
+    if name in bindings:
+        raise InscriptionError(f"binding {name} already exists", line)
 
 
 def _check_if(stmt: IfStmt, bindings: dict[str, Binding], functions: dict[str, Function]) -> None:
@@ -475,6 +526,17 @@ def infer_expr_type(
         if expected is not None:
             require_type(buffer_type.element_type, expected, expr.line)
         return buffer_type.element_type
+    if isinstance(expr, LengthOf):
+        binding_type = env.get(expr.name)
+        if binding_type is None:
+            raise InscriptionError(f"unknown binding {expr.name}", expr.line)
+        if not isinstance(binding_type, BufferType):
+            raise InscriptionError(f"length of {expr.name} requires a buffer, got {format_type(binding_type)}", expr.line)
+        if binding_type.length > INTEGER_RANGES["i32"][1]:
+            raise InscriptionError(f"buffer length {binding_type.length} does not fit in i32", expr.line)
+        if expected is not None:
+            require_type("i32", expected, expr.line)
+        return "i32"
     if isinstance(expr, Unary):
         return infer_unary_type(expr, env, functions, expected=expected)
     if isinstance(expr, Cast):

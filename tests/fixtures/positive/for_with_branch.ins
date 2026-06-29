@@ -1,0 +1,11 @@
+count odds below n: i32 gives i32:
+  let count be 0
+  for i from 0 up to n:
+    if i remainder 2 is not equal to 0:
+      count becomes count plus 1
+    otherwise:
+      count becomes count
+  count
+
+main gives i32:
+  count odds below 10
