@@ -1,0 +1,12 @@
+record Point:
+  x: i32
+  y: i32
+
+move point p: Point by dx: i32 and dy: i32 gives i32:
+  p.x becomes p.x plus dx
+  p.y becomes p.y plus dy
+  p.x plus p.y
+
+main gives i32:
+  let p be Point with x be 1 and y be 2
+  move point p by 3 and 4

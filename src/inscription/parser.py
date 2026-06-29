@@ -17,6 +17,8 @@ from .ast import (
     Cast,
     Comparison,
     Expr,
+    FieldAccess,
+    FieldAssignStmt,
     ForEachStmt,
     ForStmt,
     Function,
@@ -25,6 +27,12 @@ from .ast import (
     LengthOf,
     Parameter,
     Program,
+    RecordConstructor,
+    RecordDecl,
+    RecordFieldDecl,
+    RecordFieldInit,
+    RecordType,
+    ReturnType,
     ReturnStmt,
     SetStmt,
     TypeName,
@@ -38,14 +46,15 @@ from .ast import (
 from .diagnostics import InscriptionError
 
 NAME_RE = re.compile(r"[a-z][a-z0-9_]*")
-TOKEN_RE = re.compile(r"\s*(-?\d+|[a-z][a-z0-9_]*|[(),])")
+RECORD_NAME_RE = re.compile(r"[A-Z][A-Za-z0-9_]*")
+TOKEN_RE = re.compile(r"\s*(-?\d+|[A-Z][A-Za-z0-9_]*|[a-z][a-z0-9_]*|[().,])")
 RESERVED = {
     "address", "and", "arguments", "array", "as", "at", "be", "becomes", "bitwise", "buffer", "by", "call",
     "divided", "do", "does", "each", "else", "equal", "false", "filled", "float", "for", "from",
     "function", "gives", "greater", "i1", "i32", "i64", "if", "index", "input",
     "i8", "i16", "is", "length", "less", "let", "memref", "minus", "no", "not", "or", "otherwise", "output", "parameters",
     "pointer", "plus", "print", "remainder", "return", "set", "shifted", "takes", "than", "then", "times", "to",
-    "track", "true", "u8", "u16", "u32", "u64", "up", "when", "while", "with", "xor", "zero",
+    "track", "true", "u8", "u16", "u32", "u64", "up", "record", "when", "while", "with", "xor", "zero",
 }
 TYPE_NAMES: set[str] = {"i1", "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64"}
 COMPARATORS: tuple[tuple[tuple[str, ...], str], ...] = (
@@ -86,8 +95,11 @@ class PhraseTemplate:
     parts: tuple[PhrasePart, ...]
     params: tuple[Parameter, ...]
     line: int
-    return_type: TypeName | None
+    return_type: ReturnType
     display_name: str
+
+
+ParsedTopLevel = RecordDecl | Function
 
 
 class Parser:
@@ -125,12 +137,17 @@ class Parser:
         return tuple(sorted(templates, key=lambda template: len(template.parts), reverse=True))
 
     def parse_program(self) -> Program:
+        records: list[RecordDecl] = []
         functions: list[Function] = []
         index = 0
         while index < len(self.lines):
             line = self.lines[index]
+            if self._looks_like_record_header(line):
+                record, index = self._parse_record_decl(index)
+                records.append(record)
+                continue
             if not self._looks_like_phrase_header(line):
-                raise InscriptionError("expected phrase definition", line.number)
+                raise InscriptionError("expected phrase definition or record declaration", line.number)
             template, return_type = self._parse_phrase_header(line)
             body, index = self._parse_phrase_body(index + 1, template, line.number)
             functions.append(
@@ -145,28 +162,61 @@ class Parser:
             )
         if not functions:
             raise InscriptionError("program must contain at least one phrase definition")
-        return Program(tuple(functions))
+        return Program(tuple(records), tuple(functions))
+
+    def _looks_like_record_header(self, line: Line) -> bool:
+        return line.is_header and re.fullmatch(r"record [A-Za-z][A-Za-z0-9_]*", line.text) is not None
+
+    def _parse_record_decl(self, index: int) -> tuple[RecordDecl, int]:
+        line = self.lines[index]
+        match = re.fullmatch(r"record ([A-Za-z][A-Za-z0-9_]*)", line.text)
+        if not line.is_header or match is None:
+            raise InscriptionError("malformed record declaration", line.number)
+        name = self._record_name(match.group(1), line.number)
+        fields: list[RecordFieldDecl] = []
+        field_index = index + 1
+        while field_index < len(self.lines):
+            current = self.lines[field_index]
+            if current.indent <= line.indent:
+                break
+            field_match = re.fullmatch(
+                r"([a-z][a-z0-9_]*):\s*(buffer\s+of\s+-?\d+\s+[A-Za-z][A-Za-z0-9_]*|[A-Za-z][A-Za-z0-9_]*|[a-z][a-z0-9_]*)",
+                current.text,
+            )
+            if current.is_header or field_match is None:
+                raise InscriptionError("malformed record field declaration", current.number)
+            fields.append(
+                RecordFieldDecl(
+                    self._field_name(field_match.group(1), current.number),
+                    self._value_type(field_match.group(2), current.number),
+                    current.number,
+                )
+            )
+            field_index += 1
+        if not fields:
+            raise InscriptionError(f"record {name} must declare at least one field", line.number)
+        return RecordDecl(name, tuple(fields), line.number), field_index
 
     def _looks_like_phrase_header(self, line: Line) -> bool:
-        return line.is_header and re.fullmatch(r".+? (?:gives [a-z][a-z0-9_]*|does)", line.text) is not None
+        return line.is_header and re.fullmatch(r".+? (?:gives [A-Za-z][A-Za-z0-9_]*|does)", line.text) is not None
 
-    def _parse_phrase_header(self, line: Line) -> tuple[PhraseTemplate, TypeName | None]:
-        match = re.fullmatch(r"(.+?) (?:gives ([a-z][a-z0-9_]*)|does)", line.text)
+    def _parse_phrase_header(self, line: Line) -> tuple[PhraseTemplate, ReturnType]:
+        match = re.fullmatch(r"(.+?) (?:gives ([A-Za-z][A-Za-z0-9_]*)|does)", line.text)
         if not line.is_header or not match:
             raise InscriptionError("expected phrase definition", line.number)
         phrase_text = match.group(1).strip()
-        return_type = self._type_name(match.group(2), line.number) if match.group(2) is not None else None
+        return_type = self._return_type(match.group(2), line.number) if match.group(2) is not None else None
         template = self._parse_phrase_template(phrase_text, line.number, return_type)
         return template, return_type
 
-    def _parse_phrase_template(self, text: str, line: int, return_type: TypeName | None) -> PhraseTemplate:
+    def _parse_phrase_template(self, text: str, line: int, return_type: ReturnType) -> PhraseTemplate:
         parts: list[PhrasePart] = []
         params: list[Parameter] = []
         param_names: set[str] = set()
         pos = 0
         holes = list(
             re.finditer(
-                r"\b([a-z][a-z0-9_]*):\s*(buffer\s+of\s+-?\d+\s+[a-z][a-z0-9_]*|[a-z][a-z0-9_]*)\b",
+                r"\b([a-z][a-z0-9_]*):\s*(buffer\s+of\s+-?\d+\s+[A-Za-z][A-Za-z0-9_]*|[A-Za-z][A-Za-z0-9_]*|[a-z][a-z0-9_]*)\b",
                 text,
             )
         )
@@ -222,7 +272,7 @@ class Parser:
         body_items: list[BodyStmt] = []
         while index < len(self.lines):
             current = self.lines[index]
-            if self._looks_like_phrase_header(current):
+            if self._looks_like_phrase_header(current) or self._looks_like_record_header(current):
                 break
             if not self._is_body_item_start(current, include_phrase_calls=True):
                 if current.is_header:
@@ -243,7 +293,7 @@ class Parser:
         value_lines: list[Line] = []
         while index < len(self.lines):
             current = self.lines[index]
-            if self._looks_like_phrase_header(current):
+            if self._looks_like_phrase_header(current) or self._looks_like_record_header(current):
                 break
             if self._is_gives_body_item_start(current, index):
                 if value_lines:
@@ -275,7 +325,7 @@ class Parser:
     def _has_following_body_line(self, index: int, indent: int) -> bool:
         while index < len(self.lines):
             current = self.lines[index]
-            if self._looks_like_phrase_header(current):
+            if self._looks_like_phrase_header(current) or self._looks_like_record_header(current):
                 return False
             if current.indent < indent:
                 return False
@@ -286,6 +336,7 @@ class Parser:
         return (
             line.text.startswith("let ")
             or line.text.startswith("track ")
+            or self._field_assignment_match(line) is not None
             or self._buffer_store_match(line) is not None
             or self._assignment_match(line) is not None
             or (line.is_header and line.text.startswith("if "))
@@ -300,6 +351,9 @@ class Parser:
             return self._parse_let(current), index + 1
         if current.text.startswith("track "):
             raise InscriptionError("`track` is not valid Inscription syntax; use `let name be ...`", current.number)
+        field_assignment = self._field_assignment_match(current)
+        if field_assignment is not None:
+            return self._parse_field_assignment(current, field_assignment), index + 1
         buffer_store = self._buffer_store_match(current)
         if buffer_store is not None:
             return self._parse_buffer_store(current, buffer_store), index + 1
@@ -393,7 +447,7 @@ class Parser:
             current = self.lines[body_index]
             if current.indent <= parent_indent:
                 break
-            if self._looks_like_phrase_header(current):
+            if self._looks_like_phrase_header(current) or self._looks_like_record_header(current):
                 raise InscriptionError(f"phrase definitions cannot appear inside {name}", current.number)
             if not self._is_body_item_start(current, include_phrase_calls=True):
                 raise InscriptionError(
@@ -448,23 +502,23 @@ class Parser:
 
     def _parse_let(self, line: Line) -> SetStmt | BufferBinding:
         buffer_match = re.fullmatch(
-            r"let ([a-z][a-z0-9_]*) be buffer of (-?\d+) ([a-z][a-z0-9_]*) filled with (.+)",
+            r"let ([a-z][a-z0-9_]*) be buffer of (-?\d+) ([A-Za-z][A-Za-z0-9_]*|[a-z][a-z0-9_]*) filled with (.+)",
             line.text,
         )
         if buffer_match:
             length = int(buffer_match.group(2))
             return BufferBinding(
                 self._name(buffer_match.group(1), line.number),
-                BufferType(length, self._type_name(buffer_match.group(3), line.number)),
+                BufferType(length, self._return_type(buffer_match.group(3), line.number)),
                 self._parse_expression(buffer_match.group(4), line.number),
                 line.number,
             )
-        match = re.fullmatch(r"let ([a-z][a-z0-9_]*)(?::\s*([a-z][a-z0-9_]*))? be (.+)", line.text)
+        match = re.fullmatch(r"let ([a-z][a-z0-9_]*)(?::\s*([A-Za-z][A-Za-z0-9_]*|[a-z][a-z0-9_]*))? be (.+)", line.text)
         if not match:
             raise InscriptionError("malformed let binding", line.number)
         return SetStmt(
             self._name(match.group(1), line.number),
-            self._type_name(match.group(2), line.number) if match.group(2) is not None else None,
+            self._return_type(match.group(2), line.number) if match.group(2) is not None else None,
             self._parse_expression(match.group(3), line.number),
             line.number,
         )
@@ -479,6 +533,11 @@ class Parser:
             return None
         return re.fullmatch(r"([a-z][a-z0-9_]*) at (.+) becomes (.+)", line.text)
 
+    def _field_assignment_match(self, line: Line) -> re.Match[str] | None:
+        if line.is_header:
+            return None
+        return re.fullmatch(r"([a-z][a-z0-9_]*)\.([a-z][a-z0-9_]*) becomes (.+)", line.text)
+
     def _parse_assignment(self, line: Line, match: re.Match[str]) -> AssignStmt:
         return AssignStmt(
             self._name(match.group(1), line.number),
@@ -490,6 +549,14 @@ class Parser:
         return BufferStoreStmt(
             self._name(match.group(1), line.number),
             self._parse_expression(match.group(2), line.number),
+            self._parse_expression(match.group(3), line.number),
+            line.number,
+        )
+
+    def _parse_field_assignment(self, line: Line, match: re.Match[str]) -> FieldAssignStmt:
+        return FieldAssignStmt(
+            self._name(match.group(1), line.number),
+            self._field_name(match.group(2), line.number),
             self._parse_expression(match.group(3), line.number),
             line.number,
         )
@@ -524,11 +591,28 @@ class Parser:
             raise InscriptionError(f"reserved word '{value}' cannot be an identifier", line)
         return value
 
+    def _field_name(self, value: str, line: int) -> str:
+        if not NAME_RE.fullmatch(value):
+            raise InscriptionError(f"invalid field name '{value}'", line)
+        return value
+
+    def _record_name(self, value: str, line: int) -> str:
+        if value in TYPE_NAMES:
+            raise InscriptionError(f"record name {value} collides with scalar type", line)
+        if not RECORD_NAME_RE.fullmatch(value):
+            raise InscriptionError(f"invalid record name '{value}'", line)
+        return value
+
     def _value_type(self, value: str, line: int) -> ValueType:
         value = " ".join(value.split())
-        buffer_match = re.fullmatch(r"buffer of (-?\d+) ([a-z][a-z0-9_]*)", value)
+        buffer_match = re.fullmatch(r"buffer of (-?\d+) ([A-Za-z][A-Za-z0-9_]*|[a-z][a-z0-9_]*)", value)
         if buffer_match is not None:
-            return BufferType(int(buffer_match.group(1)), self._type_name(buffer_match.group(2), line))
+            return BufferType(int(buffer_match.group(1)), self._return_type(buffer_match.group(2), line))
+        return self._return_type(value, line)
+
+    def _return_type(self, value: str, line: int) -> TypeName | RecordType:
+        if RECORD_NAME_RE.fullmatch(value):
+            return RecordType(value)
         return self._type_name(value, line)
 
     def _type_name(self, value: str, line: int) -> TypeName:
@@ -541,14 +625,17 @@ def tokenize(text: str, line: int) -> list[str]:
     tokens: list[str] = []
     pos = 0
     while pos < len(text):
+        float_match = re.match(r"-?\d+\.\d+", text[pos:])
+        if float_match is not None:
+            raise InscriptionError(f"invalid token near '{float_match.group(0)}'", line)
         match = TOKEN_RE.match(text, pos)
         if not match:
             if text[pos:].strip() == "":
                 break
             raise InscriptionError(f"invalid token near '{text[pos:].strip()}'", line)
         token_start = match.start(1)
-        token = match.group(1).lower()
-        punctuation = {",", "(", ")"}
+        token = match.group(1)
+        punctuation = {",", "(", ")", "."}
         if tokens and token_start == pos and tokens[-1] not in punctuation and token not in punctuation:
             raise InscriptionError("missing whitespace between expression tokens", line)
         tokens.append(token)
@@ -711,6 +798,15 @@ class ExpressionParser:
     def parse_postfix(self, stop: set[str]) -> Expr:
         expr = self.parse_primary(stop)
         while not self.at_end():
+            if self.peek() == "." and "." not in stop:
+                if not isinstance(expr, Variable):
+                    break
+                self.pop()
+                field = self.pop()
+                if not NAME_RE.fullmatch(field):
+                    raise InscriptionError(f"invalid field name '{field}'", self.line)
+                expr = FieldAccess(expr.name, field, self.line)
+                continue
             if self.peek() == "at" and "at" not in stop:
                 if not isinstance(expr, Variable):
                     break
@@ -756,6 +852,8 @@ class ExpressionParser:
             if not NAME_RE.fullmatch(name) or name in RESERVED:
                 raise InscriptionError(f"invalid buffer name '{name}'", self.line)
             return LengthOf(name, self.line)
+        if token is not None and RECORD_NAME_RE.fullmatch(token) and tuple(self.tokens[self.pos + 1 : self.pos + 2]) == ("with",):
+            return self.parse_record_constructor(stop)
         phrase_call = self.try_parse_phrase_call(stop)
         if phrase_call is not None:
             return phrase_call
@@ -780,7 +878,56 @@ class ExpressionParser:
             return Boolean(False, self.line)
         if NAME_RE.fullmatch(token) and token not in RESERVED:
             return Variable(token, self.line)
+        if RECORD_NAME_RE.fullmatch(token):
+            raise InscriptionError(f"invalid token near '{token}'", self.line)
         raise InscriptionError(f"unexpected token '{token}' in expression", self.line)
+
+    def parse_record_constructor(self, stop: set[str]) -> RecordConstructor:
+        type_name = self.pop()
+        self.pop()  # with
+        fields: list[RecordFieldInit] = []
+        while True:
+            if self.at_end():
+                raise InscriptionError("record constructor is missing a field initializer", self.line)
+            field_name = self.pop()
+            if not NAME_RE.fullmatch(field_name):
+                raise InscriptionError(f"invalid record field '{field_name}'", self.line)
+            if self.at_end() or self.pop() != "be":
+                raise InscriptionError("record field initializer must use 'be'", self.line)
+            expr_tokens = self.consume_record_initializer_tokens(stop)
+            if not expr_tokens:
+                raise InscriptionError("record field initializer requires an expression", self.line)
+            fields.append(RecordFieldInit(field_name, parse_expression_tokens(expr_tokens, self.line, self.phrases), self.line))
+            if self.match_sequence(("and",)):
+                continue
+            break
+        return RecordConstructor(type_name, tuple(fields), self.line)
+
+    def consume_record_initializer_tokens(self, stop: set[str]) -> list[str]:
+        start = self.pos
+        end = self.pos
+        depth = 0
+        while end < len(self.tokens):
+            token = self.tokens[end]
+            if token == "(":
+                depth += 1
+            elif token == ")":
+                if depth == 0:
+                    break
+                depth -= 1
+            elif depth == 0:
+                if token in stop or token in {",", ")"}:
+                    break
+                if (
+                    token == "and"
+                    and end + 2 < len(self.tokens)
+                    and NAME_RE.fullmatch(self.tokens[end + 1])
+                    and self.tokens[end + 2] == "be"
+                ):
+                    break
+            end += 1
+        self.pos = end
+        return self.tokens[start:end]
 
     def try_parse_phrase_call(self, stop: set[str]) -> Call | None:
         for template in self.phrases:

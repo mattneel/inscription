@@ -24,7 +24,22 @@ UnaryOp = Literal["not", "bitwise not"]
 
 @dataclass(frozen=True)
 class Program:
+    records: tuple["RecordDecl", ...]
     functions: tuple["Function", ...]
+
+
+@dataclass(frozen=True)
+class RecordFieldDecl:
+    name: str
+    type_name: "ValueType"
+    line: int
+
+
+@dataclass(frozen=True)
+class RecordDecl:
+    name: str
+    fields: tuple[RecordFieldDecl, ...]
+    line: int
 
 
 @dataclass(frozen=True)
@@ -37,7 +52,7 @@ class Parameter:
 class Function:
     name: str
     params: tuple[Parameter, ...]
-    return_type: TypeName | None
+    return_type: "ReturnType"
     body: tuple["Stmt", ...]
     line: int
     display_name: str
@@ -64,10 +79,16 @@ class Variable:
 @dataclass(frozen=True)
 class BufferType:
     length: int
-    element_type: TypeName
+    element_type: "ValueType"
 
 
-ValueType = TypeName | BufferType
+@dataclass(frozen=True)
+class RecordType:
+    name: str
+
+
+ValueType = TypeName | BufferType | RecordType
+ReturnType = TypeName | RecordType | None
 
 
 @dataclass(frozen=True)
@@ -80,6 +101,27 @@ class BufferLoad:
 @dataclass(frozen=True)
 class LengthOf:
     name: str
+    line: int
+
+
+@dataclass(frozen=True)
+class FieldAccess:
+    name: str
+    field: str
+    line: int
+
+
+@dataclass(frozen=True)
+class RecordFieldInit:
+    name: str
+    expr: "Expr"
+    line: int
+
+
+@dataclass(frozen=True)
+class RecordConstructor:
+    type_name: str
+    fields: tuple[RecordFieldInit, ...]
     line: int
 
 
@@ -134,13 +176,27 @@ class WhenExpr:
     line: int
 
 
-Expr = Integer | Boolean | Variable | BufferLoad | LengthOf | Unary | Cast | Binary | Call | Comparison | WhenExpr
+Expr = (
+    Integer
+    | Boolean
+    | Variable
+    | BufferLoad
+    | LengthOf
+    | FieldAccess
+    | RecordConstructor
+    | Unary
+    | Cast
+    | Binary
+    | Call
+    | Comparison
+    | WhenExpr
+)
 
 
 @dataclass(frozen=True)
 class SetStmt:
     name: str
-    type_name: TypeName | None
+    type_name: ValueType | None
     expr: Expr
     line: int
 
@@ -165,6 +221,14 @@ class BufferStoreStmt:
     name: str
     index: Expr
     value: Expr
+    line: int
+
+
+@dataclass(frozen=True)
+class FieldAssignStmt:
+    name: str
+    field: str
+    expr: Expr
     line: int
 
 
@@ -213,5 +277,16 @@ class ReturnStmt:
     line: int
 
 
-BodyStmt = SetStmt | BufferBinding | AssignStmt | BufferStoreStmt | CallStmt | WhileStmt | ForStmt | ForEachStmt | IfStmt
+BodyStmt = (
+    SetStmt
+    | BufferBinding
+    | AssignStmt
+    | BufferStoreStmt
+    | FieldAssignStmt
+    | CallStmt
+    | WhileStmt
+    | ForStmt
+    | ForEachStmt
+    | IfStmt
+)
 Stmt = BodyStmt | ReturnStmt

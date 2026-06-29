@@ -6,7 +6,7 @@ The language is readable, but it is **not** natural-language interpretation: eve
 
 ## Status
 
-This repository currently implements **Inscription v0.6**:
+This repository currently implements **Inscription v0.7**:
 
 - source-visible scalar types: `i1`, signed integers `i8`/`i16`/`i32`/`i64`, and unsigned integers `u8`/`u16`/`u32`/`u64`
 - phrase-shaped function definitions and phrase-shaped calls
@@ -14,10 +14,14 @@ This repository currently implements **Inscription v0.6**:
 - implicit returns: the block value is the phrase result
 - local scalar bindings with `let name be expression` and `let name: type be expression`
 - scalar rebinding with `name becomes expression`
+- source-level value records declared with `record TypeName:` and scalar fields
 - local fixed-size stack buffers with `let name be buffer of LENGTH TYPE filled with expression`
 - buffer parameter holes with `name: buffer of LENGTH TYPE`
 - buffer loads with `name at index` and buffer stores with `name at index becomes expression`
 - static buffer length expressions with `length of name`
+- local record values with constructors such as `Point with x be 1 and y be 2`
+- record field reads and rebindings with `p.x` and `p.x becomes expression`
+- record parameters passed by value and flattened into scalar MLIR operands
 - side-effect-only `does` phrases used as standalone steps
 - counted `for name from start up to end:` loops, with optional positive literal `by step`
 - buffer index loops with `for each index name of buffer:`
@@ -34,11 +38,11 @@ This repository currently implements **Inscription v0.6**:
 - parenthesized expressions
 - deterministic parsing and semantic checks
 - exact MLIR golden conformance tests in [`tests/goldens`](tests/goldens)
-- MLIR emission using `func`, `arith`, `scf.if`, `scf.for`, `scf.while`, and local `memref.alloca`/`memref.load`/`memref.store` for buffers
+- MLIR emission using `func`, `arith`, `scf.if`, `scf.for`, `scf.while`, flattened scalar SSA for records, and local `memref.alloca`/`memref.load`/`memref.store` for buffers
 - LLVM 22 lowering and execution through `mlir-opt`, `mlir-translate`, and `lli`
-- no source-level I/O, heap allocation, pointers, dynamic-size buffers, buffer return values, buffer aliasing, slices, structs, floats, strings, statement-level `return`, `break`, `continue`, overloading, type coercions, or natural-language inference
+- no source-level I/O, heap allocation, pointers, dynamic-size buffers, buffer return values, buffer aliasing, slices, ABI/layout structs, floats, strings, statement-level `return`, `break`, `continue`, overloading, type coercions, or natural-language inference
 
-See [`docs/inscription-v0.6-spec.md`](docs/inscription-v0.6-spec.md) and [`grammar/inscription-v0.6.ebnf`](grammar/inscription-v0.6.ebnf) for the exact current language contract. The immutable previous contracts remain in [`docs/inscription-v0-spec.md`](docs/inscription-v0-spec.md), [`docs/inscription-v0.1-spec.md`](docs/inscription-v0.1-spec.md), [`docs/inscription-v0.2-spec.md`](docs/inscription-v0.2-spec.md), [`docs/inscription-v0.3-spec.md`](docs/inscription-v0.3-spec.md), [`docs/inscription-v0.4-spec.md`](docs/inscription-v0.4-spec.md), [`docs/inscription-v0.5-spec.md`](docs/inscription-v0.5-spec.md), [`grammar/inscription-v0.ebnf`](grammar/inscription-v0.ebnf), [`grammar/inscription-v0.1.ebnf`](grammar/inscription-v0.1.ebnf), [`grammar/inscription-v0.2.ebnf`](grammar/inscription-v0.2.ebnf), [`grammar/inscription-v0.3.ebnf`](grammar/inscription-v0.3.ebnf), [`grammar/inscription-v0.4.ebnf`](grammar/inscription-v0.4.ebnf), and [`grammar/inscription-v0.5.ebnf`](grammar/inscription-v0.5.ebnf).
+See [`docs/inscription-v0.7-spec.md`](docs/inscription-v0.7-spec.md) and [`grammar/inscription-v0.7.ebnf`](grammar/inscription-v0.7.ebnf) for the exact current language contract. The immutable previous contracts remain in [`docs/inscription-v0-spec.md`](docs/inscription-v0-spec.md), [`docs/inscription-v0.1-spec.md`](docs/inscription-v0.1-spec.md), [`docs/inscription-v0.2-spec.md`](docs/inscription-v0.2-spec.md), [`docs/inscription-v0.3-spec.md`](docs/inscription-v0.3-spec.md), [`docs/inscription-v0.4-spec.md`](docs/inscription-v0.4-spec.md), [`docs/inscription-v0.5-spec.md`](docs/inscription-v0.5-spec.md), [`docs/inscription-v0.6-spec.md`](docs/inscription-v0.6-spec.md), [`grammar/inscription-v0.ebnf`](grammar/inscription-v0.ebnf), [`grammar/inscription-v0.1.ebnf`](grammar/inscription-v0.1.ebnf), [`grammar/inscription-v0.2.ebnf`](grammar/inscription-v0.2.ebnf), [`grammar/inscription-v0.3.ebnf`](grammar/inscription-v0.3.ebnf), [`grammar/inscription-v0.4.ebnf`](grammar/inscription-v0.4.ebnf), [`grammar/inscription-v0.5.ebnf`](grammar/inscription-v0.5.ebnf), and [`grammar/inscription-v0.6.ebnf`](grammar/inscription-v0.6.ebnf).
 
 ## Requirements
 
@@ -142,9 +146,12 @@ Commands return `2` for compiler, diagnostic, toolchain, or filesystem errors.
 
 ## Language summary
 
-A program is a list of phrase definitions:
+A program is a list of top-level record declarations and phrase definitions:
 
 ```text
+record TypeName:
+  field: type
+
 <phrase with typed holes> gives <type>:
   <body item>*
   <value block>
@@ -153,7 +160,7 @@ A program is a list of phrase definitions:
   <body item>+
 ```
 
-A scalar type is one of `i1`, `i8`, `i16`, `i32`, `i64`, `u8`, `u16`, `u32`, or `u64`. A buffer parameter type is written `buffer of LENGTH TYPE`, where `TYPE` is an integer numeric scalar type, not `i1`. `i1` is boolean only; all other scalar types are integer numeric types. Signedness is source-semantic: MLIR integers are signless, but Inscription signedness selects division, remainder, ordered comparison, right-shift, widening cast, and dynamic buffer-index conversion operations. A scalar typed hole is written `name: type`; a buffer typed hole is written `name: buffer of LENGTH type`. The call site mirrors the definition by filling the holes:
+A scalar type is one of `i1`, `i8`, `i16`, `i32`, `i64`, `u8`, `u16`, `u32`, or `u64`. A record type is a nominal top-level name declared with scalar fields. A buffer parameter type is written `buffer of LENGTH TYPE`, where `TYPE` is an integer numeric scalar type, not `i1`. `i1` is boolean only; all other scalar types are integer numeric types. Signedness is source-semantic: MLIR integers are signless, but Inscription signedness selects division, remainder, ordered comparison, right-shift, widening cast, and dynamic buffer-index conversion operations. A scalar typed hole is written `name: type`; a buffer typed hole is written `name: buffer of LENGTH type`. The call site mirrors the definition by filling the holes:
 
 ```text
 square of n: i32 gives i32:
@@ -163,11 +170,28 @@ main gives i32:
   square of 12
 ```
 
-Body items may introduce scalar `let` bindings, local buffers, scalar rebindings, buffer stores, `does` phrase calls, counted for loops, buffer index loops, while loops, or step-level if/otherwise blocks:
+Records are source-level value aggregates with scalar fields. They do not have ABI layout in v0.7; the compiler flattens record fields into scalar SSA values and function operands:
+
+```text
+record Point:
+  x: i32
+  y: i32
+
+sum point p: Point gives i32:
+  p.x plus p.y
+
+main gives i32:
+  let p be Point with x be 10 and y be 20
+  sum point p
+```
+
+Body items may introduce scalar or record `let` bindings, local buffers, scalar/record/field rebindings, buffer stores, `does` phrase calls, counted for loops, buffer index loops, while loops, or step-level if/otherwise blocks:
 
 ```text
 let total be 0
 total becomes total plus 1
+let point be Point with x be 1 and y be 2
+point.x becomes point.x plus 1
 let bytes be buffer of 4 u8 filled with 0
 bytes at 0 becomes 255
 fill buffer bytes with 9
@@ -183,7 +207,7 @@ otherwise:
   total becomes total
 ```
 
-A local scalar binding is introduced with `let`. A scalar binding is rebound with `becomes`. Rebinding lowers to SSA values, `scf.while` loop-carried results, and `scf.if` results, not memory storage.
+A local scalar or record binding is introduced with `let`. A scalar binding, a whole record, or an individual record field is rebound with `becomes`. Rebinding lowers to SSA values, `scf.while` loop-carried results, and `scf.if` results, not memory storage.
 
 A local buffer binding uses fixed-size stack storage:
 
@@ -192,7 +216,7 @@ let bytes be buffer of 4 u8 filled with 0
 let cells be buffer of 8 i32 filled with zero
 ```
 
-Buffers are initialized with `filled with`, read with `name at index`, and written with `name at index becomes value`. `length of name` returns the static buffer length as `i32`. Buffer storage lowers to `memref.alloca`, `memref.load`, and `memref.store`. Literal indices are checked at compile time. Dynamic indices are not runtime-checked in v0.6; dynamic out-of-bounds access is undefined behavior. Buffers can be borrowed by phrase calls through buffer parameters, but cannot be returned, stored in scalar bindings, dynamically sized, heap allocated, rebound, cast, compared, or used as scalar values.
+Buffers are initialized with `filled with`, read with `name at index`, and written with `name at index becomes value`. `length of name` returns the static buffer length as `i32`. Buffer storage lowers to `memref.alloca`, `memref.load`, and `memref.store`. Literal indices are checked at compile time. Dynamic indices are not runtime-checked in v0.7; dynamic out-of-bounds access is undefined behavior. Buffers can be borrowed by phrase calls through buffer parameters, but cannot be returned, stored in scalar bindings, dynamically sized, heap allocated, rebound, cast, compared, or used as scalar values.
 
 
 `gives` phrases return scalar values and can accept read-only buffer parameters:
@@ -318,12 +342,17 @@ left is greater than right
 left is greater than or equal to right
 ```
 
-Important v0.6 rules:
+Important v0.7 rules:
 
 - function names are generated from the leading literal words in a phrase definition
 - phrase names are unique; there is no overloading
 - library compilation does not require `main`; if `main` exists, it must take no holes
-- phrase holes and scalar `let` bindings can be rebound locally with `becomes`
+- phrase holes plus scalar and record `let` bindings can be rebound locally with `becomes`
+- record declarations are nominal; field names are unique and scalar-only in v0.7
+- record constructors initialize fields in declaration order
+- record fields are read with `p.x` and rebound with `p.x becomes expression`
+- record parameters are passed by value, flattened to scalar function arguments, and callee field rebinding does not mutate the caller
+- records cannot be returned, stored in buffers, nested, addressed, referenced, or used as ABI/layout structs
 - rebinding a phrase hole does not mutate the caller
 - each scalar binding type is fixed after initialization or annotation
 - typed `let` initializers and rebinding right-hand sides must match the binding type
@@ -340,14 +369,14 @@ Important v0.6 rules:
 - for-loop bounds must be matching integer numeric types; `up to` is exclusive
 - for-loop `by` steps must be positive decimal integer literals
 - for-loop index bindings are scoped to the loop body, cannot shadow visible bindings, and cannot be rebound
-- scalar bindings assigned inside `for` loops lower through `scf.for` iter_args in source binding order
+- scalar bindings and assigned record fields inside `for` loops lower through `scf.for` iter_args in deterministic binding/field order
 - buffer writes inside `for` loops mutate memref-backed storage
 - while conditions must be `i1`
 - while-body lets and buffers are scoped to that loop iteration and do not escape
 - nested while loops are supported
 - if/otherwise conditions must be `i1`, and both branches must contain at least one step
 - branch-local lets and buffers do not escape
-- scalar bindings assigned in if branches lower to `scf.if` results in source binding order
+- scalar bindings and assigned record fields in if branches lower to `scf.if` results in deterministic binding/field order
 - arithmetic, bitwise, and shift operands must be matching integer numeric types, never `i1`
 - source signedness controls `divided by`, `remainder`, ordered comparisons, `shifted right by`, widening casts, and dynamic index conversion
 - comparisons require matching integer numeric operands and return `i1`
@@ -357,7 +386,7 @@ Important v0.6 rules:
 - phrase calls must match a declared phrase template exactly
 - conditional value blocks require `otherwise`
 - removed ceremony words such as `Function`, `End function`, `Set`, `Return`, and `call ... with` are not valid Inscription syntax
-- unsupported `track`, I/O, dynamic arrays, floats, pointers, heap allocation, source-level memrefs, and free prose are rejected
+- unsupported `track`, I/O, dynamic arrays, floats, pointers, heap allocation, source-level memrefs, record returns, record buffers, nested records, and free prose are rejected
 
 ## Tests
 
@@ -401,6 +430,13 @@ PYTHONPATH=src python -m inscription run tests/fixtures/positive/for_each_buffer
 PYTHONPATH=src python -m inscription run tests/fixtures/positive/for_each_fill.ins         # exits 24
 PYTHONPATH=src python -m inscription run tests/fixtures/positive/nested_for_multiply.ins   # exits 42
 PYTHONPATH=src python -m inscription run tests/fixtures/positive/for_with_branch.ins       # exits 5
+PYTHONPATH=src python -m inscription run tests/fixtures/positive/record_field_access.ins    # exits 30
+PYTHONPATH=src python -m inscription run tests/fixtures/positive/record_field_rebinding.ins # exits 10
+PYTHONPATH=src python -m inscription run tests/fixtures/positive/record_loop_carry.ins      # exits 15
+PYTHONPATH=src python -m inscription run tests/fixtures/positive/record_branch_carry.ins    # exits 7
+PYTHONPATH=src python -m inscription run tests/fixtures/positive/record_copy_rebind.ins     # exits 53
+PYTHONPATH=src python -m inscription run tests/fixtures/positive/record_unsigned_fields.ins # exits 42
+PYTHONPATH=src python -m inscription run tests/fixtures/positive/record_buffer_interop.ins  # exits 9
 ```
 
 ## Repository layout
@@ -413,14 +449,16 @@ docs/inscription-v0.2-spec.md v0.2 language and toolchain specification
 docs/inscription-v0.3-spec.md v0.3 language and toolchain specification
 docs/inscription-v0.4-spec.md v0.4 language and toolchain specification
 docs/inscription-v0.5-spec.md v0.5 language and toolchain specification
-docs/inscription-v0.6-spec.md current v0.6 language and toolchain specification
+docs/inscription-v0.6-spec.md v0.6 language and toolchain specification
+docs/inscription-v0.7-spec.md current v0.7 language and toolchain specification
 grammar/inscription-v0.ebnf   original v0 grammar
 grammar/inscription-v0.1.ebnf v0.1 grammar
 grammar/inscription-v0.2.ebnf v0.2 grammar
 grammar/inscription-v0.3.ebnf v0.3 grammar
 grammar/inscription-v0.4.ebnf v0.4 grammar
 grammar/inscription-v0.5.ebnf v0.5 grammar
-grammar/inscription-v0.6.ebnf current v0.6 grammar
+grammar/inscription-v0.6.ebnf v0.6 grammar
+grammar/inscription-v0.7.ebnf current v0.7 grammar
 tests/goldens/                exact MLIR conformance goldens
 tests/                        unit tests and executable fixtures
 ```

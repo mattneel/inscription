@@ -141,6 +141,8 @@ class CompilerTests(unittest.TestCase):
                 (GOLDENS / "39_counted_loop_sum.ins").read_text(),
                 (GOLDENS / "41_buffer_length.ins").read_text(),
                 (GOLDENS / "43_for_each_fill.ins").read_text(),
+                (GOLDENS / "46_record_field_access.ins").read_text(),
+                (GOLDENS / "52_record_buffer_interop.ins").read_text(),
                 "highlight new widths a: i8 and b: i16 and c: u64 gives u64:\n  c bitwise xor c\n",
             ]
         )
@@ -289,6 +291,43 @@ main gives i32:
         )
         self.assertIn("arith.constant 4 : i32", length_bound_mlir)
         self.assertIn("scf.for", length_bound_mlir)
+
+    def test_v07_records_flatten_to_scalar_ssa(self):
+        mlir = compile_source(self.fixture("record_field_access.ins"))
+        self.assertIn("func.func @sum_point(%p_x: i32, %p_y: i32) -> i32", mlir)
+        self.assertIn("func.call @sum_point", mlir)
+        self.assertNotIn("llvm.struct", mlir)
+        self.assertNotIn("tensor", mlir)
+
+        loop_mlir = compile_source(self.fixture("record_loop_carry.ins"))
+        self.assertIn("iter_args(%p_x_iter", loop_mlir)
+        self.assertIn("%p_y_iter", loop_mlir)
+        self.assertIn("scf.yield", loop_mlir)
+
+        interop_mlir = compile_source(self.fixture("record_buffer_interop.ins"))
+        self.assertIn("func.func @write_offset(%offset_index: i32, %offset_value: i32, %cells: memref<4xi32>)", interop_mlir)
+        self.assertIn("memref.store %offset_value", interop_mlir)
+
+    def test_record_parameter_rebinding_does_not_mutate_caller(self):
+        source = """record Point:
+  x: i32
+  y: i32
+
+move point p: Point by dx: i32 and dy: i32 gives i32:
+  p.x becomes p.x plus dx
+  p.y becomes p.y plus dy
+  p.x plus p.y
+
+main gives i32:
+  let p be Point with x be 1 and y be 2
+  let moved be move point p by 3 and 4
+  p.x plus p.y
+"""
+        try:
+            result = run_source(source)
+        except ToolchainError as exc:
+            self.skipTest(str(exc))
+        self.assertEqual(result.exit_status, 3)
 
     def test_valid_identifier_cannot_collide_with_generated_ssa_names(self):
         source = """echo of v0: i32 gives i32:
@@ -617,6 +656,84 @@ main gives i32:
             "length used as guard": (
                 "bad cells: buffer of 4 i32 gives i32:\n  1 when length of cells\n  otherwise 0\n",
                 "value block condition must be i1, got i32",
+            ),
+            "duplicate record name": (
+                "record Point:\n  x: i32\n\nrecord Point:\n  y: i32\n\nmain gives i32:\n  0\n",
+                "record Point is already defined",
+            ),
+            "duplicate record field": (
+                "record Point:\n  x: i32\n  x: i32\n\nmain gives i32:\n  0\n",
+                "record Point has duplicate field x",
+            ),
+            "empty record": ("record Empty:\n\nmain gives i32:\n  0\n", "record Empty must declare at least one field"),
+            "record buffer field unsupported": (
+                "record Bad:\n  cells: buffer of 4 i32\n\nmain gives i32:\n  0\n",
+                "record fields must be scalar types, got buffer of 4 i32",
+            ),
+            "unknown record type in parameter": (
+                "use thing x: Missing gives i32:\n  0\n",
+                "unknown type Missing",
+            ),
+            "unknown record type in constructor": (
+                "bad gives i32:\n  let p be Missing with x be 1\n  0\n",
+                "unknown record type Missing",
+            ),
+            "record initializer missing field": (
+                "record Point:\n  x: i32\n  y: i32\n\nbad gives i32:\n  let p be Point with x be 1\n  0\n",
+                "record Point initializer requires fields x, y",
+            ),
+            "record initializer extra field": (
+                "record Point:\n  x: i32\n  y: i32\n\nbad gives i32:\n  let p be Point with x be 1 and y be 2 and z be 3\n  0\n",
+                "record Point has no field z",
+            ),
+            "record initializer wrong field order": (
+                "record Point:\n  x: i32\n  y: i32\n\nbad gives i32:\n  let p be Point with y be 2 and x be 1\n  0\n",
+                "record Point initializer fields must appear in declaration order: x, y",
+            ),
+            "record field type mismatch": (
+                "record Point:\n  x: i32\n  y: i32\n\nbad gives i32:\n  let p be Point with x be true and y be 2\n  0\n",
+                "field x of Point must have type i32, got i1",
+            ),
+            "unknown record field access": (
+                "record Point:\n  x: i32\n  y: i32\n\nbad gives i32:\n  let p be Point with x be 1 and y be 2\n  p.z\n",
+                "record Point has no field z",
+            ),
+            "field access on scalar": ("bad gives i32:\n  let x be 1\n  x.y\n", "x is not a record"),
+            "record field assignment type mismatch": (
+                "record Point:\n  x: i32\n  y: i32\n\nbad gives i32:\n  let p be Point with x be 1 and y be 2\n  p.x becomes true\n  p.x\n",
+                "field x of Point must have type i32, got i1",
+            ),
+            "record used as scalar": (
+                "record Point:\n  x: i32\n  y: i32\n\nbad gives i32:\n  let p be Point with x be 1 and y be 2\n  p\n",
+                "record p cannot be used as a scalar value; use a field such as p.x",
+            ),
+            "record plus record": (
+                "record Point:\n  x: i32\n  y: i32\n\nbad gives i32:\n  let p be Point with x be 1 and y be 2\n  p plus p\n",
+                "plus requires integer operands, got Point and Point",
+            ),
+            "record passed where scalar expected": (
+                "record Point:\n  x: i32\n  y: i32\n\nidentity of x: i32 gives i32:\n  x\n\nbad gives i32:\n  let p be Point with x be 1 and y be 2\n  identity of p\n",
+                "argument p must have type i32, got Point",
+            ),
+            "scalar passed where record expected": (
+                "record Point:\n  x: i32\n  y: i32\n\nsum point p: Point gives i32:\n  p.x plus p.y\n\nbad gives i32:\n  let p be 1\n  sum point p\n",
+                "argument p must have type Point, got i32",
+            ),
+            "nominal record mismatch": (
+                "record Point:\n  x: i32\n  y: i32\n\nrecord Pair:\n  x: i32\n  y: i32\n\nsum point p: Point gives i32:\n  p.x plus p.y\n\nbad gives i32:\n  let pair be Pair with x be 1 and y be 2\n  sum point pair\n",
+                "argument pair must have type Point, got Pair",
+            ),
+            "record return type unsupported": (
+                "record Point:\n  x: i32\n  y: i32\n\nmake point gives Point:\n  Point with x be 1 and y be 2\n",
+                "record return types are not supported in v0.7",
+            ),
+            "record buffer element unsupported": (
+                "record Point:\n  x: i32\n  y: i32\n\nbad gives i32:\n  let points be buffer of 4 Point filled with Point with x be 0 and y be 0\n  0\n",
+                "buffer element type must be an integer type, got Point",
+            ),
+            "branch local record does not escape": (
+                "record Point:\n  x: i32\n  y: i32\n\nbad gives i32:\n  let flag be true\n  if flag:\n    let p be Point with x be 1 and y be 2\n  otherwise:\n    let p be Point with x be 3 and y be 4\n  p.x\n",
+                "unknown binding p",
             ),
         }
         for name, (source, contains) in cases.items():

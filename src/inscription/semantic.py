@@ -17,6 +17,8 @@ from .ast import (
     Cast,
     Comparison,
     Expr,
+    FieldAccess,
+    FieldAssignStmt,
     ForEachStmt,
     ForStmt,
     Function,
@@ -24,6 +26,9 @@ from .ast import (
     Integer,
     LengthOf,
     Program,
+    RecordConstructor,
+    RecordDecl,
+    RecordType,
     ReturnStmt,
     SetStmt,
     TypeName,
@@ -73,12 +78,35 @@ class Binding:
 
 
 def analyze(program: Program) -> None:
+    records = record_table(program)
     functions = function_table(program)
     main = functions.get("main")
     if main is not None and main.params:
         raise InscriptionError("main must take no parameters", main.line)
     for fn in program.functions:
-        _check_function(fn, functions)
+        _check_function(fn, functions, records)
+
+
+def record_table(program: Program) -> dict[str, RecordDecl]:
+    records: dict[str, RecordDecl] = {}
+    for record in program.records:
+        if record.name in SCALAR_TYPES:
+            raise InscriptionError(f"record name {record.name} collides with scalar type", record.line)
+        if record.name in records:
+            raise InscriptionError(f"record {record.name} is already defined", record.line)
+        if not record.fields:
+            raise InscriptionError(f"record {record.name} must declare at least one field", record.line)
+        seen_fields: set[str] = set()
+        for field in record.fields:
+            if field.name in seen_fields:
+                raise InscriptionError(f"record {record.name} has duplicate field {field.name}", field.line)
+            seen_fields.add(field.name)
+            if not isinstance(field.type_name, str) or field.type_name not in SCALAR_TYPES:
+                raise InscriptionError(
+                    f"record fields must be scalar types, got {format_type(field.type_name)}", field.line
+                )
+        records[record.name] = record
+    return records
 
 
 def function_table(program: Program) -> dict[str, Function]:
@@ -107,7 +135,9 @@ def memref_type(buffer_type: BufferType) -> str:
 
 def format_type(type_name: ValueType) -> str:
     if isinstance(type_name, BufferType):
-        return f"buffer of {type_name.length} {type_name.element_type}"
+        return f"buffer of {type_name.length} {format_type(type_name.element_type)}"
+    if isinstance(type_name, RecordType):
+        return type_name.name
     return type_name
 
 
@@ -127,12 +157,14 @@ def all_ones_constant_value(_type_name: TypeName) -> int:
     return -1
 
 
-def _check_function(fn: Function, functions: dict[str, Function]) -> None:
+def _check_function(fn: Function, functions: dict[str, Function], records: dict[str, RecordDecl]) -> None:
     for param in fn.params:
-        _check_parameter_type(param.type_name, fn.line)
+        _check_parameter_type(param.type_name, fn.line, records)
     if fn.return_type is None:
-        _check_does_function(fn, functions)
+        _check_does_function(fn, functions, records)
         return
+    if isinstance(fn.return_type, RecordType):
+        raise InscriptionError("record return types are not supported in v0.7", fn.line)
     if not fn.body:
         raise InscriptionError(f"phrase '{fn.name}' must evaluate to a value", fn.line)
     bindings: dict[str, Binding] = {
@@ -147,16 +179,16 @@ def _check_function(fn: Function, functions: dict[str, Function]) -> None:
         if isinstance(stmt, ReturnStmt):
             if not is_last:
                 raise InscriptionError("value expression must be the final phrase body form", stmt.line)
-            actual = infer_expr_type(stmt.expr, _env_types(bindings), functions, expected=fn.return_type)
+            actual = infer_expr_type(stmt.expr, _env_types(bindings), functions, records, expected=fn.return_type)
             require_type(actual, fn.return_type, stmt.line)
             returned = True
         else:
-            _check_body_stmt(stmt, bindings, functions)
+            _check_body_stmt(stmt, bindings, functions, records)
     if not returned:
         raise InscriptionError(f"phrase '{fn.name}' must evaluate to a value", fn.line)
 
 
-def _check_does_function(fn: Function, functions: dict[str, Function]) -> None:
+def _check_does_function(fn: Function, functions: dict[str, Function], records: dict[str, RecordDecl]) -> None:
     if not fn.body:
         raise InscriptionError("does phrase body must contain at least one step", fn.line)
     bindings: dict[str, Binding] = {
@@ -165,12 +197,16 @@ def _check_does_function(fn: Function, functions: dict[str, Function]) -> None:
     for stmt in fn.body:
         if isinstance(stmt, ReturnStmt):
             raise InscriptionError("does phrase body cannot end with a value expression", stmt.line)
-        _check_body_stmt(stmt, bindings, functions)
+        _check_body_stmt(stmt, bindings, functions, records)
 
 
-def _check_parameter_type(type_name: ValueType, line: int) -> None:
+def _check_parameter_type(type_name: ValueType, line: int, records: dict[str, RecordDecl]) -> None:
     if isinstance(type_name, BufferType):
         _check_buffer_type(type_name, line)
+        return
+    if isinstance(type_name, RecordType):
+        if type_name.name not in records:
+            raise InscriptionError(f"unknown type {type_name.name}", line)
         return
     if type_name not in SCALAR_TYPES:
         raise InscriptionError("supported scalar types are i1, i8, i16, i32, i64, u8, u16, u32, and u64", line)
@@ -180,36 +216,44 @@ def _check_buffer_type(buffer_type: BufferType, line: int) -> None:
     if buffer_type.length < 1:
         raise InscriptionError("buffer length must be at least 1", line)
     if not is_integer_type(buffer_type.element_type):
-        raise InscriptionError(f"buffer element type must be an integer type, got {buffer_type.element_type}", line)
+        raise InscriptionError(f"buffer element type must be an integer type, got {format_type(buffer_type.element_type)}", line)
 
 
-def _check_body_stmt(stmt: BodyStmt, bindings: dict[str, Binding], functions: dict[str, Function]) -> None:
+def _check_body_stmt(
+    stmt: BodyStmt,
+    bindings: dict[str, Binding],
+    functions: dict[str, Function],
+    records: dict[str, RecordDecl],
+) -> None:
     if isinstance(stmt, SetStmt):
-        _declare_let(stmt, bindings, functions)
+        _declare_let(stmt, bindings, functions, records)
         return
     if isinstance(stmt, BufferBinding):
-        _declare_buffer(stmt, bindings, functions)
+        _declare_buffer(stmt, bindings, functions, records)
         return
     if isinstance(stmt, AssignStmt):
-        _check_assignment(stmt, bindings, functions)
+        _check_assignment(stmt, bindings, functions, records)
         return
     if isinstance(stmt, BufferStoreStmt):
-        _check_buffer_store(stmt, bindings, functions)
+        _check_buffer_store(stmt, bindings, functions, records)
+        return
+    if isinstance(stmt, FieldAssignStmt):
+        _check_field_assignment(stmt, bindings, functions, records)
         return
     if isinstance(stmt, CallStmt):
-        _check_call_stmt(stmt, bindings, functions)
+        _check_call_stmt(stmt, bindings, functions, records)
         return
     if isinstance(stmt, WhileStmt):
-        _check_while(stmt, bindings, functions)
+        _check_while(stmt, bindings, functions, records)
         return
     if isinstance(stmt, ForStmt):
-        _check_for(stmt, bindings, functions)
+        _check_for(stmt, bindings, functions, records)
         return
     if isinstance(stmt, ForEachStmt):
-        _check_for_each(stmt, bindings, functions)
+        _check_for_each(stmt, bindings, functions, records)
         return
     if isinstance(stmt, IfStmt):
-        _check_if(stmt, bindings, functions)
+        _check_if(stmt, bindings, functions, records)
         return
     raise AssertionError(stmt)  # pragma: no cover
 
@@ -225,31 +269,51 @@ def _check_no_shadow(name: str, line: int, bindings: dict[str, Binding], *, kind
     raise InscriptionError(f"duplicate {kind} binding '{name}'", line)
 
 
-def _declare_let(stmt: SetStmt, bindings: dict[str, Binding], functions: dict[str, Function]) -> None:
+def _declare_let(
+    stmt: SetStmt,
+    bindings: dict[str, Binding],
+    functions: dict[str, Function],
+    records: dict[str, RecordDecl],
+) -> None:
     _check_no_shadow(stmt.name, stmt.line, bindings, kind="let")
     if stmt.type_name is not None:
-        actual = _infer_declared_type(stmt.expr, stmt.type_name, _env_types(bindings), functions)
+        if isinstance(stmt.type_name, RecordType) and stmt.type_name.name not in records:
+            raise InscriptionError(f"unknown type {stmt.type_name.name}", stmt.line)
+        actual = _infer_declared_type(stmt.expr, stmt.type_name, _env_types(bindings), functions, records)
         if actual != stmt.type_name:
-            raise InscriptionError(f"let {stmt.name} must have type {stmt.type_name}, got {actual}", stmt.line)
+            raise InscriptionError(
+                f"let {stmt.name} must have type {format_type(stmt.type_name)}, got {format_type(actual)}", stmt.line
+            )
         bindings[stmt.name] = Binding(stmt.type_name, "let", stmt.line)
         return
-    type_name = infer_expr_type(stmt.expr, _env_types(bindings), functions)
+    type_name = infer_expr_type(stmt.expr, _env_types(bindings), functions, records)
     bindings[stmt.name] = Binding(type_name, "let", stmt.line)
 
 
-def _declare_buffer(stmt: BufferBinding, bindings: dict[str, Binding], functions: dict[str, Function]) -> None:
+def _declare_buffer(
+    stmt: BufferBinding,
+    bindings: dict[str, Binding],
+    functions: dict[str, Function],
+    records: dict[str, RecordDecl],
+) -> None:
     _check_no_shadow(stmt.name, stmt.line, bindings, kind="buffer")
     buffer_type = stmt.buffer_type
     _check_buffer_type(buffer_type, stmt.line)
-    actual = _infer_declared_type(stmt.fill, buffer_type.element_type, _env_types(bindings), functions)
+    assert isinstance(buffer_type.element_type, str)
+    actual = _infer_declared_type(stmt.fill, buffer_type.element_type, _env_types(bindings), functions, records)
     if actual != buffer_type.element_type:
         raise InscriptionError(
-            f"buffer {stmt.name} fill must have type {buffer_type.element_type}, got {actual}", stmt.line
+            f"buffer {stmt.name} fill must have type {buffer_type.element_type}, got {format_type(actual)}", stmt.line
         )
     bindings[stmt.name] = Binding(buffer_type, "buffer", stmt.line)
 
 
-def _check_assignment(stmt: AssignStmt, bindings: dict[str, Binding], functions: dict[str, Function]) -> None:
+def _check_assignment(
+    stmt: AssignStmt,
+    bindings: dict[str, Binding],
+    functions: dict[str, Function],
+    records: dict[str, RecordDecl],
+) -> None:
     binding = bindings.get(stmt.name)
     if binding is None:
         raise InscriptionError(f"unknown binding {stmt.name}", stmt.line)
@@ -261,53 +325,94 @@ def _check_assignment(stmt: AssignStmt, bindings: dict[str, Binding], functions:
         if binding.kind == "index":
             raise InscriptionError(f"cannot rebind for-loop index {stmt.name}", stmt.line)
         raise InscriptionError(f"cannot rebind {stmt.name}", stmt.line)
-    actual = _infer_declared_type(stmt.expr, binding.type_name, _env_types(bindings), functions)
+    actual = _infer_declared_type(stmt.expr, binding.type_name, _env_types(bindings), functions, records)
     if actual != binding.type_name:
         raise InscriptionError(
-            f"assignment to {stmt.name} must have type {binding.type_name}, got {actual}", stmt.line
+            f"assignment to {stmt.name} must have type {format_type(binding.type_name)}, got {format_type(actual)}", stmt.line
         )
 
 
-def _check_buffer_store(stmt: BufferStoreStmt, bindings: dict[str, Binding], functions: dict[str, Function]) -> None:
+def _check_buffer_store(
+    stmt: BufferStoreStmt,
+    bindings: dict[str, Binding],
+    functions: dict[str, Function],
+    records: dict[str, RecordDecl],
+) -> None:
     binding = _require_buffer_binding(stmt.name, stmt.line, bindings)
     buffer_type = binding.type_name
     if not binding.writable:
         raise InscriptionError(f"cannot store to read-only buffer parameter {stmt.name}", stmt.line)
-    _check_buffer_index(stmt.name, buffer_type, stmt.index, _env_types(bindings), functions)
-    actual = _infer_declared_type(stmt.value, buffer_type.element_type, _env_types(bindings), functions)
+    _check_buffer_index(stmt.name, buffer_type, stmt.index, _env_types(bindings), functions, records)
+    assert isinstance(buffer_type.element_type, str)
+    actual = _infer_declared_type(stmt.value, buffer_type.element_type, _env_types(bindings), functions, records)
     if actual != buffer_type.element_type:
         raise InscriptionError(
-            f"store to {stmt.name} must have type {buffer_type.element_type}, got {actual}", stmt.line
+            f"store to {stmt.name} must have type {buffer_type.element_type}, got {format_type(actual)}", stmt.line
         )
 
 
-def _check_call_stmt(stmt: CallStmt, bindings: dict[str, Binding], functions: dict[str, Function]) -> None:
+def _check_field_assignment(
+    stmt: FieldAssignStmt,
+    bindings: dict[str, Binding],
+    functions: dict[str, Function],
+    records: dict[str, RecordDecl],
+) -> None:
+    record_type = _require_record_type(stmt.name, stmt.line, _env_types(bindings))
+    field_type = _require_record_field(record_type, stmt.field, stmt.line, records)
+    actual = _infer_declared_type(stmt.expr, field_type, _env_types(bindings), functions, records)
+    if actual != field_type:
+        raise InscriptionError(
+            f"field {stmt.field} of {record_type.name} must have type {field_type}, got {format_type(actual)}", stmt.line
+        )
+
+
+def _check_call_stmt(
+    stmt: CallStmt,
+    bindings: dict[str, Binding],
+    functions: dict[str, Function],
+    records: dict[str, RecordDecl],
+) -> None:
     target = _lookup_phrase(stmt.call.name, stmt.line, functions)
     if target.return_type is not None:
         raise InscriptionError(
             f"phrase `{target.display_name}` returns {target.return_type} and cannot be used as a step", stmt.line
         )
-    _check_call_arguments(stmt.call, target, bindings, functions, effectful=True)
+    _check_call_arguments(stmt.call, target, bindings, functions, records, effectful=True)
 
 
-def _check_while(stmt: WhileStmt, bindings: dict[str, Binding], functions: dict[str, Function]) -> None:
-    condition_type = infer_expr_type(stmt.condition, _env_types(bindings), functions)
+def _check_while(
+    stmt: WhileStmt,
+    bindings: dict[str, Binding],
+    functions: dict[str, Function],
+    records: dict[str, RecordDecl],
+) -> None:
+    condition_type = infer_expr_type(stmt.condition, _env_types(bindings), functions, records)
     if condition_type != "i1":
-        raise InscriptionError(f"while condition must be i1, got {condition_type}", stmt.line)
+        raise InscriptionError(f"while condition must be i1, got {format_type(condition_type)}", stmt.line)
     if not stmt.body:
         raise InscriptionError("while loop requires at least one body step", stmt.line)
     scoped = dict(bindings)
     for body_stmt in stmt.body:
-        _check_body_stmt(body_stmt, scoped, functions)
+        _check_body_stmt(body_stmt, scoped, functions, records)
 
 
-def _check_for(stmt: ForStmt, bindings: dict[str, Binding], functions: dict[str, Function]) -> None:
-    start_type = infer_expr_type(stmt.start, _env_types(bindings), functions)
-    end_type = infer_expr_type(stmt.end, _env_types(bindings), functions)
+def _check_for(
+    stmt: ForStmt,
+    bindings: dict[str, Binding],
+    functions: dict[str, Function],
+    records: dict[str, RecordDecl],
+) -> None:
+    start_type = infer_expr_type(stmt.start, _env_types(bindings), functions, records)
+    end_type = infer_expr_type(stmt.end, _env_types(bindings), functions, records)
     if not is_integer_type(start_type) or not is_integer_type(end_type):
-        raise InscriptionError(f"for loop bounds must be integer types, got {start_type} and {end_type}", stmt.line)
+        raise InscriptionError(
+            f"for loop bounds must be integer types, got {format_type(start_type)} and {format_type(end_type)}", stmt.line
+        )
     if start_type != end_type:
-        raise InscriptionError(f"for loop bounds must have matching integer types, got {start_type} and {end_type}", stmt.line)
+        raise InscriptionError(
+            f"for loop bounds must have matching integer types, got {format_type(start_type)} and {format_type(end_type)}",
+            stmt.line,
+        )
     if stmt.step < 1:
         raise InscriptionError("for loop step must be at least 1", stmt.line)
     if not stmt.body:
@@ -316,10 +421,15 @@ def _check_for(stmt: ForStmt, bindings: dict[str, Binding], functions: dict[str,
     scoped = dict(bindings)
     scoped[stmt.name] = Binding(start_type, "index", stmt.line, writable=False)
     for body_stmt in stmt.body:
-        _check_body_stmt(body_stmt, scoped, functions)
+        _check_body_stmt(body_stmt, scoped, functions, records)
 
 
-def _check_for_each(stmt: ForEachStmt, bindings: dict[str, Binding], functions: dict[str, Function]) -> None:
+def _check_for_each(
+    stmt: ForEachStmt,
+    bindings: dict[str, Binding],
+    functions: dict[str, Function],
+    records: dict[str, RecordDecl],
+) -> None:
     binding = bindings.get(stmt.buffer_name)
     if binding is None:
         raise InscriptionError(f"unknown binding {stmt.buffer_name}", stmt.line)
@@ -331,7 +441,7 @@ def _check_for_each(stmt: ForEachStmt, bindings: dict[str, Binding], functions: 
     scoped = dict(bindings)
     scoped[stmt.name] = Binding("i32", "index", stmt.line, writable=False)
     for body_stmt in stmt.body:
-        _check_body_stmt(body_stmt, scoped, functions)
+        _check_body_stmt(body_stmt, scoped, functions, records)
 
 
 def _check_index_shadow(name: str, line: int, bindings: dict[str, Binding]) -> None:
@@ -339,10 +449,15 @@ def _check_index_shadow(name: str, line: int, bindings: dict[str, Binding]) -> N
         raise InscriptionError(f"binding {name} already exists", line)
 
 
-def _check_if(stmt: IfStmt, bindings: dict[str, Binding], functions: dict[str, Function]) -> None:
-    condition_type = infer_expr_type(stmt.condition, _env_types(bindings), functions)
+def _check_if(
+    stmt: IfStmt,
+    bindings: dict[str, Binding],
+    functions: dict[str, Function],
+    records: dict[str, RecordDecl],
+) -> None:
+    condition_type = infer_expr_type(stmt.condition, _env_types(bindings), functions, records)
     if condition_type != "i1":
-        raise InscriptionError(f"if condition must be i1, got {condition_type}", stmt.line)
+        raise InscriptionError(f"if condition must be i1, got {format_type(condition_type)}", stmt.line)
     if not stmt.then_body:
         raise InscriptionError("if branch must contain at least one step", stmt.line)
     if not stmt.else_body:
@@ -350,11 +465,11 @@ def _check_if(stmt: IfStmt, bindings: dict[str, Binding], functions: dict[str, F
 
     then_scope = dict(bindings)
     for body_stmt in stmt.then_body:
-        _check_body_stmt(body_stmt, then_scope, functions)
+        _check_body_stmt(body_stmt, then_scope, functions, records)
 
     else_scope = dict(bindings)
     for body_stmt in stmt.else_body:
-        _check_body_stmt(body_stmt, else_scope, functions)
+        _check_body_stmt(body_stmt, else_scope, functions, records)
 
 
 def _lookup_phrase(name: str, line: int, functions: dict[str, Function]) -> Function:
@@ -369,6 +484,7 @@ def _check_call_arguments(
     target: Function,
     bindings: dict[str, Binding],
     functions: dict[str, Function],
+    records: dict[str, RecordDecl],
     *,
     effectful: bool,
 ) -> None:
@@ -378,7 +494,7 @@ def _check_call_arguments(
     for arg, param in zip(call.args, target.params, strict=True):
         expected = param.type_name
         if isinstance(expected, BufferType):
-            name, binding = _require_buffer_argument(arg, expected, env, getattr(arg, "line", call.line))
+            name, binding = _require_buffer_argument(arg, expected, env, getattr(arg, "line", call.line), records)
             if name in seen_buffers:
                 raise InscriptionError(f"buffer {name} cannot be passed to multiple buffer parameters in one call", call.line)
             seen_buffers.add(name)
@@ -386,10 +502,13 @@ def _check_call_arguments(
             if effectful and not full_binding.writable:
                 raise InscriptionError(f"cannot pass read-only buffer {name} to effectful phrase `{target.display_name}`", call.line)
             continue
-        actual = _infer_call_scalar_argument_type(arg, expected, env, functions)
+        if isinstance(expected, RecordType):
+            _require_record_argument(arg, expected, env, getattr(arg, "line", call.line), records)
+            continue
+        actual = _infer_call_scalar_argument_type(arg, expected, env, functions, records)
         if actual != expected:
             raise InscriptionError(
-                f"argument {_argument_name(arg)} must have type {expected}, got {format_type(actual)}",
+                f"argument {_argument_name(arg)} must have type {format_type(expected)}, got {format_type(actual)}",
                 getattr(arg, "line", call.line),
             )
 
@@ -399,21 +518,25 @@ def _check_call_argument_types(
     target: Function,
     env: dict[str, ValueType],
     functions: dict[str, Function],
+    records: dict[str, RecordDecl],
 ) -> None:
     _check_call_arity(call, target)
     seen_buffers: set[str] = set()
     for arg, param in zip(call.args, target.params, strict=True):
         expected = param.type_name
         if isinstance(expected, BufferType):
-            name, _binding_type = _require_buffer_argument(arg, expected, env, getattr(arg, "line", call.line))
+            name, _binding_type = _require_buffer_argument(arg, expected, env, getattr(arg, "line", call.line), records)
             if name in seen_buffers:
                 raise InscriptionError(f"buffer {name} cannot be passed to multiple buffer parameters in one call", call.line)
             seen_buffers.add(name)
             continue
-        actual = _infer_call_scalar_argument_type(arg, expected, env, functions)
+        if isinstance(expected, RecordType):
+            _require_record_argument(arg, expected, env, getattr(arg, "line", call.line), records)
+            continue
+        actual = _infer_call_scalar_argument_type(arg, expected, env, functions, records)
         if actual != expected:
             raise InscriptionError(
-                f"argument {_argument_name(arg)} must have type {expected}, got {format_type(actual)}",
+                f"argument {_argument_name(arg)} must have type {format_type(expected)}, got {format_type(actual)}",
                 getattr(arg, "line", call.line),
             )
 
@@ -430,12 +553,13 @@ def _require_buffer_argument(
     expected: BufferType,
     env: dict[str, ValueType],
     line: int,
+    records: dict[str, RecordDecl],
 ) -> tuple[str, BufferType]:
     name = _argument_name(arg)
     actual = env.get(name) if isinstance(arg, Variable) else None
     if actual is None:
         try:
-            actual_type = infer_expr_type(arg, env, {})
+            actual_type = infer_expr_type(arg, env, {}, records)
         except Exception:
             actual_type = None
         got = format_type(actual_type) if actual_type is not None else "non-buffer expression"
@@ -449,17 +573,43 @@ def _require_buffer_argument(
     return name, actual
 
 
+def _require_record_argument(
+    arg: Expr,
+    expected: RecordType,
+    env: dict[str, ValueType],
+    line: int,
+    records: dict[str, RecordDecl],
+) -> tuple[str, RecordType]:
+    if expected.name not in records:
+        raise InscriptionError(f"unknown type {expected.name}", line)
+    name = _argument_name(arg)
+    actual = env.get(name) if isinstance(arg, Variable) else None
+    if actual is None:
+        try:
+            actual_type = infer_expr_type(arg, env, {}, records)
+        except Exception:
+            actual_type = None
+        got = format_type(actual_type) if actual_type is not None else "non-record expression"
+        raise InscriptionError(f"argument {name} must have type {expected.name}, got {got}", line)
+    if not isinstance(actual, RecordType):
+        raise InscriptionError(f"argument {name} must have type {expected.name}, got {format_type(actual)}", line)
+    if actual != expected:
+        raise InscriptionError(f"argument {name} must have type {expected.name}, got {actual.name}", line)
+    return name, actual
+
+
 def _infer_call_scalar_argument_type(
     arg: Expr,
     expected: TypeName,
     env: dict[str, ValueType],
     functions: dict[str, Function],
+    records: dict[str, RecordDecl],
 ) -> ValueType:
     if isinstance(arg, Variable):
         actual = env.get(arg.name)
-        if isinstance(actual, BufferType):
+        if isinstance(actual, BufferType | RecordType):
             return actual
-    return infer_expr_type(arg, env, functions, expected=expected)
+    return infer_expr_type(arg, env, functions, records, expected=expected)
 
 
 def _argument_name(arg: Expr) -> str:
@@ -470,17 +620,18 @@ def _argument_name(arg: Expr) -> str:
 
 def _infer_declared_type(
     expr: Expr,
-    expected: TypeName,
+    expected: ValueType,
     env: dict[str, ValueType],
     functions: dict[str, Function],
-) -> TypeName:
+    records: dict[str, RecordDecl],
+) -> ValueType:
     try:
-        return infer_expr_type(expr, env, functions, expected=expected)
+        return infer_expr_type(expr, env, functions, records, expected=expected)
     except InscriptionError as expected_error:
         if _should_preserve_expected_error(expected_error):
             raise
         try:
-            return infer_expr_type(expr, env, functions)
+            return infer_expr_type(expr, env, functions, records)
         except InscriptionError:
             raise expected_error
 
@@ -498,13 +649,15 @@ def infer_expr_type(
     expr: Expr,
     env: dict[str, ValueType],
     functions: dict[str, Function],
+    records: dict[str, RecordDecl],
     *,
-    expected: TypeName | None = None,
-) -> TypeName:
+    expected: ValueType | None = None,
+) -> ValueType:
     if isinstance(expr, Integer):
         if expected is not None:
             if not is_integer_type(expected):
-                raise InscriptionError(f"integer literal cannot have type {expected}", expr.line)
+                raise InscriptionError(f"integer literal cannot have type {format_type(expected)}", expr.line)
+            assert isinstance(expected, str)
             _check_integer_literal_range(expr.value, expected, expr.line)
             return expected
         _check_integer_literal_range(expr.value, "i32", expr.line)
@@ -517,13 +670,22 @@ def infer_expr_type(
         actual = _lookup_binding_type(expr.name, expr.line, env)
         if isinstance(actual, BufferType):
             raise InscriptionError(f"buffer {expr.name} cannot be used as a scalar value; use `{expr.name} at index`", expr.line)
+        if isinstance(actual, RecordType):
+            if expected is None or expected == actual:
+                return actual
+            raise InscriptionError(
+                f"record {expr.name} cannot be used as a scalar value; use a field such as {expr.name}.{_first_record_field(actual, records)}",
+                expr.line,
+            )
         if expected is not None:
+            assert isinstance(expected, str)
             require_type(actual, expected, expr.line)
         return actual
     if isinstance(expr, BufferLoad):
         buffer_type = _require_buffer_type(expr.name, expr.line, env)
-        _check_buffer_index(expr.name, buffer_type, expr.index, env, functions)
+        _check_buffer_index(expr.name, buffer_type, expr.index, env, functions, records)
         if expected is not None:
+            assert isinstance(expected, str)
             require_type(buffer_type.element_type, expected, expr.line)
         return buffer_type.element_type
     if isinstance(expr, LengthOf):
@@ -535,37 +697,56 @@ def infer_expr_type(
         if binding_type.length > INTEGER_RANGES["i32"][1]:
             raise InscriptionError(f"buffer length {binding_type.length} does not fit in i32", expr.line)
         if expected is not None:
+            assert isinstance(expected, str)
             require_type("i32", expected, expr.line)
         return "i32"
+    if isinstance(expr, FieldAccess):
+        record_type = _require_record_type(expr.name, expr.line, env)
+        field_type = _require_record_field(record_type, expr.field, expr.line, records)
+        if expected is not None:
+            assert isinstance(expected, str)
+            require_type(field_type, expected, expr.line)
+        return field_type
+    if isinstance(expr, RecordConstructor):
+        actual = infer_record_constructor_type(expr, env, functions, records)
+        if expected is not None and actual != expected:
+            raise InscriptionError(f"expected {format_type(expected)}, got {format_type(actual)}", expr.line)
+        return actual
     if isinstance(expr, Unary):
-        return infer_unary_type(expr, env, functions, expected=expected)
+        return infer_unary_type(expr, env, functions, records, expected=expected)
     if isinstance(expr, Cast):
-        return infer_cast_type(expr, env, functions, expected=expected)
+        return infer_cast_type(expr, env, functions, records, expected=expected)
     if isinstance(expr, Binary):
-        return infer_binary_type(expr, env, functions, expected=expected)
+        return infer_binary_type(expr, env, functions, records, expected=expected)
     if isinstance(expr, Call):
         target = _lookup_phrase(expr.name, expr.line, functions)
         if target.return_type is None:
             raise InscriptionError(f"phrase `{target.display_name}` does not return a value", expr.line)
-        _check_call_argument_types(expr, target, env, functions)
+        if isinstance(target.return_type, RecordType):
+            raise InscriptionError("record return types are not supported in v0.7", expr.line)
+        _check_call_argument_types(expr, target, env, functions, records)
         if expected is not None:
+            assert isinstance(expected, str)
             require_type(target.return_type, expected, expr.line)
         return target.return_type
     if isinstance(expr, Comparison):
-        infer_comparison_operand_type(expr, env, functions)
+        infer_comparison_operand_type(expr, env, functions, records)
         if expected is not None:
+            assert isinstance(expected, str)
             require_type("i1", expected, expr.line)
         return "i1"
     if isinstance(expr, WhenExpr):
         if expected is None:
-            expected = infer_expr_type(expr.otherwise, env, functions)
+            expected = infer_expr_type(expr.otherwise, env, functions, records)
+        if not isinstance(expected, str):
+            raise InscriptionError(f"record values cannot be used in value blocks, got {format_type(expected)}", expr.line)
         for case in expr.cases:
-            actual = infer_expr_type(case.expr, env, functions, expected=expected)
+            actual = infer_expr_type(case.expr, env, functions, records, expected=expected)
             require_type(actual, expected, case.line)
-            condition_type = infer_i1_operand_type(case.condition, env, functions)
+            condition_type = infer_i1_operand_type(case.condition, env, functions, records)
             if condition_type != "i1":
                 raise InscriptionError(f"value block condition must be i1, got {condition_type}", case.line)
-        otherwise_type = infer_expr_type(expr.otherwise, env, functions, expected=expected)
+        otherwise_type = infer_expr_type(expr.otherwise, env, functions, records, expected=expected)
         require_type(otherwise_type, expected, expr.line)
         return expected
     raise AssertionError(expr)  # pragma: no cover
@@ -575,22 +756,25 @@ def infer_unary_type(
     expr: Unary,
     env: dict[str, ValueType],
     functions: dict[str, Function],
+    records: dict[str, RecordDecl],
     *,
-    expected: TypeName | None = None,
+    expected: ValueType | None = None,
 ) -> TypeName:
     if expr.op == "not":
-        actual = infer_i1_operand_type(expr.expr, env, functions)
+        actual = infer_i1_operand_type(expr.expr, env, functions, records)
         if actual != "i1":
-            raise InscriptionError(f"not requires i1 operand, got {actual}", expr.line)
+            raise InscriptionError(f"not requires i1 operand, got {format_type(actual)}", expr.line)
         if expected is not None:
+            assert isinstance(expected, str)
             require_type("i1", expected, expr.line)
         return "i1"
     if expr.op == "bitwise not":
         target = expected if is_integer_type(expected) else None
-        actual = infer_integer_operand_type(expr.expr, env, functions, expected=target)
+        actual = infer_integer_operand_type(expr.expr, env, functions, records, expected=target)
         if not is_integer_type(actual):
-            raise InscriptionError(f"bitwise not requires integer operand, got {actual}", expr.line)
+            raise InscriptionError(f"bitwise not requires integer operand, got {format_type(actual)}", expr.line)
         if expected is not None:
+            assert isinstance(expected, str)
             require_type(actual, expected, expr.line)
         return actual
     raise AssertionError(expr)  # pragma: no cover
@@ -600,14 +784,16 @@ def infer_cast_type(
     expr: Cast,
     env: dict[str, ValueType],
     functions: dict[str, Function],
+    records: dict[str, RecordDecl],
     *,
-    expected: TypeName | None = None,
+    expected: ValueType | None = None,
 ) -> TypeName:
-    source_type = infer_expr_type(expr.expr, env, functions)
+    source_type = infer_expr_type(expr.expr, env, functions, records)
     target_type = expr.target_type
     if not is_integer_type(source_type) or not is_integer_type(target_type):
         raise InscriptionError(f"cannot cast {source_type} to {target_type}", expr.line)
     if expected is not None:
+        assert isinstance(expected, str)
         require_type(target_type, expected, expr.line)
     return target_type
 
@@ -616,52 +802,59 @@ def infer_binary_type(
     expr: Binary,
     env: dict[str, ValueType],
     functions: dict[str, Function],
+    records: dict[str, RecordDecl],
     *,
-    expected: TypeName | None = None,
+    expected: ValueType | None = None,
 ) -> TypeName:
     if expr.op in {"and", "or"}:
-        left_type = infer_i1_operand_type(expr.left, env, functions)
-        right_type = infer_i1_operand_type(expr.right, env, functions)
+        left_type = infer_i1_operand_type(expr.left, env, functions, records)
+        right_type = infer_i1_operand_type(expr.right, env, functions, records)
         if left_type != "i1" or right_type != "i1":
-            raise InscriptionError(f"{expr.op} requires i1 operands, got {left_type} and {right_type}", expr.line)
+            raise InscriptionError(
+                f"{expr.op} requires i1 operands, got {format_type(left_type)} and {format_type(right_type)}", expr.line
+            )
         if expected is not None:
+            assert isinstance(expected, str)
             require_type("i1", expected, expr.line)
         return "i1"
 
     if expr.op in {"plus", "minus", "times", "divided by", "remainder"}:
-        return infer_integer_pair_type(expr.op, expr.left, expr.right, env, functions, expr.line, expected=expected)
+        return infer_integer_pair_type(expr.op, expr.left, expr.right, env, functions, records, expr.line, expected=expected)
 
     if expr.op in {"bitwise and", "bitwise xor", "bitwise or"}:
-        return infer_integer_pair_type(expr.op, expr.left, expr.right, env, functions, expr.line, expected=expected)
+        return infer_integer_pair_type(expr.op, expr.left, expr.right, env, functions, records, expr.line, expected=expected)
 
     if expr.op in {"shifted left by", "shifted right by"}:
-        return infer_integer_pair_type(expr.op, expr.left, expr.right, env, functions, expr.line, expected=expected)
+        return infer_integer_pair_type(expr.op, expr.left, expr.right, env, functions, records, expr.line, expected=expected)
 
     raise AssertionError(expr)  # pragma: no cover
 
 
-def infer_i1_operand_type(expr: Expr, env: dict[str, ValueType], functions: dict[str, Function]) -> TypeName:
+def infer_i1_operand_type(
+    expr: Expr, env: dict[str, ValueType], functions: dict[str, Function], records: dict[str, RecordDecl]
+) -> TypeName:
     try:
-        return infer_expr_type(expr, env, functions, expected="i1")
+        return infer_expr_type(expr, env, functions, records, expected="i1")  # type: ignore[return-value]
     except InscriptionError:
-        return infer_expr_type(expr, env, functions)
+        return infer_expr_type(expr, env, functions, records)  # type: ignore[return-value]
 
 
 def infer_integer_operand_type(
     expr: Expr,
     env: dict[str, ValueType],
     functions: dict[str, Function],
+    records: dict[str, RecordDecl],
     *,
     expected: TypeName | None = None,
 ) -> TypeName:
     if expected is not None:
         try:
-            return infer_expr_type(expr, env, functions, expected=expected)
+            return infer_expr_type(expr, env, functions, records, expected=expected)  # type: ignore[return-value]
         except InscriptionError as expected_error:
             if _should_preserve_expected_error(expected_error):
                 raise
-            return infer_expr_type(expr, env, functions)
-    return infer_expr_type(expr, env, functions)
+            return infer_expr_type(expr, env, functions, records)  # type: ignore[return-value]
+    return infer_expr_type(expr, env, functions, records)  # type: ignore[return-value]
 
 
 def infer_integer_pair_type(
@@ -670,37 +863,40 @@ def infer_integer_pair_type(
     right: Expr,
     env: dict[str, ValueType],
     functions: dict[str, Function],
+    records: dict[str, RecordDecl],
     line: int,
     *,
-    expected: TypeName | None = None,
+    expected: ValueType | None = None,
 ) -> TypeName:
     target = expected if is_integer_type(expected) else None
     if target is not None:
-        left_type = infer_integer_operand_type(left, env, functions, expected=target)
-        right_type = infer_integer_operand_type(right, env, functions, expected=target)
+        left_type = infer_integer_operand_type(left, env, functions, records, expected=target)
+        right_type = infer_integer_operand_type(right, env, functions, records, expected=target)
     elif isinstance(left, Integer) and not isinstance(right, Integer):
-        right_type = infer_expr_type(right, env, functions)
-        left_type = infer_integer_operand_type(left, env, functions, expected=right_type if is_integer_type(right_type) else None)
+        right_type = infer_expr_type(right, env, functions, records)
+        left_type = infer_integer_operand_type(left, env, functions, records, expected=right_type if is_integer_type(right_type) else None)  # type: ignore[arg-type]
     elif isinstance(right, Integer) and not isinstance(left, Integer):
-        left_type = infer_expr_type(left, env, functions)
-        right_type = infer_integer_operand_type(right, env, functions, expected=left_type if is_integer_type(left_type) else None)
+        left_type = infer_expr_type(left, env, functions, records)
+        right_type = infer_integer_operand_type(right, env, functions, records, expected=left_type if is_integer_type(left_type) else None)  # type: ignore[arg-type]
     else:
-        left_type = infer_expr_type(left, env, functions)
-        right_type = infer_integer_operand_type(right, env, functions, expected=left_type if is_integer_type(left_type) else None)
+        left_type = infer_expr_type(left, env, functions, records)
+        right_type = infer_integer_operand_type(right, env, functions, records, expected=left_type if is_integer_type(left_type) else None)  # type: ignore[arg-type]
 
     if not is_integer_type(left_type) or not is_integer_type(right_type):
-        raise InscriptionError(f"{op} requires integer operands, got {left_type} and {right_type}", line)
+        raise InscriptionError(f"{op} requires integer operands, got {format_type(left_type)} and {format_type(right_type)}", line)
     if left_type != right_type:
-        raise InscriptionError(f"{op} requires matching integer types, got {left_type} and {right_type}", line)
+        raise InscriptionError(
+            f"{op} requires matching integer types, got {format_type(left_type)} and {format_type(right_type)}", line
+        )
     if target is not None and left_type != target:
-        raise InscriptionError(f"{op} requires matching integer types, got {left_type} and {target}", line)
+        raise InscriptionError(f"{op} requires matching integer types, got {format_type(left_type)} and {target}", line)
     return left_type
 
 
 def infer_comparison_operand_type(
-    condition: Comparison, env: dict[str, ValueType], functions: dict[str, Function]
+    condition: Comparison, env: dict[str, ValueType], functions: dict[str, Function], records: dict[str, RecordDecl]
 ) -> TypeName:
-    return infer_comparison_pair_type(condition.left, condition.right, env, functions, condition.line)
+    return infer_comparison_pair_type(condition.left, condition.right, env, functions, records, condition.line)
 
 
 def infer_comparison_pair_type(
@@ -708,22 +904,27 @@ def infer_comparison_pair_type(
     right: Expr,
     env: dict[str, ValueType],
     functions: dict[str, Function],
+    records: dict[str, RecordDecl],
     line: int,
 ) -> TypeName:
     if isinstance(left, Integer) and not isinstance(right, Integer):
-        right_type = infer_expr_type(right, env, functions)
-        left_type = infer_integer_operand_type(left, env, functions, expected=right_type if is_integer_type(right_type) else None)
+        right_type = infer_expr_type(right, env, functions, records)
+        left_type = infer_integer_operand_type(left, env, functions, records, expected=right_type if is_integer_type(right_type) else None)
     elif isinstance(right, Integer) and not isinstance(left, Integer):
-        left_type = infer_expr_type(left, env, functions)
-        right_type = infer_integer_operand_type(right, env, functions, expected=left_type if is_integer_type(left_type) else None)
+        left_type = infer_expr_type(left, env, functions, records)
+        right_type = infer_integer_operand_type(right, env, functions, records, expected=left_type if is_integer_type(left_type) else None)
     else:
-        left_type = infer_expr_type(left, env, functions)
-        right_type = infer_integer_operand_type(right, env, functions, expected=left_type if is_integer_type(left_type) else None)
+        left_type = infer_expr_type(left, env, functions, records)
+        right_type = infer_integer_operand_type(right, env, functions, records, expected=left_type if is_integer_type(left_type) else None)
 
     if not is_integer_type(left_type) or not is_integer_type(right_type):
-        raise InscriptionError(f"comparison requires integer operands, got {left_type} and {right_type}", line)
+        raise InscriptionError(
+            f"comparison requires integer operands, got {format_type(left_type)} and {format_type(right_type)}", line
+        )
     if left_type != right_type:
-        raise InscriptionError(f"comparison requires matching integer types, got {left_type} and {right_type}", line)
+        raise InscriptionError(
+            f"comparison requires matching integer types, got {format_type(left_type)} and {format_type(right_type)}", line
+        )
     return left_type
 
 
@@ -752,20 +953,86 @@ def _require_buffer_type(name: str, line: int, env: dict[str, ValueType]) -> Buf
     return binding_type
 
 
+def _require_record_type(name: str, line: int, env: dict[str, ValueType]) -> RecordType:
+    binding_type = env.get(name)
+    if binding_type is None:
+        raise InscriptionError(f"unknown binding {name}", line)
+    if not isinstance(binding_type, RecordType):
+        raise InscriptionError(f"{name} is not a record", line)
+    return binding_type
+
+
+def _record_decl(record_type: RecordType, line: int, records: dict[str, RecordDecl]) -> RecordDecl:
+    record = records.get(record_type.name)
+    if record is None:
+        raise InscriptionError(f"unknown record type {record_type.name}", line)
+    return record
+
+
+def _require_record_field(record_type: RecordType, field: str, line: int, records: dict[str, RecordDecl]) -> TypeName:
+    record = _record_decl(record_type, line, records)
+    for field_decl in record.fields:
+        if field_decl.name == field:
+            assert isinstance(field_decl.type_name, str)
+            return field_decl.type_name
+    raise InscriptionError(f"record {record_type.name} has no field {field}", line)
+
+
+def _first_record_field(record_type: RecordType, records: dict[str, RecordDecl]) -> str:
+    record = records.get(record_type.name)
+    if record is None or not record.fields:
+        return "field"
+    return record.fields[0].name
+
+
+def infer_record_constructor_type(
+    expr: RecordConstructor,
+    env: dict[str, ValueType],
+    functions: dict[str, Function],
+    records: dict[str, RecordDecl],
+) -> RecordType:
+    record_type = RecordType(expr.type_name)
+    record = _record_decl(record_type, expr.line, records)
+    expected_names = [field.name for field in record.fields]
+    actual_names = [field.name for field in expr.fields]
+    for initializer in expr.fields:
+        if initializer.name not in expected_names:
+            raise InscriptionError(f"record {record.name} has no field {initializer.name}", initializer.line)
+    if actual_names != expected_names:
+        if len(actual_names) == len(expected_names) and set(actual_names) == set(expected_names):
+            raise InscriptionError(
+                f"record {record.name} initializer fields must appear in declaration order: {', '.join(expected_names)}",
+                expr.line,
+            )
+        raise InscriptionError(f"record {record.name} initializer requires fields {', '.join(expected_names)}", expr.line)
+    for initializer, field_decl in zip(expr.fields, record.fields, strict=True):
+        assert isinstance(field_decl.type_name, str)
+        actual = _infer_declared_type(initializer.expr, field_decl.type_name, env, functions, records)
+        if actual != field_decl.type_name:
+            raise InscriptionError(
+                f"field {initializer.name} of {record.name} must have type {field_decl.type_name}, got {format_type(actual)}",
+                initializer.line,
+            )
+    return record_type
+
+
 def _check_buffer_index(
     name: str,
     buffer_type: BufferType,
     index: Expr,
     env: dict[str, ValueType],
     functions: dict[str, Function],
+    records: dict[str, RecordDecl],
 ) -> None:
     if isinstance(index, Integer) and not 0 <= index.value < buffer_type.length:
         raise InscriptionError(
             f"buffer index {index.value} is out of bounds for buffer {name} of length {buffer_type.length}", index.line
         )
-    index_type = infer_expr_type(index, env, functions)
+    index_type = infer_expr_type(index, env, functions, records)
     if not is_integer_type(index_type):
-        raise InscriptionError(f"buffer index must be an integer type, got {index_type}", getattr(index, "line", None))
+        raise InscriptionError(
+            f"buffer index must be an integer type, got {format_type(index_type)}", getattr(index, "line", None)
+        )
 
 
 def _check_integer_literal_range(value: int, type_name: TypeName, line: int) -> None:
@@ -776,6 +1043,6 @@ def _check_integer_literal_range(value: int, type_name: TypeName, line: int) -> 
         raise InscriptionError(f"integer literal {value} is out of range for {type_name}", line)
 
 
-def require_type(actual: TypeName, expected: TypeName, line: int) -> None:
+def require_type(actual: ValueType, expected: ValueType, line: int) -> None:
     if actual != expected:
-        raise InscriptionError(f"expected {expected}, got {actual}", line)
+        raise InscriptionError(f"expected {format_type(expected)}, got {format_type(actual)}", line)
