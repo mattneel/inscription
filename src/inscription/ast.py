@@ -61,6 +61,19 @@ class Variable:
 
 
 @dataclass(frozen=True)
+class BufferType:
+    length: int
+    element_type: TypeName
+
+
+@dataclass(frozen=True)
+class BufferLoad:
+    name: str
+    index: "Expr"
+    line: int
+
+
+@dataclass(frozen=True)
 class Binary:
     op: BinOp
     left: "Expr"
@@ -111,7 +124,7 @@ class WhenExpr:
     line: int
 
 
-Expr = Integer | Boolean | Variable | Unary | Cast | Binary | Call | Comparison | WhenExpr
+Expr = Integer | Boolean | Variable | BufferLoad | Unary | Cast | Binary | Call | Comparison | WhenExpr
 
 
 @dataclass(frozen=True)
@@ -123,9 +136,25 @@ class SetStmt:
 
 
 @dataclass(frozen=True)
+class BufferBinding:
+    name: str
+    buffer_type: BufferType
+    fill: Expr
+    line: int
+
+
+@dataclass(frozen=True)
 class AssignStmt:
     name: str
     expr: Expr
+    line: int
+
+
+@dataclass(frozen=True)
+class BufferStoreStmt:
+    name: str
+    index: Expr
+    value: Expr
     line: int
 
 
@@ -150,5 +179,5 @@ class ReturnStmt:
     line: int
 
 
-BodyStmt = SetStmt | AssignStmt | WhileStmt | IfStmt
+BodyStmt = SetStmt | BufferBinding | AssignStmt | BufferStoreStmt | WhileStmt | IfStmt
 Stmt = BodyStmt | ReturnStmt

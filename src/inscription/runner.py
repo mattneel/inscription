@@ -13,6 +13,8 @@ LOWERING_PASSES = [
     "--convert-scf-to-cf",
     "--convert-cf-to-llvm",
     "--convert-arith-to-llvm",
+    "--expand-strided-metadata",
+    "--finalize-memref-to-llvm",
     "--convert-func-to-llvm",
     "--reconcile-unrealized-casts",
 ]

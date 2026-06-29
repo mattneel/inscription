@@ -1,0 +1,10 @@
+branch store of flag: i1 gives i32:
+  let slot be buffer of 1 i32 filled with 0
+  if flag:
+    slot at 0 becomes 7
+  otherwise:
+    slot at 0 becomes 3
+  slot at 0
+
+main gives i32:
+  branch store of true

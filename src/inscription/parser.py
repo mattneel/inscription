@@ -8,6 +8,10 @@ from .ast import (
     Binary,
     BodyStmt,
     Boolean,
+    BufferBinding,
+    BufferLoad,
+    BufferStoreStmt,
+    BufferType,
     Call,
     Cast,
     Comparison,
@@ -31,8 +35,9 @@ from .diagnostics import InscriptionError
 NAME_RE = re.compile(r"[a-z][a-z0-9_]*")
 TOKEN_RE = re.compile(r"\s*(-?\d+|[a-z][a-z0-9_]*|[(),])")
 RESERVED = {
-    "address", "and", "arguments", "array", "as", "be", "becomes", "bitwise", "by", "call", "divided", "do", "else", "end",
-    "equal", "false", "float", "from", "function", "gives", "greater", "i1", "i32", "i64", "if", "input",
+    "address", "and", "arguments", "array", "as", "at", "be", "becomes", "bitwise", "buffer", "by", "call",
+    "divided", "do", "else", "end", "equal", "false", "filled", "float", "from", "function", "gives",
+    "greater", "i1", "i32", "i64", "if", "input",
     "i8", "i16", "is", "less", "let", "memref", "minus", "no", "not", "or", "otherwise", "output", "parameters",
     "pointer", "plus", "print", "remainder", "return", "set", "shifted", "takes", "than", "then", "times", "to",
     "track", "true", "u8", "u16", "u32", "u64", "when", "while", "with", "xor", "zero",
@@ -211,6 +216,7 @@ class Parser:
         return (
             line.text.startswith("let ")
             or line.text.startswith("track ")
+            or self._buffer_store_match(line) is not None
             or self._assignment_match(line) is not None
             or (line.is_header and line.text.startswith("if "))
             or (line.is_header and line.text.startswith("while "))
@@ -222,6 +228,9 @@ class Parser:
             return self._parse_let(current), index + 1
         if current.text.startswith("track "):
             raise InscriptionError("`track` is not valid Inscription syntax; use `let name be ...`", current.number)
+        buffer_store = self._buffer_store_match(current)
+        if buffer_store is not None:
+            return self._parse_buffer_store(current, buffer_store), index + 1
         assignment = self._assignment_match(current)
         if assignment is not None:
             return self._parse_assignment(current, assignment), index + 1
@@ -318,7 +327,19 @@ class Parser:
             raise InscriptionError("value block must evaluate to an expression", lines[-1].number)
         return unconditional
 
-    def _parse_let(self, line: Line) -> SetStmt:
+    def _parse_let(self, line: Line) -> SetStmt | BufferBinding:
+        buffer_match = re.fullmatch(
+            r"let ([a-z][a-z0-9_]*) be buffer of (-?\d+) ([a-z][a-z0-9_]*) filled with (.+)",
+            line.text,
+        )
+        if buffer_match:
+            length = int(buffer_match.group(2))
+            return BufferBinding(
+                self._name(buffer_match.group(1), line.number),
+                BufferType(length, self._type_name(buffer_match.group(3), line.number)),
+                self._parse_expression(buffer_match.group(4), line.number),
+                line.number,
+            )
         match = re.fullmatch(r"let ([a-z][a-z0-9_]*)(?::\s*([a-z][a-z0-9_]*))? be (.+)", line.text)
         if not match:
             raise InscriptionError("malformed let binding", line.number)
@@ -334,10 +355,23 @@ class Parser:
             return None
         return re.fullmatch(r"([a-z][a-z0-9_]*) becomes (.+)", line.text)
 
+    def _buffer_store_match(self, line: Line) -> re.Match[str] | None:
+        if line.is_header:
+            return None
+        return re.fullmatch(r"([a-z][a-z0-9_]*) at (.+) becomes (.+)", line.text)
+
     def _parse_assignment(self, line: Line, match: re.Match[str]) -> AssignStmt:
         return AssignStmt(
             self._name(match.group(1), line.number),
             self._parse_expression(match.group(2), line.number),
+            line.number,
+        )
+
+    def _parse_buffer_store(self, line: Line, match: re.Match[str]) -> BufferStoreStmt:
+        return BufferStoreStmt(
+            self._name(match.group(1), line.number),
+            self._parse_expression(match.group(2), line.number),
+            self._parse_expression(match.group(3), line.number),
             line.number,
         )
 
@@ -533,12 +567,39 @@ class ExpressionParser:
 
     def parse_postfix(self, stop: set[str]) -> Expr:
         expr = self.parse_primary(stop)
-        while not self.at_end() and self.peek() == "as" and "as" not in stop:
-            self.pop()
-            type_token = self.pop()
-            if type_token not in TYPE_NAMES:
-                raise InscriptionError(f"unknown cast target type '{type_token}'", self.line)
-            expr = Cast(expr, type_token, self.line)  # type: ignore[arg-type]
+        while not self.at_end():
+            if self.peek() == "at" and "at" not in stop:
+                if not isinstance(expr, Variable):
+                    break
+                self.pop()
+                index = self.parse_primary(
+                    set(stop)
+                    | {
+                        ",",
+                        ")",
+                        "is",
+                        "and",
+                        "or",
+                        "as",
+                        "shifted",
+                        "bitwise",
+                        "plus",
+                        "minus",
+                        "times",
+                        "divided",
+                        "remainder",
+                    }
+                )
+                expr = BufferLoad(expr.name, index, self.line)
+                continue
+            if self.peek() == "as" and "as" not in stop:
+                self.pop()
+                type_token = self.pop()
+                if type_token not in TYPE_NAMES:
+                    raise InscriptionError(f"unknown cast target type '{type_token}'", self.line)
+                expr = Cast(expr, type_token, self.line)  # type: ignore[arg-type]
+                continue
+            break
         return expr
 
     def parse_primary(self, stop: set[str]) -> Expr:

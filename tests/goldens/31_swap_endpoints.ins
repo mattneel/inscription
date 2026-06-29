@@ -1,0 +1,11 @@
+swap endpoints gives i32:
+  let bytes be buffer of 3 u8 filled with 0
+  bytes at 0 becomes 7
+  bytes at 2 becomes 9
+  let temporary be bytes at 0
+  bytes at 0 becomes bytes at 2
+  bytes at 2 becomes temporary
+  (bytes at 0 as i32) plus (bytes at 2 as i32)
+
+main gives i32:
+  swap endpoints

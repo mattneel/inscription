@@ -1,0 +1,11 @@
+filled buffer sum gives i32:
+  let cells be buffer of 5 i32 filled with 3
+  let total be 0
+  let i be 0
+  while i is less than 5:
+    total becomes total plus cells at i
+    i becomes i plus 1
+  total
+
+main gives i32:
+  filled buffer sum

@@ -8,6 +8,10 @@ from .ast import (
     Binary,
     BodyStmt,
     Boolean,
+    BufferBinding,
+    BufferLoad,
+    BufferStoreStmt,
+    BufferType,
     Call,
     Cast,
     Comparison,
@@ -52,12 +56,13 @@ INTEGER_RANGES: dict[TypeName, tuple[int, int]] = {
     "u32": (0, 2**32 - 1),
     "u64": (0, 2**64 - 1),
 }
-BindingKind = Literal["param", "let"]
+BindingKind = Literal["param", "let", "buffer"]
+ValueType = TypeName | BufferType
 
 
 @dataclass(frozen=True)
 class Binding:
-    type_name: TypeName
+    type_name: ValueType
     kind: BindingKind
     line: int
 
@@ -91,7 +96,11 @@ def mlir_type(type_name: TypeName) -> str:
     return type_name
 
 
-def is_integer_type(type_name: TypeName | None) -> bool:
+def memref_type(buffer_type: BufferType) -> str:
+    return f"memref<{buffer_type.length}x{mlir_type(buffer_type.element_type)}>"
+
+
+def is_integer_type(type_name: ValueType | None) -> bool:
     return type_name in INTEGER_TYPES
 
 
@@ -134,8 +143,14 @@ def _check_body_stmt(stmt: BodyStmt, bindings: dict[str, Binding], functions: di
     if isinstance(stmt, SetStmt):
         _declare_let(stmt, bindings, functions)
         return
+    if isinstance(stmt, BufferBinding):
+        _declare_buffer(stmt, bindings, functions)
+        return
     if isinstance(stmt, AssignStmt):
         _check_assignment(stmt, bindings, functions)
+        return
+    if isinstance(stmt, BufferStoreStmt):
+        _check_buffer_store(stmt, bindings, functions)
         return
     if isinstance(stmt, WhileStmt):
         _check_while(stmt, bindings, functions)
@@ -146,12 +161,19 @@ def _check_body_stmt(stmt: BodyStmt, bindings: dict[str, Binding], functions: di
     raise AssertionError(stmt)  # pragma: no cover
 
 
+def _check_no_shadow(name: str, line: int, bindings: dict[str, Binding], *, kind: str) -> None:
+    existing = bindings.get(name)
+    if existing is None:
+        return
+    if existing.kind == "param":
+        raise InscriptionError(f"{kind} binding '{name}' cannot shadow phrase hole", line)
+    if existing.kind == "buffer":
+        raise InscriptionError(f"{kind} binding '{name}' cannot shadow buffer binding", line)
+    raise InscriptionError(f"duplicate {kind} binding '{name}'", line)
+
+
 def _declare_let(stmt: SetStmt, bindings: dict[str, Binding], functions: dict[str, Function]) -> None:
-    existing = bindings.get(stmt.name)
-    if existing is not None:
-        if existing.kind == "param":
-            raise InscriptionError(f"let binding '{stmt.name}' cannot shadow phrase hole", stmt.line)
-        raise InscriptionError(f"duplicate let binding '{stmt.name}'", stmt.line)
+    _check_no_shadow(stmt.name, stmt.line, bindings, kind="let")
     if stmt.type_name is not None:
         actual = _infer_declared_type(stmt.expr, stmt.type_name, _env_types(bindings), functions)
         if actual != stmt.type_name:
@@ -162,14 +184,43 @@ def _declare_let(stmt: SetStmt, bindings: dict[str, Binding], functions: dict[st
     bindings[stmt.name] = Binding(type_name, "let", stmt.line)
 
 
+def _declare_buffer(stmt: BufferBinding, bindings: dict[str, Binding], functions: dict[str, Function]) -> None:
+    _check_no_shadow(stmt.name, stmt.line, bindings, kind="buffer")
+    buffer_type = stmt.buffer_type
+    if buffer_type.length < 1:
+        raise InscriptionError("buffer length must be at least 1", stmt.line)
+    if not is_integer_type(buffer_type.element_type):
+        raise InscriptionError(f"buffer element type must be an integer type, got {buffer_type.element_type}", stmt.line)
+    actual = _infer_declared_type(stmt.fill, buffer_type.element_type, _env_types(bindings), functions)
+    if actual != buffer_type.element_type:
+        raise InscriptionError(
+            f"buffer {stmt.name} fill must have type {buffer_type.element_type}, got {actual}", stmt.line
+        )
+    bindings[stmt.name] = Binding(buffer_type, "buffer", stmt.line)
+
+
 def _check_assignment(stmt: AssignStmt, bindings: dict[str, Binding], functions: dict[str, Function]) -> None:
     binding = bindings.get(stmt.name)
     if binding is None:
         raise InscriptionError(f"unknown binding {stmt.name}", stmt.line)
+    if isinstance(binding.type_name, BufferType):
+        raise InscriptionError(
+            f"cannot rebind buffer {stmt.name}; use `{stmt.name} at index becomes value`", stmt.line
+        )
     actual = _infer_declared_type(stmt.expr, binding.type_name, _env_types(bindings), functions)
     if actual != binding.type_name:
         raise InscriptionError(
             f"assignment to {stmt.name} must have type {binding.type_name}, got {actual}", stmt.line
+        )
+
+
+def _check_buffer_store(stmt: BufferStoreStmt, bindings: dict[str, Binding], functions: dict[str, Function]) -> None:
+    buffer_type = _require_buffer_binding(stmt.name, stmt.line, bindings)
+    _check_buffer_index(stmt.name, buffer_type, stmt.index, _env_types(bindings), functions)
+    actual = _infer_declared_type(stmt.value, buffer_type.element_type, _env_types(bindings), functions)
+    if actual != buffer_type.element_type:
+        raise InscriptionError(
+            f"store to {stmt.name} must have type {buffer_type.element_type}, got {actual}", stmt.line
         )
 
 
@@ -205,7 +256,7 @@ def _check_if(stmt: IfStmt, bindings: dict[str, Binding], functions: dict[str, F
 def _infer_declared_type(
     expr: Expr,
     expected: TypeName,
-    env: dict[str, TypeName],
+    env: dict[str, ValueType],
     functions: dict[str, Function],
 ) -> TypeName:
     try:
@@ -224,13 +275,13 @@ def _should_preserve_expected_error(error: InscriptionError) -> bool:
     return ("integer literal" in message and "out of range" in message) or message.startswith("cannot cast")
 
 
-def _env_types(bindings: dict[str, Binding]) -> dict[str, TypeName]:
+def _env_types(bindings: dict[str, Binding]) -> dict[str, ValueType]:
     return {name: binding.type_name for name, binding in bindings.items()}
 
 
 def infer_expr_type(
     expr: Expr,
-    env: dict[str, TypeName],
+    env: dict[str, ValueType],
     functions: dict[str, Function],
     *,
     expected: TypeName | None = None,
@@ -248,15 +299,18 @@ def infer_expr_type(
             require_type("i1", expected, expr.line)
         return "i1"
     if isinstance(expr, Variable):
-        try:
-            actual = env[expr.name]
-        except KeyError as exc:
-            raise InscriptionError(
-                f"unknown binding {expr.name}; variable '{expr.name}' used before initialization", expr.line
-            ) from exc
+        actual = _lookup_binding_type(expr.name, expr.line, env)
+        if isinstance(actual, BufferType):
+            raise InscriptionError(f"buffer {expr.name} cannot be used as a scalar value; use `{expr.name} at index`", expr.line)
         if expected is not None:
             require_type(actual, expected, expr.line)
         return actual
+    if isinstance(expr, BufferLoad):
+        buffer_type = _require_buffer_type(expr.name, expr.line, env)
+        _check_buffer_index(expr.name, buffer_type, expr.index, env, functions)
+        if expected is not None:
+            require_type(buffer_type.element_type, expected, expr.line)
+        return buffer_type.element_type
     if isinstance(expr, Unary):
         return infer_unary_type(expr, env, functions, expected=expected)
     if isinstance(expr, Cast):
@@ -299,7 +353,7 @@ def infer_expr_type(
 
 def infer_unary_type(
     expr: Unary,
-    env: dict[str, TypeName],
+    env: dict[str, ValueType],
     functions: dict[str, Function],
     *,
     expected: TypeName | None = None,
@@ -324,7 +378,7 @@ def infer_unary_type(
 
 def infer_cast_type(
     expr: Cast,
-    env: dict[str, TypeName],
+    env: dict[str, ValueType],
     functions: dict[str, Function],
     *,
     expected: TypeName | None = None,
@@ -340,7 +394,7 @@ def infer_cast_type(
 
 def infer_binary_type(
     expr: Binary,
-    env: dict[str, TypeName],
+    env: dict[str, ValueType],
     functions: dict[str, Function],
     *,
     expected: TypeName | None = None,
@@ -366,7 +420,7 @@ def infer_binary_type(
     raise AssertionError(expr)  # pragma: no cover
 
 
-def infer_i1_operand_type(expr: Expr, env: dict[str, TypeName], functions: dict[str, Function]) -> TypeName:
+def infer_i1_operand_type(expr: Expr, env: dict[str, ValueType], functions: dict[str, Function]) -> TypeName:
     try:
         return infer_expr_type(expr, env, functions, expected="i1")
     except InscriptionError:
@@ -375,7 +429,7 @@ def infer_i1_operand_type(expr: Expr, env: dict[str, TypeName], functions: dict[
 
 def infer_integer_operand_type(
     expr: Expr,
-    env: dict[str, TypeName],
+    env: dict[str, ValueType],
     functions: dict[str, Function],
     *,
     expected: TypeName | None = None,
@@ -394,7 +448,7 @@ def infer_integer_pair_type(
     op: str,
     left: Expr,
     right: Expr,
-    env: dict[str, TypeName],
+    env: dict[str, ValueType],
     functions: dict[str, Function],
     line: int,
     *,
@@ -424,7 +478,7 @@ def infer_integer_pair_type(
 
 
 def infer_comparison_operand_type(
-    condition: Comparison, env: dict[str, TypeName], functions: dict[str, Function]
+    condition: Comparison, env: dict[str, ValueType], functions: dict[str, Function]
 ) -> TypeName:
     return infer_comparison_pair_type(condition.left, condition.right, env, functions, condition.line)
 
@@ -432,7 +486,7 @@ def infer_comparison_operand_type(
 def infer_comparison_pair_type(
     left: Expr,
     right: Expr,
-    env: dict[str, TypeName],
+    env: dict[str, ValueType],
     functions: dict[str, Function],
     line: int,
 ) -> TypeName:
@@ -451,6 +505,47 @@ def infer_comparison_pair_type(
     if left_type != right_type:
         raise InscriptionError(f"comparison requires matching integer types, got {left_type} and {right_type}", line)
     return left_type
+
+
+def _lookup_binding_type(name: str, line: int, env: dict[str, ValueType]) -> ValueType:
+    try:
+        return env[name]
+    except KeyError as exc:
+        raise InscriptionError(f"unknown binding {name}; variable '{name}' used before initialization", line) from exc
+
+
+def _require_buffer_binding(name: str, line: int, bindings: dict[str, Binding]) -> BufferType:
+    binding = bindings.get(name)
+    if binding is None:
+        raise InscriptionError(f"unknown binding {name}", line)
+    if not isinstance(binding.type_name, BufferType):
+        raise InscriptionError(f"{name} is not a buffer", line)
+    return binding.type_name
+
+
+def _require_buffer_type(name: str, line: int, env: dict[str, ValueType]) -> BufferType:
+    binding_type = env.get(name)
+    if binding_type is None:
+        raise InscriptionError(f"unknown binding {name}", line)
+    if not isinstance(binding_type, BufferType):
+        raise InscriptionError(f"{name} is not a buffer", line)
+    return binding_type
+
+
+def _check_buffer_index(
+    name: str,
+    buffer_type: BufferType,
+    index: Expr,
+    env: dict[str, ValueType],
+    functions: dict[str, Function],
+) -> None:
+    if isinstance(index, Integer) and not 0 <= index.value < buffer_type.length:
+        raise InscriptionError(
+            f"buffer index {index.value} is out of bounds for buffer {name} of length {buffer_type.length}", index.line
+        )
+    index_type = infer_expr_type(index, env, functions)
+    if not is_integer_type(index_type):
+        raise InscriptionError(f"buffer index must be an integer type, got {index_type}", getattr(index, "line", None))
 
 
 def _check_integer_literal_range(value: int, type_name: TypeName, line: int) -> None:

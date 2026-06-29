@@ -1,0 +1,10 @@
+write indices gives i32:
+  let cells be buffer of 4 i32 filled with 0
+  let i be 0
+  while i is less than 4:
+    cells at i becomes i plus 1
+    i becomes i plus 1
+  (cells at 0) plus (cells at 1) plus (cells at 2) plus (cells at 3)
+
+main gives i32:
+  write indices

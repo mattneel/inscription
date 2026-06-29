@@ -136,6 +136,7 @@ class CompilerTests(unittest.TestCase):
                 (GOLDENS / "25_shifts.ins").read_text(),
                 (GOLDENS / "27_pack_bytes.ins").read_text(),
                 (GOLDENS / "28_unsigned_comparison.ins").read_text(),
+                (GOLDENS / "29_buffer_sum.ins").read_text(),
                 "highlight new widths a: i8 and b: i16 and c: u64 gives u64:\n  c bitwise xor c\n",
             ]
         )
@@ -245,6 +246,16 @@ main gives i32:
         self.assertIn("arith.extui", mlir)
         self.assertIn("arith.extsi", mlir)
 
+    def test_v04_buffers_lower_to_memref_without_heap_alloc(self):
+        mlir = compile_source(self.fixture("buffer_sum.ins"))
+        self.assertIn("memref.alloca", mlir)
+        self.assertIn("memref.store", mlir)
+        self.assertIn("memref.load", mlir)
+        self.assertIn("scf.for", mlir)
+        self.assertIn("arith.index_cast", mlir)
+        self.assertNotIn("memref.alloc()", mlir)
+        self.assertNotIn("memref.dealloc", mlir)
+
     def test_valid_identifier_cannot_collide_with_generated_ssa_names(self):
         source = """echo of v0: i32 gives i32:
   v0
@@ -277,6 +288,8 @@ main gives i32:
                 "--convert-scf-to-cf",
                 "--convert-cf-to-llvm",
                 "--convert-arith-to-llvm",
+                "--expand-strided-metadata",
+                "--finalize-memref-to-llvm",
                 "--convert-func-to-llvm",
                 "--reconcile-unrealized-casts",
             ],
@@ -430,6 +443,55 @@ main gives i32:
             "comparison signed unsigned mismatch": (
                 "bad gives i1:\n  let x: i32 be 1\n  let y: u32 be 1\n  x is equal to y\n",
                 "comparison requires matching integer types, got i32 and u32",
+            ),
+            "zero length buffer": (
+                "bad gives i32:\n  let cells be buffer of 0 i32 filled with 0\n  0\n",
+                "buffer length must be at least 1",
+            ),
+            "unsupported i1 buffer": (
+                "bad gives i32:\n  let flags be buffer of 4 i1 filled with false\n  0\n",
+                "buffer element type must be an integer type, got i1",
+            ),
+            "buffer fill type mismatch": (
+                "bad gives i32:\n  let bytes be buffer of 4 u8 filled with 300\n  0\n",
+                "integer literal 300 is out of range for u8",
+            ),
+            "buffer store type mismatch": (
+                "bad gives i32:\n  let bytes be buffer of 4 u8 filled with 0\n  bytes at 0 becomes 300\n  0\n",
+                "integer literal 300 is out of range for u8",
+            ),
+            "boolean buffer index": (
+                "bad gives i32:\n  let cells be buffer of 4 i32 filled with 0\n  cells at true\n",
+                "buffer index must be an integer type, got i1",
+            ),
+            "load literal index out of bounds": (
+                "bad gives i32:\n  let cells be buffer of 4 i32 filled with 0\n  cells at 4\n",
+                "buffer index 4 is out of bounds for buffer cells of length 4",
+            ),
+            "store literal index out of bounds": (
+                "bad gives i32:\n  let cells be buffer of 4 i32 filled with 0\n  cells at 4 becomes 1\n  0\n",
+                "buffer index 4 is out of bounds for buffer cells of length 4",
+            ),
+            "unknown buffer": ("bad gives i32:\n  missing at 0\n", "unknown binding missing"),
+            "scalar used as buffer": (
+                "bad gives i32:\n  let x be 0\n  x at 0\n",
+                "x is not a buffer",
+            ),
+            "rebind buffer": (
+                "bad gives i32:\n  let cells be buffer of 4 i32 filled with 0\n  cells becomes 1\n  0\n",
+                "cannot rebind buffer cells; use `cells at index becomes value`",
+            ),
+            "buffer used as scalar": (
+                "bad gives i32:\n  let cells be buffer of 4 i32 filled with 0\n  cells\n",
+                "buffer cells cannot be used as a scalar value; use `cells at index`",
+            ),
+            "buffer passed to phrase call": (
+                "identity of x: i32 gives i32:\n  x\n\nbad gives i32:\n  let cells be buffer of 4 i32 filled with 0\n  identity of cells\n",
+                "buffer cells cannot be used as a scalar value; use `cells at index`",
+            ),
+            "branch local buffer does not escape": (
+                "bad gives i32:\n  let flag be true\n  if flag:\n    let cells be buffer of 1 i32 filled with 1\n  otherwise:\n    let cells be buffer of 1 i32 filled with 2\n  cells at 0\n",
+                "unknown binding cells",
             ),
         }
         for name, (source, contains) in cases.items():
