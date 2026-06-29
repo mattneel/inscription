@@ -1,4 +1,4 @@
-"""Inscription v0 compiler."""
+"""Inscription compiler."""
 
 from .compiler import compile_source
 

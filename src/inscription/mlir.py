@@ -8,6 +8,7 @@ from .ast import (
     Binary,
     Boolean,
     Call,
+    Cast,
     Comparison,
     Expr,
     Function,
@@ -24,7 +25,16 @@ from .ast import (
     WhenExpr,
     WhileStmt,
 )
-from .semantic import analyze, function_table, infer_comparison_operand_type, infer_expr_type
+from .semantic import (
+    all_ones_constant_value,
+    analyze,
+    function_table,
+    infer_comparison_operand_type,
+    infer_expr_type,
+    is_signed_type,
+    mlir_type,
+    type_width,
+)
 
 
 @dataclass(frozen=True)
@@ -71,8 +81,8 @@ class MlirEmitter:
         self.binding_order = [param.name for param in fn.params]
         self.while_counter = 0
         self.while_depth = 0
-        args = ", ".join(f"%{param.name}: {param.type_name}" for param in fn.params)
-        lines.append(f"  func.func @{fn.name}({args}) -> {fn.return_type} {{")
+        args = ", ".join(f"%{param.name}: {mlir_type(param.type_name)}" for param in fn.params)
+        lines.append(f"  func.func @{fn.name}({args}) -> {mlir_type(fn.return_type)} {{")
         env = {param.name: Value(f"%{param.name}", param.type_name) for param in fn.params}
         self.emit_block(fn.body, env, lines, "    ", fn.return_type)
         lines.append("  }")
@@ -88,7 +98,7 @@ class MlirEmitter:
         for stmt in statements:
             if isinstance(stmt, ReturnStmt):
                 value = self.emit_expr(stmt.expr, env, lines, indent, expected=return_type)
-                lines.append(f"{indent}return {value.name} : {return_type}")
+                lines.append(f"{indent}return {value.name} : {mlir_type(return_type)}")
             else:
                 self.emit_body_stmt(stmt, env, lines, indent)
 
@@ -129,29 +139,11 @@ class MlirEmitter:
         if isinstance(expr, Variable):
             return env[expr.name]
         if isinstance(expr, Unary):
-            if expr.op == "not":
-                operand = self.emit_expr(expr.expr, env, lines, indent, expected="i1")
-                true = self.emit_boolean(True, lines, indent)
-                out = Value(self.fresh(), "i1")
-                lines.append(f"{indent}{out.name} = arith.xori {operand.name}, {true.name} : i1")
-                return out
-            raise AssertionError(expr)  # pragma: no cover
+            return self.emit_unary(expr, env, lines, indent, type_name)
+        if isinstance(expr, Cast):
+            return self.emit_cast(expr, env, lines, indent, type_name)
         if isinstance(expr, Binary):
-            operand_type = "i1" if expr.op in {"and", "or"} else type_name
-            left = self.emit_expr(expr.left, env, lines, indent, expected=operand_type)
-            right = self.emit_expr(expr.right, env, lines, indent, expected=operand_type)
-            out = Value(self.fresh(), type_name)
-            op = {
-                "plus": "addi",
-                "minus": "subi",
-                "times": "muli",
-                "divided by": "divsi",
-                "remainder": "remsi",
-                "and": "andi",
-                "or": "ori",
-            }[expr.op]
-            lines.append(f"{indent}{out.name} = arith.{op} {left.name}, {right.name} : {type_name}")
-            return out
+            return self.emit_binary(expr, env, lines, indent, type_name)
         if isinstance(expr, Call):
             target = self.functions[expr.name]
             args = [
@@ -160,14 +152,78 @@ class MlirEmitter:
             ]
             out = Value(self.fresh(), target.return_type)
             arg_values = ", ".join(arg.name for arg in args)
-            arg_types = ", ".join(arg.type_name for arg in args)
-            lines.append(f"{indent}{out.name} = func.call @{expr.name}({arg_values}) : ({arg_types}) -> {target.return_type}")
+            arg_types = ", ".join(mlir_type(arg.type_name) for arg in args)
+            lines.append(
+                f"{indent}{out.name} = func.call @{expr.name}({arg_values}) : ({arg_types}) -> {mlir_type(target.return_type)}"
+            )
             return out
         if isinstance(expr, Comparison):
             return self.emit_comparison(expr, env, lines, indent)
         if isinstance(expr, WhenExpr):
             return self.emit_when_expr(expr, env, lines, indent, type_name)
         raise AssertionError(expr)  # pragma: no cover
+
+    def emit_unary(self, expr: Unary, env: dict[str, Value], lines: list[str], indent: str, type_name: TypeName) -> Value:
+        if expr.op == "not":
+            operand = self.emit_expr(expr.expr, env, lines, indent, expected="i1")
+            true = self.emit_boolean(True, lines, indent)
+            out = Value(self.fresh(), "i1")
+            lines.append(f"{indent}{out.name} = arith.xori {operand.name}, {true.name} : i1")
+            return out
+        if expr.op == "bitwise not":
+            operand = self.emit_expr(expr.expr, env, lines, indent, expected=type_name)
+            all_ones = self.emit_integer(all_ones_constant_value(type_name), type_name, lines, indent)
+            out = Value(self.fresh(), type_name)
+            lines.append(f"{indent}{out.name} = arith.xori {operand.name}, {all_ones.name} : {mlir_type(type_name)}")
+            return out
+        raise AssertionError(expr)  # pragma: no cover
+
+    def emit_binary(self, expr: Binary, env: dict[str, Value], lines: list[str], indent: str, type_name: TypeName) -> Value:
+        operand_type = "i1" if expr.op in {"and", "or"} else type_name
+        left = self.emit_expr(expr.left, env, lines, indent, expected=operand_type)
+        right = self.emit_expr(expr.right, env, lines, indent, expected=operand_type)
+        out = Value(self.fresh(), type_name)
+        op = self.binary_mlir_op(expr.op, type_name)
+        lines.append(f"{indent}{out.name} = arith.{op} {left.name}, {right.name} : {mlir_type(type_name)}")
+        return out
+
+    def binary_mlir_op(self, op: str, type_name: TypeName) -> str:
+        if op == "plus":
+            return "addi"
+        if op == "minus":
+            return "subi"
+        if op == "times":
+            return "muli"
+        if op == "divided by":
+            return "divsi" if is_signed_type(type_name) else "divui"
+        if op == "remainder":
+            return "remsi" if is_signed_type(type_name) else "remui"
+        if op in {"and", "bitwise and"}:
+            return "andi"
+        if op in {"or", "bitwise or"}:
+            return "ori"
+        if op == "bitwise xor":
+            return "xori"
+        if op == "shifted left by":
+            return "shli"
+        if op == "shifted right by":
+            return "shrsi" if is_signed_type(type_name) else "shrui"
+        raise AssertionError(op)  # pragma: no cover
+
+    def emit_cast(self, expr: Cast, env: dict[str, Value], lines: list[str], indent: str, target_type: TypeName) -> Value:
+        source = self.emit_expr(expr.expr, env, lines, indent)
+        source_type = source.type_name
+        if type_width(source_type) == type_width(target_type):
+            return Value(source.name, target_type)
+        out = Value(self.fresh(), target_type)
+        if type_width(source_type) > type_width(target_type):
+            lines.append(
+                f"{indent}{out.name} = arith.trunci {source.name} : {mlir_type(source_type)} to {mlir_type(target_type)}"
+            )
+            return out
+        op = "extsi" if is_signed_type(source_type) else "extui"
+        lines.append(f"{indent}{out.name} = arith.{op} {source.name} : {mlir_type(source_type)} to {mlir_type(target_type)}")
+        return out
 
     def emit_integer(self, value: int, type_name: TypeName, lines: list[str], indent: str) -> Value:
         key: ConstantKey = ("int", value, type_name)
@@ -176,7 +232,7 @@ class MlirEmitter:
             return cached
         out = Value(self.fresh(), type_name)
         self.constants[key] = out
-        lines.append(f"{indent}{out.name} = arith.constant {value} : {type_name}")
+        lines.append(f"{indent}{out.name} = arith.constant {value} : {mlir_type(type_name)}")
         return out
 
     def emit_boolean(self, value: bool, lines: list[str], indent: str) -> Value:
@@ -209,12 +265,13 @@ class MlirEmitter:
         case = cases[0]
         cond = self.emit_expr(case.condition, env, lines, indent, expected="i1")
         result = Value(self.fresh(), type_name)
-        lines.append(f"{indent}{result.name} = scf.if {cond.name} -> ({type_name}) {{")
+        mlir_result_type = mlir_type(type_name)
+        lines.append(f"{indent}{result.name} = scf.if {cond.name} -> ({mlir_result_type}) {{")
         then_value = self.emit_expr(case.expr, dict(env), lines, indent + "  ", expected=type_name)
-        lines.append(f"{indent}  scf.yield {then_value.name} : {type_name}")
+        lines.append(f"{indent}  scf.yield {then_value.name} : {mlir_result_type}")
         lines.append(f"{indent}}} else {{")
         else_value = self.emit_when_cases(cases[1:], otherwise, dict(env), lines, indent + "  ", type_name)
-        lines.append(f"{indent}  scf.yield {else_value.name} : {type_name}")
+        lines.append(f"{indent}  scf.yield {else_value.name} : {mlir_result_type}")
         lines.append(f"{indent}}}")
         return result
 
@@ -224,8 +281,14 @@ class MlirEmitter:
         left = self.emit_expr(condition.left, env, lines, indent, expected=type_name)
         right = self.emit_expr(condition.right, env, lines, indent, expected=type_name)
         out = Value(self.fresh(), "i1")
-        lines.append(f"{indent}{out.name} = arith.cmpi {condition.pred}, {left.name}, {right.name} : {type_name}")
+        pred = self.comparison_predicate(condition.pred, type_name)
+        lines.append(f"{indent}{out.name} = arith.cmpi {pred}, {left.name}, {right.name} : {mlir_type(type_name)}")
         return out
+
+    def comparison_predicate(self, pred: str, type_name: TypeName) -> str:
+        if pred in {"eq", "ne"} or is_signed_type(type_name):
+            return pred
+        return {"slt": "ult", "sle": "ule", "sgt": "ugt", "sge": "uge"}[pred]
 
     def emit_while(self, stmt: WhileStmt, env: dict[str, Value], lines: list[str], indent: str) -> None:
         loop_id = self.while_counter
@@ -256,7 +319,7 @@ class MlirEmitter:
         lines.append(f"{indent}}} do {{")
         if carried_names:
             body_args = ", ".join(
-                f"%{name}_body{arg_suffix}: {type_name}"
+                f"%{name}_body{arg_suffix}: {mlir_type(type_name)}"
                 for name, type_name in zip(carried_names, carried_types, strict=True)
             )
             lines.append(f"{indent}^bb0({body_args}):")
@@ -400,9 +463,9 @@ class MlirEmitter:
         return [name for name in visible_binding_order if name in assigned]
 
     def type_list(self, types: list[TypeName]) -> str:
-        return ", ".join(types)
+        return ", ".join(mlir_type(type_name) for type_name in types)
 
     def result_type_list(self, types: list[TypeName]) -> str:
         if len(types) == 1:
-            return types[0]
+            return mlir_type(types[0])
         return f"({self.type_list(types)})"

@@ -6,9 +6,9 @@ The language is readable, but it is **not** natural-language interpretation: eve
 
 ## Status
 
-This repository currently implements **Inscription v0.2**:
+This repository currently implements **Inscription v0.3**:
 
-- source-visible scalar types: `i1`, `i32`, and `i64`
+- source-visible scalar types: `i1`, signed integers `i8`/`i16`/`i32`/`i64`, and unsigned integers `u8`/`u16`/`u32`/`u64`
 - phrase-shaped function definitions and phrase-shaped calls
 - value blocks with `expression when condition` and `otherwise expression`
 - implicit returns: the block value is the phrase result
@@ -18,6 +18,9 @@ This repository currently implements **Inscription v0.2**:
 - nested `while` loops
 - step-level `if condition:` / `otherwise:` blocks lowered through `scf.if` SSA results
 - integer arithmetic: `plus`, `minus`, `times`, `divided by`, and `remainder`
+- bitwise integer operators: `bitwise and`, `bitwise or`, `bitwise xor`, and `bitwise not`
+- integer shifts: `shifted left by` and `shifted right by`
+- explicit integer casts with postfix `as type`
 - boolean literals: `true` and `false`
 - boolean operators: `and`, `or`, and `not`
 - comparison expressions that evaluate to `i1`
@@ -28,7 +31,7 @@ This repository currently implements **Inscription v0.2**:
 - LLVM 22 lowering and execution through `mlir-opt`, `mlir-translate`, and `lli`
 - no source-level I/O, arrays, floats, pointers, memrefs, storage allocation, statement-level `return`, `break`, `continue`, or natural-language inference
 
-See [`docs/inscription-v0.2-spec.md`](docs/inscription-v0.2-spec.md) and [`grammar/inscription-v0.2.ebnf`](grammar/inscription-v0.2.ebnf) for the exact current language contract. The immutable v0 and v0.1 contracts remain in [`docs/inscription-v0-spec.md`](docs/inscription-v0-spec.md), [`docs/inscription-v0.1-spec.md`](docs/inscription-v0.1-spec.md), [`grammar/inscription-v0.ebnf`](grammar/inscription-v0.ebnf), and [`grammar/inscription-v0.1.ebnf`](grammar/inscription-v0.1.ebnf).
+See [`docs/inscription-v0.3-spec.md`](docs/inscription-v0.3-spec.md) and [`grammar/inscription-v0.3.ebnf`](grammar/inscription-v0.3.ebnf) for the exact current language contract. The immutable previous contracts remain in [`docs/inscription-v0-spec.md`](docs/inscription-v0-spec.md), [`docs/inscription-v0.1-spec.md`](docs/inscription-v0.1-spec.md), [`docs/inscription-v0.2-spec.md`](docs/inscription-v0.2-spec.md), [`grammar/inscription-v0.ebnf`](grammar/inscription-v0.ebnf), [`grammar/inscription-v0.1.ebnf`](grammar/inscription-v0.1.ebnf), and [`grammar/inscription-v0.2.ebnf`](grammar/inscription-v0.2.ebnf).
 
 ## Requirements
 
@@ -134,7 +137,7 @@ A program is a list of phrase definitions:
   <value block>
 ```
 
-A type is one of `i1`, `i32`, or `i64`. A typed hole is written `name: type`. The call site mirrors the definition by filling the holes:
+A type is one of `i1`, `i8`, `i16`, `i32`, `i64`, `u8`, `u16`, `u32`, or `u64`. `i1` is boolean only; all other types are integer numeric types. Signedness is source-semantic: MLIR integers are signless, but Inscription signedness selects division, remainder, ordered comparison, and right-shift operations. A typed hole is written `name: type`. The call site mirrors the definition by filling the holes:
 
 ```text
 square of n: i32 gives i32:
@@ -184,12 +187,14 @@ average of left: i32 and right: i32 gives i32:
   total divided by 2
 ```
 
-`i64` definitions are supported:
+Narrow, wide, signed, and unsigned integer definitions are supported:
 
 ```text
-factorial of n: i64 gives i64:
-  1 when n is less than or equal to 1
-  otherwise n times factorial of (n minus 1)
+low byte of x: u32 gives u8:
+  x as u8
+
+pack high: u8 and low: u8 gives u16:
+  ((high as u16) shifted left by 8) bitwise or (low as u16)
 ```
 
 Comparison expressions return `i1`; boolean literals are `true` and `false`; boolean operators are strict `i1` expressions:
@@ -201,6 +206,8 @@ is zero x: i32 gives i1:
 between one and ten x: i32 gives i1:
   x is greater than or equal to 1 and x is less than or equal to 10
 ```
+
+There are no implicit casts between widths or signedness. Use postfix `as type` for explicit integer casts. Same-width casts change source signedness without emitting an MLIR op; narrowing emits `arith.trunci`; widening emits `arith.extsi` or `arith.extui`.
 
 Expressions:
 
@@ -217,6 +224,13 @@ left minus right
 left times right
 left divided by right
 left remainder right
+left bitwise and right
+left bitwise or right
+left bitwise xor right
+bitwise not mask
+x shifted left by amount
+x shifted right by amount
+x as u32
 not done
 left and right
 left or right
@@ -235,7 +249,7 @@ left is greater than right
 left is greater than or equal to right
 ```
 
-Important v0.2 rules:
+Important v0.3 rules:
 
 - function names are generated from the leading literal words in a phrase definition
 - phrase names are unique; there is no overloading
@@ -250,9 +264,10 @@ Important v0.2 rules:
 - if/otherwise conditions must be `i1`, and both branches must contain at least one step
 - branch-local lets do not escape
 - bindings assigned in if branches lower to `scf.if` results in source binding order
-- arithmetic operands must be numeric (`i32` or `i64`)
-- `remainder` requires matching numeric operands and lowers to `arith.remsi`
-- comparisons require numeric operands and return `i1`
+- arithmetic, bitwise, and shift operands must be matching integer numeric types, never `i1`
+- source signedness controls `divided by`, `remainder`, ordered comparisons, and `shifted right by`
+- comparisons require matching integer numeric operands and return `i1`
+- there are no implicit casts between signed and unsigned types or between widths
 - boolean `and`, `or`, and `not` require `i1` operands and return `i1`
 - variables must be initialized by a phrase hole or prior visible `let`
 - phrase calls must match a declared phrase template exactly
@@ -280,6 +295,11 @@ PYTHONPATH=src python -m inscription run tests/fixtures/positive/iterative_facto
 PYTHONPATH=src python -m inscription run tests/fixtures/positive/gcd.ins                 # exits 6
 PYTHONPATH=src python -m inscription run tests/fixtures/positive/collatz_steps.ins       # exits 16
 PYTHONPATH=src python -m inscription run tests/fixtures/positive/nested_while_multiply.ins # exits 42
+PYTHONPATH=src python -m inscription run tests/fixtures/positive/u8_cast.ins             # exits 255
+PYTHONPATH=src python -m inscription run tests/fixtures/positive/bitwise_flags.ins       # exits 7
+PYTHONPATH=src python -m inscription run tests/fixtures/positive/shifts.ins              # exits 8
+PYTHONPATH=src python -m inscription run tests/fixtures/positive/unsigned_remainder.ins  # exits 5
+PYTHONPATH=src python -m inscription run tests/fixtures/positive/unsigned_comparison.ins # exits 7
 ```
 
 ## Repository layout
@@ -288,10 +308,12 @@ PYTHONPATH=src python -m inscription run tests/fixtures/positive/nested_while_mu
 src/inscription/              compiler implementation
 docs/inscription-v0-spec.md   original v0 language and toolchain specification
 docs/inscription-v0.1-spec.md v0.1 language and toolchain specification
-docs/inscription-v0.2-spec.md current v0.2 language and toolchain specification
+docs/inscription-v0.2-spec.md v0.2 language and toolchain specification
+docs/inscription-v0.3-spec.md current v0.3 language and toolchain specification
 grammar/inscription-v0.ebnf   original v0 grammar
 grammar/inscription-v0.1.ebnf v0.1 grammar
-grammar/inscription-v0.2.ebnf current v0.2 grammar
+grammar/inscription-v0.2.ebnf v0.2 grammar
+grammar/inscription-v0.3.ebnf current v0.3 grammar
 tests/goldens/                exact MLIR conformance goldens
 tests/                        unit tests and executable fixtures
 ```

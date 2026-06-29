@@ -131,6 +131,12 @@ class CompilerTests(unittest.TestCase):
                 (GOLDENS / "17_boolean_literals.ins").read_text(),
                 (GOLDENS / "19_collatz.ins").read_text(),
                 (GOLDENS / "22_boolean_operators.ins").read_text(),
+                (GOLDENS / "23_u8_cast.ins").read_text(),
+                (GOLDENS / "24_bitwise_flags.ins").read_text(),
+                (GOLDENS / "25_shifts.ins").read_text(),
+                (GOLDENS / "27_pack_bytes.ins").read_text(),
+                (GOLDENS / "28_unsigned_comparison.ins").read_text(),
+                "highlight new widths a: i8 and b: i16 and c: u64 gives u64:\n  c bitwise xor c\n",
             ]
         )
         html = highlight_source(source, output_format="html")
@@ -221,6 +227,24 @@ main gives i32:
         for needle in forbidden:
             self.assertNotIn(needle, mlir)
 
+    def test_v03_scalar_system_ops_lower_to_expected_arith(self):
+        source = """ops of x: u32 and y: i8 gives i32:
+  let unsigned_half be x divided by 2
+  let unsigned_shifted be unsigned_half shifted right by 1
+  let signed_shifted be y shifted right by 1
+  let inverted be bitwise not (unsigned_shifted as u8)
+  let mixed be inverted bitwise xor (signed_shifted as u8)
+  let widened be signed_shifted as i32
+  (mixed as i32) plus widened
+"""
+        mlir = compile_source(source)
+        self.assertIn("arith.divui", mlir)
+        self.assertIn("arith.shrui", mlir)
+        self.assertIn("arith.shrsi", mlir)
+        self.assertIn("arith.xori", mlir)
+        self.assertIn("arith.extui", mlir)
+        self.assertIn("arith.extsi", mlir)
+
     def test_valid_identifier_cannot_collide_with_generated_ssa_names(self):
         source = """echo of v0: i32 gives i32:
   v0
@@ -267,11 +291,11 @@ main gives i32:
     def test_phrase_definitions_reject_unsupported_types(self):
         self.assertCompileError(
             "identity of x: f64 gives i32:\n  x\n\nmain gives i32:\n  0\n",
-            "only support",
+            "supported scalar types",
         )
         self.assertCompileError(
             "identity of x: i32 gives f64:\n  x\n\nmain gives i32:\n  0\n",
-            "only support",
+            "supported scalar types",
         )
 
     def test_value_block_requires_otherwise_after_when(self):
@@ -322,7 +346,7 @@ main gives i32:
             "pointers": ("main gives i32:\n  pointer\n", "unexpected token"),
             "memrefs": ("main gives i32:\n  memref\n", "unexpected token"),
             "reserved hole name": ("echo of let: i32 gives i32:\n  let\n\nmain gives i32:\n  0\n", "reserved word"),
-            "out of range literal": ("main gives i64:\n  9223372036854775808\n", "outside signed 64-bit"),
+            "out of range literal": ("main gives i64:\n  9223372036854775808\n", "out of range for i64"),
             "assignment to undeclared binding": ("bad gives i32:\n  x becomes 1\n  0\n", "unknown binding x"),
             "assignment type mismatch": (
                 "bad gives i32:\n  let x be 0\n  x becomes x is equal to 0\n  x\n",
@@ -345,10 +369,10 @@ main gives i32:
                 "bad gives i32:\n  let x be 0\n  while x is less than 1:\n  x\n",
                 "while loop requires an indented body",
             ),
-            "remainder on i1": ("bad gives i1:\n  true remainder false\n", "remainder requires numeric operands"),
+            "remainder on i1": ("bad gives i1:\n  true remainder false\n", "remainder requires integer operands"),
             "remainder mismatched operands": (
                 "to i64 of x: i32 gives i64:\n  1\n\nbad of y: i32 gives i32:\n  y remainder to i64 of y\n",
-                "remainder operands must have same type",
+                "remainder requires matching integer types",
             ),
             "if condition is not i1": (
                 "bad gives i32:\n  let x be 0\n  if x:\n    x becomes 1\n  otherwise:\n    x becomes 2\n  x\n",
@@ -373,6 +397,40 @@ main gives i32:
             "boolean and requires i1": ("bad gives i1:\n  1 and 2\n", "and requires i1 operands"),
             "boolean or requires i1": ("bad gives i1:\n  1 or 2\n", "or requires i1 operands"),
             "boolean not requires i1": ("bad gives i1:\n  not 1\n", "not requires i1 operand"),
+            "u8 literal out of range": (
+                "bad gives i32:\n  let x: u8 be 256\n  x as i32\n",
+                "integer literal 256 is out of range for u8",
+            ),
+            "i8 literal out of range": (
+                "bad gives i32:\n  let x: i8 be 128\n  x as i32\n",
+                "integer literal 128 is out of range for i8",
+            ),
+            "arithmetic width mismatch": (
+                "bad gives i32:\n  let x: i32 be 1\n  let y: i64 be 2\n  x plus y\n",
+                "plus requires matching integer types, got i32 and i64",
+            ),
+            "arithmetic signed unsigned mismatch": (
+                "bad gives i32:\n  let x: i32 be 1\n  let y: u32 be 2\n  x plus y\n",
+                "plus requires matching integer types, got i32 and u32",
+            ),
+            "bitwise on boolean": (
+                "bad gives i1:\n  true bitwise and false\n",
+                "bitwise and requires integer operands, got i1 and i1",
+            ),
+            "boolean and on integers": (
+                "bad gives i1:\n  let x: u8 be 1\n  let y: u8 be 2\n  x and y\n",
+                "and requires i1 operands, got u8 and u8",
+            ),
+            "shift amount mismatch": (
+                "bad gives u8:\n  let x: u8 be 1\n  let amount: u32 be 3\n  x shifted left by amount\n",
+                "shifted left by requires matching integer types, got u8 and u32",
+            ),
+            "cast from boolean": ("bad gives i32:\n  true as i32\n", "cannot cast i1 to i32"),
+            "cast to boolean": ("bad gives i1:\n  1 as i1\n", "cannot cast i32 to i1"),
+            "comparison signed unsigned mismatch": (
+                "bad gives i1:\n  let x: i32 be 1\n  let y: u32 be 1\n  x is equal to y\n",
+                "comparison requires matching integer types, got i32 and u32",
+            ),
         }
         for name, (source, contains) in cases.items():
             with self.subTest(name=name):

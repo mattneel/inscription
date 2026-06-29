@@ -1,0 +1,5 @@
+pack high: u8 and low: u8 gives u16:
+  ((high as u16) shifted left by 8) bitwise or (low as u16)
+
+main gives i32:
+  (pack 1 and 2) as i32

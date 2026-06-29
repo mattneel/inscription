@@ -9,6 +9,7 @@ from .ast import (
     BodyStmt,
     Boolean,
     Call,
+    Cast,
     Comparison,
     Expr,
     Function,
@@ -30,12 +31,13 @@ from .diagnostics import InscriptionError
 NAME_RE = re.compile(r"[a-z][a-z0-9_]*")
 TOKEN_RE = re.compile(r"\s*(-?\d+|[a-z][a-z0-9_]*|[(),])")
 RESERVED = {
-    "address", "and", "arguments", "array", "be", "becomes", "by", "call", "divided", "do", "else", "end",
+    "address", "and", "arguments", "array", "as", "be", "becomes", "bitwise", "by", "call", "divided", "do", "else", "end",
     "equal", "false", "float", "from", "function", "gives", "greater", "i1", "i32", "i64", "if", "input",
-    "is", "less", "let", "memref", "minus", "no", "not", "or", "otherwise", "output", "parameters",
-    "pointer", "plus", "print", "remainder", "return", "set", "takes", "than", "then", "times", "to",
-    "track", "true", "when", "while", "with", "zero",
+    "i8", "i16", "is", "less", "let", "memref", "minus", "no", "not", "or", "otherwise", "output", "parameters",
+    "pointer", "plus", "print", "remainder", "return", "set", "shifted", "takes", "than", "then", "times", "to",
+    "track", "true", "u8", "u16", "u32", "u64", "when", "while", "with", "xor", "zero",
 }
+TYPE_NAMES: set[str] = {"i1", "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64"}
 COMPARATORS: tuple[tuple[tuple[str, ...], str], ...] = (
     (("equal", "to"), "eq"),
     (("not", "equal", "to"), "ne"),
@@ -353,9 +355,9 @@ class Parser:
         return value
 
     def _type_name(self, value: str, line: int) -> TypeName:
-        if value in {"i1", "i32", "i64"}:
+        if value in TYPE_NAMES:
             return value  # type: ignore[return-value]
-        raise InscriptionError("v0 phrase definitions only support i1, i32, and i64", line)
+        raise InscriptionError("supported scalar types are i1, i8, i16, i32, i64, u8, u16, u32, and u64", line)
 
 
 def tokenize(text: str, line: int) -> list[str]:
@@ -399,8 +401,6 @@ def parse_comparison(text: str, line: int, phrases: tuple[PhraseTemplate, ...] =
 
 
 class ExpressionParser:
-    PRECEDENCE = {"plus": 10, "minus": 10, "times": 20, "divided by": 20, "remainder": 20}
-
     def __init__(self, tokens: list[str], line: int, phrases: tuple[PhraseTemplate, ...] = ()):
         self.tokens = tokens
         self.line = line
@@ -443,7 +443,7 @@ class ExpressionParser:
 
     def parse_comparison(self, stop: set[str]) -> Expr:
         comparison_stop = set(stop) | {"and", "or"}
-        left = self.parse_arithmetic(comparison_stop)
+        left = self.parse_bitwise_or(comparison_stop)
         if self.at_end() or self.peek() != "is" or "is" in stop:
             return left
         self.pop()
@@ -452,26 +452,74 @@ class ExpressionParser:
             phrase_len = len(phrase)
             if tuple(rest[:phrase_len]) == phrase:
                 self.pos += phrase_len
-                right = self.parse_arithmetic(comparison_stop)
+                right = self.parse_bitwise_or(comparison_stop)
                 return Comparison(predicate, left, right, self.line)
         raise InscriptionError("unsupported comparison operator", self.line)
 
-    def parse_arithmetic(self, stop: set[str], min_prec: int = 0) -> Expr:
+    def parse_bitwise_or(self, stop: set[str]) -> Expr:
+        left = self.parse_bitwise_xor(stop)
+        while "bitwise" not in stop and self.match_sequence(("bitwise", "or")):
+            right = self.parse_bitwise_xor(stop)
+            left = Binary("bitwise or", left, right, self.line)
+        return left
+
+    def parse_bitwise_xor(self, stop: set[str]) -> Expr:
+        left = self.parse_bitwise_and(stop)
+        while "bitwise" not in stop and self.match_sequence(("bitwise", "xor")):
+            right = self.parse_bitwise_and(stop)
+            left = Binary("bitwise xor", left, right, self.line)
+        return left
+
+    def parse_bitwise_and(self, stop: set[str]) -> Expr:
+        left = self.parse_shift(stop)
+        while "bitwise" not in stop and self.match_sequence(("bitwise", "and")):
+            right = self.parse_shift(stop)
+            left = Binary("bitwise and", left, right, self.line)
+        return left
+
+    def parse_shift(self, stop: set[str]) -> Expr:
+        left = self.parse_additive(stop)
+        while not self.at_end() and self.peek() == "shifted" and "shifted" not in stop:
+            if self.match_sequence(("shifted", "left", "by")):
+                right = self.parse_additive(stop)
+                left = Binary("shifted left by", left, right, self.line)
+                continue
+            if self.match_sequence(("shifted", "right", "by")):
+                right = self.parse_additive(stop)
+                left = Binary("shifted right by", left, right, self.line)
+                continue
+            raise InscriptionError("shift operator must be 'shifted left by' or 'shifted right by'", self.line)
+        return left
+
+    def parse_additive(self, stop: set[str]) -> Expr:
+        left = self.parse_multiplicative(stop)
+        while not self.at_end():
+            token = self.peek()
+            if token in stop or token in {",", ")", "is", "and", "or", "as", "shifted", "bitwise"}:
+                break
+            if token not in {"plus", "minus"}:
+                break
+            op = self.pop()
+            right = self.parse_multiplicative(stop)
+            left = Binary(op, left, right, self.line)  # type: ignore[arg-type]
+        return left
+
+    def parse_multiplicative(self, stop: set[str]) -> Expr:
         left = self.parse_unary(stop)
         while not self.at_end():
             token = self.peek()
-            if token in stop or token in {",", ")", "is", "and", "or"}:
+            if token in stop or token in {",", ")", "is", "and", "or", "as", "shifted", "bitwise", "plus", "minus"}:
                 break
-            operator = self.peek_operator()
-            if operator is None:
-                if token == "divided":
+            if token == "divided":
+                if self.match_sequence(("divided", "by")):
+                    op = "divided by"
+                else:
                     raise InscriptionError("operator 'divided' must be followed by 'by'", self.line)
+            elif token in {"times", "remainder"}:
+                op = self.pop()
+            else:
                 break
-            op, prec, width = operator
-            if prec < min_prec:
-                break
-            self.pos += width
-            right = self.parse_arithmetic(stop, prec + 1)
+            right = self.parse_unary(stop)
             left = Binary(op, left, right, self.line)  # type: ignore[arg-type]
         return left
 
@@ -479,17 +527,19 @@ class ExpressionParser:
         if self.peek() == "not" and "not" not in stop:
             self.pop()
             return Unary("not", self.parse_unary(stop), self.line)
-        return self.parse_primary(stop)
+        if "bitwise" not in stop and self.match_sequence(("bitwise", "not")):
+            return Unary("bitwise not", self.parse_unary(stop), self.line)
+        return self.parse_postfix(stop)
 
-    def peek_operator(self) -> tuple[str, int, int] | None:
-        token = self.peek()
-        if token == "divided":
-            if self.pos + 1 < len(self.tokens) and self.tokens[self.pos + 1] == "by":
-                return "divided by", self.PRECEDENCE["divided by"], 2
-            return None
-        if token in {"plus", "minus", "times", "remainder"}:
-            return token, self.PRECEDENCE[token], 1
-        return None
+    def parse_postfix(self, stop: set[str]) -> Expr:
+        expr = self.parse_primary(stop)
+        while not self.at_end() and self.peek() == "as" and "as" not in stop:
+            self.pop()
+            type_token = self.pop()
+            if type_token not in TYPE_NAMES:
+                raise InscriptionError(f"unknown cast target type '{type_token}'", self.line)
+            expr = Cast(expr, type_token, self.line)  # type: ignore[arg-type]
+        return expr
 
     def parse_primary(self, stop: set[str]) -> Expr:
         token = self.peek()
@@ -508,8 +558,8 @@ class ExpressionParser:
             raise InscriptionError("unexpected token ')' in expression", self.line)
         if re.fullmatch(r"-?\d+", token):
             value = int(token)
-            if not -(2**63) <= value <= 2**63 - 1:
-                raise InscriptionError("integer literal is outside signed 64-bit range", self.line)
+            if not -(2**63) <= value <= 2**64 - 1:
+                raise InscriptionError("integer literal is outside supported 64-bit range", self.line)
             return Integer(value, self.line)
         if token == "zero":
             return Integer(0, self.line)
@@ -564,7 +614,7 @@ class ExpressionParser:
                         if depth == 0:
                             break
                         depth -= 1
-                    elif depth == 0 and (token in stop or token in {",", "and", "or"}):
+                    elif depth == 0 and (token in stop or token in {",", "and", "or", "as", "is", "shifted", "bitwise"}):
                         break
                     end += 1
                 arg_tokens = self.tokens[self.pos:end]
@@ -600,3 +650,9 @@ class ExpressionParser:
             if tuple(self.tokens[index : index + len(literals)]) == literals:
                 return index
         return None
+
+    def match_sequence(self, sequence: tuple[str, ...]) -> bool:
+        if tuple(self.tokens[self.pos : self.pos + len(sequence)]) == sequence:
+            self.pos += len(sequence)
+            return True
+        return False

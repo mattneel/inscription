@@ -2,6 +2,7 @@
   "absolute_value.ins": 5,
   "add.ins": 5,
   "adjust.ins": 3,
+  "bitwise_flags.ins": 7,
   "boolean_operators.ins": 7,
   "branch_absolute.ins": 7,
   "clamp.ins": 255,
@@ -12,5 +13,9 @@
   "nested_while_multiply.ins": 42,
   "partial_branch_assignment.ins": 4,
   "phrase_max.ins": 7,
-  "recursive_factorial.ins": 120
+  "recursive_factorial.ins": 120,
+  "shifts.ins": 8,
+  "u8_cast.ins": 255,
+  "unsigned_comparison.ins": 7,
+  "unsigned_remainder.ins": 5
 }

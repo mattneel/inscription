@@ -3,10 +3,23 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal
 
-TypeName = Literal["i1", "i32", "i64"]
+TypeName = Literal["i1", "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64"]
 CmpPredicate = Literal["eq", "ne", "slt", "sle", "sgt", "sge"]
-BinOp = Literal["plus", "minus", "times", "divided by", "remainder", "and", "or"]
-UnaryOp = Literal["not"]
+BinOp = Literal[
+    "plus",
+    "minus",
+    "times",
+    "divided by",
+    "remainder",
+    "shifted left by",
+    "shifted right by",
+    "bitwise and",
+    "bitwise xor",
+    "bitwise or",
+    "and",
+    "or",
+]
+UnaryOp = Literal["not", "bitwise not"]
 
 
 @dataclass(frozen=True)
@@ -63,6 +76,13 @@ class Unary:
 
 
 @dataclass(frozen=True)
+class Cast:
+    expr: "Expr"
+    target_type: TypeName
+    line: int
+
+
+@dataclass(frozen=True)
 class Call:
     name: str
     args: tuple["Expr", ...]
@@ -91,7 +111,7 @@ class WhenExpr:
     line: int
 
 
-Expr = Integer | Boolean | Variable | Unary | Binary | Call | Comparison | WhenExpr
+Expr = Integer | Boolean | Variable | Unary | Cast | Binary | Call | Comparison | WhenExpr
 
 
 @dataclass(frozen=True)
