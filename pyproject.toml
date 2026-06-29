@@ -3,7 +3,7 @@ name = "inscription"
 version = "0.0.0"
 description = "Deterministic prose-shaped v0 compiler to MLIR/LLVM 22"
 requires-python = ">=3.11"
-dependencies = []
+dependencies = ["Pygments>=2.18"]
 
 [project.scripts]
 inscription = "inscription.cli:main"

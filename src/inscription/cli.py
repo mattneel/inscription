@@ -21,6 +21,13 @@ def main(argv: list[str] | None = None) -> int:
     run_p = sub.add_parser("run", help="compile and execute through LLVM 22 lli")
     run_p.add_argument("source", type=Path)
 
+    highlight_p = sub.add_parser("highlight", help="syntax-highlight an Inscription source file")
+    highlight_p.add_argument("source", type=Path)
+    highlight_p.add_argument("-o", "--output", type=Path)
+    highlight_p.add_argument("--format", choices=("terminal", "html"), default="terminal")
+    highlight_p.add_argument("--style", default="default", help="Pygments style name")
+    highlight_p.add_argument("--full", action="store_true", help="emit a complete HTML document")
+
     tools_p = sub.add_parser("check-tools", help="verify LLVM 22 toolchain discovery")
     tools_p.add_argument("--show-pipeline", action="store_true")
 
@@ -38,6 +45,26 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "run":
             result = run_source(args.source.read_text())
             return result.exit_status
+        if args.command == "highlight":
+            from .highlighting import HighlightError, highlight_source
+
+            if args.full and args.format != "html":
+                parser.error("--full is only supported with --format html")
+            try:
+                highlighted = highlight_source(
+                    args.source.read_text(),
+                    output_format=args.format,
+                    style=args.style,
+                    full=args.full,
+                )
+            except HighlightError as exc:
+                print(f"error: {exc}", file=sys.stderr)
+                return 2
+            if args.output:
+                args.output.write_text(highlighted)
+            else:
+                sys.stdout.write(highlighted)
+            return 0
         if args.command == "check-tools":
             toolchain = resolve_toolchain()
             print(f"mlir-opt={toolchain.mlir_opt}")

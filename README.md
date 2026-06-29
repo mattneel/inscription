@@ -20,6 +20,7 @@ See [`docs/inscription-v0-spec.md`](docs/inscription-v0-spec.md) and [`grammar/i
 ## Requirements
 
 - Python 3.11+
+- Pygments for the `highlight` command; installed automatically from `pyproject.toml`
 - LLVM/MLIR 22 tools:
   - `mlir-opt`
   - `mlir-translate`
@@ -62,6 +63,7 @@ Or install an editable copy:
 python -m pip install -e .
 inscription check-tools --show-pipeline
 inscription compile tests/fixtures/positive/add.ins --verify
+inscription highlight tests/fixtures/positive/add.ins
 inscription run tests/fixtures/positive/add.ins
 ```
 
@@ -98,11 +100,14 @@ echo $?
 
 ```sh
 python -m inscription compile SOURCE [-o OUTPUT] [--verify]
+python -m inscription highlight SOURCE [-o OUTPUT] [--format terminal|html] [--style STYLE] [--full]
 python -m inscription run SOURCE
 python -m inscription check-tools [--show-pipeline]
 ```
 
 Commands return `2` for compiler, diagnostic, toolchain, or filesystem errors.
+
+`highlight` uses Pygments with a built-in Inscription lexer. The default output is ANSI-colored terminal text. Use `--format html --full -o file.html` to emit a complete HTML document.
 
 ## Language summary
 

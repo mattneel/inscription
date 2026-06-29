@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -49,6 +51,53 @@ class CompilerTests(unittest.TestCase):
         )
         self.assertEqual(proc.returncode, 5)
         self.assertEqual(proc.stdout, "")
+
+    @unittest.skipUnless(importlib.util.find_spec("pygments"), "Pygments is not installed")
+    def test_cli_highlight_outputs_terminal_ansi(self):
+        proc = subprocess.run(
+            [sys.executable, "-m", "inscription", "highlight", str(FIXTURES / "add.ins")],
+            cwd=ROOT,
+            env={**os.environ, "PYTHONPATH": str(SRC)},
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("\x1b[", proc.stdout)
+        self.assertIn("Function", proc.stdout)
+        self.assertEqual(proc.stderr, "")
+
+    @unittest.skipUnless(importlib.util.find_spec("pygments"), "Pygments is not installed")
+    def test_cli_highlight_writes_full_html(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "add.html"
+            proc = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "inscription",
+                    "highlight",
+                    str(FIXTURES / "add.ins"),
+                    "--format",
+                    "html",
+                    "--full",
+                    "-o",
+                    str(output),
+                ],
+                cwd=ROOT,
+                env={**os.environ, "PYTHONPATH": str(SRC)},
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            self.assertEqual(proc.stdout, "")
+            html = output.read_text()
+        self.assertIn("<html", html.lower())
+        self.assertIn("Function", html)
+        self.assertIn("highlight", html)
 
     def test_emits_required_core_ops_without_memory_or_custom_dialects(self):
         mlir = compile_source(self.fixture("while_factorial.ins"))
