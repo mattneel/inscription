@@ -13,6 +13,7 @@ from .ast import (
     BufferStoreStmt,
     BufferType,
     Call,
+    CallStmt,
     Cast,
     Comparison,
     Expr,
@@ -60,6 +61,18 @@ EnvValue = Value | BufferStorage
 ConstantKey = tuple[str, int | bool, TypeName]
 
 
+def mlir_value_type(type_name: ValueType) -> str:
+    if isinstance(type_name, BufferType):
+        return memref_type(type_name)
+    return mlir_type(type_name)
+
+
+def mlir_env_value_type(value: "EnvValue") -> str:
+    if isinstance(value, BufferStorage):
+        return memref_type(value.buffer_type)
+    return mlir_type(value.type_name)
+
+
 def emit_mlir(program: Program) -> str:
     analyze(program)
     emitter = MlirEmitter(program)
@@ -95,11 +108,31 @@ class MlirEmitter:
         self.binding_order = [param.name for param in fn.params]
         self.while_counter = 0
         self.while_depth = 0
-        args = ", ".join(f"%{param.name}: {mlir_type(param.type_name)}" for param in fn.params)
-        lines.append(f"  func.func @{fn.name}({args}) -> {mlir_type(fn.return_type)} {{")
-        env: dict[str, EnvValue] = {param.name: Value(f"%{param.name}", param.type_name) for param in fn.params}
-        self.emit_block(fn.body, env, lines, "    ", fn.return_type)
+        args = ", ".join(f"%{param.name}: {mlir_value_type(param.type_name)}" for param in fn.params)
+        return_suffix = "" if fn.return_type is None else f" -> {mlir_type(fn.return_type)}"
+        lines.append(f"  func.func @{fn.name}({args}){return_suffix} {{")
+        env: dict[str, EnvValue] = {}
+        for param in fn.params:
+            if isinstance(param.type_name, BufferType):
+                env[param.name] = BufferStorage(f"%{param.name}", param.type_name)
+            else:
+                env[param.name] = Value(f"%{param.name}", param.type_name)
+        if fn.return_type is None:
+            self.emit_steps(fn.body, env, lines, "    ")
+            lines.append("    return")
+        else:
+            self.emit_block(fn.body, env, lines, "    ", fn.return_type)
         lines.append("  }")
+
+    def emit_steps(
+        self,
+        statements: tuple[Stmt, ...],
+        env: dict[str, EnvValue],
+        lines: list[str],
+        indent: str,
+    ) -> None:
+        for stmt in statements:
+            self.emit_body_stmt(stmt, env, lines, indent)
 
     def emit_block(
         self,
@@ -132,6 +165,9 @@ class MlirEmitter:
             return
         if isinstance(stmt, BufferStoreStmt):
             self.emit_buffer_store(stmt, env, lines, indent)
+            return
+        if isinstance(stmt, CallStmt):
+            self.emit_call_stmt(stmt, env, lines, indent)
             return
         if isinstance(stmt, WhileStmt):
             self.emit_while(stmt, env, lines, indent)
@@ -168,13 +204,11 @@ class MlirEmitter:
             return self.emit_binary(expr, env, lines, indent, type_name)
         if isinstance(expr, Call):
             target = self.functions[expr.name]
-            args = [
-                self.emit_expr(arg, env, lines, indent, expected=param.type_name)
-                for arg, param in zip(expr.args, target.params, strict=True)
-            ]
+            args = self.emit_call_arguments(expr, target, env, lines, indent)
+            assert target.return_type is not None
             out = Value(self.fresh(), target.return_type)
             arg_values = ", ".join(arg.name for arg in args)
-            arg_types = ", ".join(mlir_type(arg.type_name) for arg in args)
+            arg_types = ", ".join(mlir_env_value_type(arg) for arg in args)
             lines.append(
                 f"{indent}{out.name} = func.call @{expr.name}({arg_values}) : ({arg_types}) -> {mlir_type(target.return_type)}"
             )
@@ -299,6 +333,30 @@ class MlirEmitter:
         value = self.emit_expr(stmt.value, env, lines, indent, expected=buffer.buffer_type.element_type)
         index = self.emit_index(stmt.index, env, lines, indent)
         lines.append(f"{indent}memref.store {value.name}, {buffer.name}[{index}] : {memref_type(buffer.buffer_type)}")
+
+    def emit_call_stmt(self, stmt: CallStmt, env: dict[str, EnvValue], lines: list[str], indent: str) -> None:
+        target = self.functions[stmt.call.name]
+        args = self.emit_call_arguments(stmt.call, target, env, lines, indent)
+        arg_values = ", ".join(arg.name for arg in args)
+        arg_types = ", ".join(mlir_env_value_type(arg) for arg in args)
+        lines.append(f"{indent}func.call @{stmt.call.name}({arg_values}) : ({arg_types}) -> ()")
+
+    def emit_call_arguments(
+        self,
+        call: Call,
+        target: Function,
+        env: dict[str, EnvValue],
+        lines: list[str],
+        indent: str,
+    ) -> list[EnvValue]:
+        args: list[EnvValue] = []
+        for arg, param in zip(call.args, target.params, strict=True):
+            if isinstance(param.type_name, BufferType):
+                assert isinstance(arg, Variable)
+                args.append(self.require_buffer(env[arg.name]))
+            else:
+                args.append(self.emit_expr(arg, env, lines, indent, expected=param.type_name))
+        return args
 
     def emit_index(self, expr: Expr, env: dict[str, EnvValue], lines: list[str], indent: str) -> str:
         if isinstance(expr, Integer):

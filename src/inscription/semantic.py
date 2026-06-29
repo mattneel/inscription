@@ -13,6 +13,7 @@ from .ast import (
     BufferStoreStmt,
     BufferType,
     Call,
+    CallStmt,
     Cast,
     Comparison,
     Expr,
@@ -24,6 +25,7 @@ from .ast import (
     SetStmt,
     TypeName,
     Unary,
+    ValueType,
     Variable,
     WhenExpr,
     WhileStmt,
@@ -57,7 +59,6 @@ INTEGER_RANGES: dict[TypeName, tuple[int, int]] = {
     "u64": (0, 2**64 - 1),
 }
 BindingKind = Literal["param", "let", "buffer"]
-ValueType = TypeName | BufferType
 
 
 @dataclass(frozen=True)
@@ -65,6 +66,7 @@ class Binding:
     type_name: ValueType
     kind: BindingKind
     line: int
+    writable: bool = True
 
 
 def analyze(program: Program) -> None:
@@ -100,6 +102,12 @@ def memref_type(buffer_type: BufferType) -> str:
     return f"memref<{buffer_type.length}x{mlir_type(buffer_type.element_type)}>"
 
 
+def format_type(type_name: ValueType) -> str:
+    if isinstance(type_name, BufferType):
+        return f"buffer of {type_name.length} {type_name.element_type}"
+    return type_name
+
+
 def is_integer_type(type_name: ValueType | None) -> bool:
     return type_name in INTEGER_TYPES
 
@@ -117,10 +125,16 @@ def all_ones_constant_value(_type_name: TypeName) -> int:
 
 
 def _check_function(fn: Function, functions: dict[str, Function]) -> None:
+    for param in fn.params:
+        _check_parameter_type(param.type_name, fn.line)
+    if fn.return_type is None:
+        _check_does_function(fn, functions)
+        return
     if not fn.body:
         raise InscriptionError(f"phrase '{fn.name}' must evaluate to a value", fn.line)
     bindings: dict[str, Binding] = {
-        param.name: Binding(param.type_name, "param", fn.line) for param in fn.params
+        param.name: Binding(param.type_name, "param", fn.line, writable=not isinstance(param.type_name, BufferType))
+        for param in fn.params
     }
     returned = False
     for index, stmt in enumerate(fn.body):
@@ -139,6 +153,33 @@ def _check_function(fn: Function, functions: dict[str, Function]) -> None:
         raise InscriptionError(f"phrase '{fn.name}' must evaluate to a value", fn.line)
 
 
+def _check_does_function(fn: Function, functions: dict[str, Function]) -> None:
+    if not fn.body:
+        raise InscriptionError("does phrase body must contain at least one step", fn.line)
+    bindings: dict[str, Binding] = {
+        param.name: Binding(param.type_name, "param", fn.line, writable=True) for param in fn.params
+    }
+    for stmt in fn.body:
+        if isinstance(stmt, ReturnStmt):
+            raise InscriptionError("does phrase body cannot end with a value expression", stmt.line)
+        _check_body_stmt(stmt, bindings, functions)
+
+
+def _check_parameter_type(type_name: ValueType, line: int) -> None:
+    if isinstance(type_name, BufferType):
+        _check_buffer_type(type_name, line)
+        return
+    if type_name not in SCALAR_TYPES:
+        raise InscriptionError("supported scalar types are i1, i8, i16, i32, i64, u8, u16, u32, and u64", line)
+
+
+def _check_buffer_type(buffer_type: BufferType, line: int) -> None:
+    if buffer_type.length < 1:
+        raise InscriptionError("buffer length must be at least 1", line)
+    if not is_integer_type(buffer_type.element_type):
+        raise InscriptionError(f"buffer element type must be an integer type, got {buffer_type.element_type}", line)
+
+
 def _check_body_stmt(stmt: BodyStmt, bindings: dict[str, Binding], functions: dict[str, Function]) -> None:
     if isinstance(stmt, SetStmt):
         _declare_let(stmt, bindings, functions)
@@ -151,6 +192,9 @@ def _check_body_stmt(stmt: BodyStmt, bindings: dict[str, Binding], functions: di
         return
     if isinstance(stmt, BufferStoreStmt):
         _check_buffer_store(stmt, bindings, functions)
+        return
+    if isinstance(stmt, CallStmt):
+        _check_call_stmt(stmt, bindings, functions)
         return
     if isinstance(stmt, WhileStmt):
         _check_while(stmt, bindings, functions)
@@ -187,10 +231,7 @@ def _declare_let(stmt: SetStmt, bindings: dict[str, Binding], functions: dict[st
 def _declare_buffer(stmt: BufferBinding, bindings: dict[str, Binding], functions: dict[str, Function]) -> None:
     _check_no_shadow(stmt.name, stmt.line, bindings, kind="buffer")
     buffer_type = stmt.buffer_type
-    if buffer_type.length < 1:
-        raise InscriptionError("buffer length must be at least 1", stmt.line)
-    if not is_integer_type(buffer_type.element_type):
-        raise InscriptionError(f"buffer element type must be an integer type, got {buffer_type.element_type}", stmt.line)
+    _check_buffer_type(buffer_type, stmt.line)
     actual = _infer_declared_type(stmt.fill, buffer_type.element_type, _env_types(bindings), functions)
     if actual != buffer_type.element_type:
         raise InscriptionError(
@@ -215,13 +256,25 @@ def _check_assignment(stmt: AssignStmt, bindings: dict[str, Binding], functions:
 
 
 def _check_buffer_store(stmt: BufferStoreStmt, bindings: dict[str, Binding], functions: dict[str, Function]) -> None:
-    buffer_type = _require_buffer_binding(stmt.name, stmt.line, bindings)
+    binding = _require_buffer_binding(stmt.name, stmt.line, bindings)
+    buffer_type = binding.type_name
+    if not binding.writable:
+        raise InscriptionError(f"cannot store to read-only buffer parameter {stmt.name}", stmt.line)
     _check_buffer_index(stmt.name, buffer_type, stmt.index, _env_types(bindings), functions)
     actual = _infer_declared_type(stmt.value, buffer_type.element_type, _env_types(bindings), functions)
     if actual != buffer_type.element_type:
         raise InscriptionError(
             f"store to {stmt.name} must have type {buffer_type.element_type}, got {actual}", stmt.line
         )
+
+
+def _check_call_stmt(stmt: CallStmt, bindings: dict[str, Binding], functions: dict[str, Function]) -> None:
+    target = _lookup_phrase(stmt.call.name, stmt.line, functions)
+    if target.return_type is not None:
+        raise InscriptionError(
+            f"phrase `{target.display_name}` returns {target.return_type} and cannot be used as a step", stmt.line
+        )
+    _check_call_arguments(stmt.call, target, bindings, functions, effectful=True)
 
 
 def _check_while(stmt: WhileStmt, bindings: dict[str, Binding], functions: dict[str, Function]) -> None:
@@ -251,6 +304,117 @@ def _check_if(stmt: IfStmt, bindings: dict[str, Binding], functions: dict[str, F
     else_scope = dict(bindings)
     for body_stmt in stmt.else_body:
         _check_body_stmt(body_stmt, else_scope, functions)
+
+
+def _lookup_phrase(name: str, line: int, functions: dict[str, Function]) -> Function:
+    target = functions.get(name)
+    if target is None:
+        raise InscriptionError(f"unknown phrase '{name}'", line)
+    return target
+
+
+def _check_call_arguments(
+    call: Call,
+    target: Function,
+    bindings: dict[str, Binding],
+    functions: dict[str, Function],
+    *,
+    effectful: bool,
+) -> None:
+    _check_call_arity(call, target)
+    seen_buffers: set[str] = set()
+    env = _env_types(bindings)
+    for arg, param in zip(call.args, target.params, strict=True):
+        expected = param.type_name
+        if isinstance(expected, BufferType):
+            name, binding = _require_buffer_argument(arg, expected, env, getattr(arg, "line", call.line))
+            if name in seen_buffers:
+                raise InscriptionError(f"buffer {name} cannot be passed to multiple buffer parameters in one call", call.line)
+            seen_buffers.add(name)
+            full_binding = bindings[name]
+            if effectful and not full_binding.writable:
+                raise InscriptionError(f"cannot pass read-only buffer {name} to effectful phrase `{target.display_name}`", call.line)
+            continue
+        actual = _infer_call_scalar_argument_type(arg, expected, env, functions)
+        if actual != expected:
+            raise InscriptionError(
+                f"argument {_argument_name(arg)} must have type {expected}, got {format_type(actual)}",
+                getattr(arg, "line", call.line),
+            )
+
+
+def _check_call_argument_types(
+    call: Call,
+    target: Function,
+    env: dict[str, ValueType],
+    functions: dict[str, Function],
+) -> None:
+    _check_call_arity(call, target)
+    seen_buffers: set[str] = set()
+    for arg, param in zip(call.args, target.params, strict=True):
+        expected = param.type_name
+        if isinstance(expected, BufferType):
+            name, _binding_type = _require_buffer_argument(arg, expected, env, getattr(arg, "line", call.line))
+            if name in seen_buffers:
+                raise InscriptionError(f"buffer {name} cannot be passed to multiple buffer parameters in one call", call.line)
+            seen_buffers.add(name)
+            continue
+        actual = _infer_call_scalar_argument_type(arg, expected, env, functions)
+        if actual != expected:
+            raise InscriptionError(
+                f"argument {_argument_name(arg)} must have type {expected}, got {format_type(actual)}",
+                getattr(arg, "line", call.line),
+            )
+
+
+def _check_call_arity(call: Call, target: Function) -> None:
+    if len(call.args) != len(target.params):
+        raise InscriptionError(
+            f"phrase '{target.name}' expects {len(target.params)} argument(s), got {len(call.args)}", call.line
+        )
+
+
+def _require_buffer_argument(
+    arg: Expr,
+    expected: BufferType,
+    env: dict[str, ValueType],
+    line: int,
+) -> tuple[str, BufferType]:
+    name = _argument_name(arg)
+    actual = env.get(name) if isinstance(arg, Variable) else None
+    if actual is None:
+        try:
+            actual_type = infer_expr_type(arg, env, {})
+        except Exception:
+            actual_type = None
+        got = format_type(actual_type) if actual_type is not None else "non-buffer expression"
+        raise InscriptionError(f"argument {name} must be {format_type(expected)}, got {got}", line)
+    if not isinstance(actual, BufferType):
+        raise InscriptionError(f"argument {name} must be {format_type(expected)}, got {format_type(actual)}", line)
+    if actual != expected:
+        raise InscriptionError(
+            f"buffer argument {name} must have type {format_type(expected)}, got {format_type(actual)}", line
+        )
+    return name, actual
+
+
+def _infer_call_scalar_argument_type(
+    arg: Expr,
+    expected: TypeName,
+    env: dict[str, ValueType],
+    functions: dict[str, Function],
+) -> ValueType:
+    if isinstance(arg, Variable):
+        actual = env.get(arg.name)
+        if isinstance(actual, BufferType):
+            return actual
+    return infer_expr_type(arg, env, functions, expected=expected)
+
+
+def _argument_name(arg: Expr) -> str:
+    if isinstance(arg, Variable):
+        return arg.name
+    return "argument"
 
 
 def _infer_declared_type(
@@ -318,16 +482,10 @@ def infer_expr_type(
     if isinstance(expr, Binary):
         return infer_binary_type(expr, env, functions, expected=expected)
     if isinstance(expr, Call):
-        target = functions.get(expr.name)
-        if target is None:
-            raise InscriptionError(f"unknown phrase '{expr.name}'", expr.line)
-        if len(expr.args) != len(target.params):
-            raise InscriptionError(
-                f"phrase '{expr.name}' expects {len(target.params)} argument(s), got {len(expr.args)}", expr.line
-            )
-        for arg, param in zip(expr.args, target.params, strict=True):
-            actual = infer_expr_type(arg, env, functions, expected=param.type_name)
-            require_type(actual, param.type_name, getattr(arg, "line", expr.line))
+        target = _lookup_phrase(expr.name, expr.line, functions)
+        if target.return_type is None:
+            raise InscriptionError(f"phrase `{target.display_name}` does not return a value", expr.line)
+        _check_call_argument_types(expr, target, env, functions)
         if expected is not None:
             require_type(target.return_type, expected, expr.line)
         return target.return_type
@@ -514,13 +672,13 @@ def _lookup_binding_type(name: str, line: int, env: dict[str, ValueType]) -> Val
         raise InscriptionError(f"unknown binding {name}; variable '{name}' used before initialization", line) from exc
 
 
-def _require_buffer_binding(name: str, line: int, bindings: dict[str, Binding]) -> BufferType:
+def _require_buffer_binding(name: str, line: int, bindings: dict[str, Binding]) -> Binding:
     binding = bindings.get(name)
     if binding is None:
         raise InscriptionError(f"unknown binding {name}", line)
     if not isinstance(binding.type_name, BufferType):
         raise InscriptionError(f"{name} is not a buffer", line)
-    return binding.type_name
+    return binding
 
 
 def _require_buffer_type(name: str, line: int, env: dict[str, ValueType]) -> BufferType:

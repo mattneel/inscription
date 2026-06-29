@@ -37,7 +37,7 @@ def _make_lexer():
                     Keyword.Type,
                 )),
                 (r"\b(gives)(\s+)(i1|i8|i16|i32|i64|u8|u16|u32|u64)\b", bygroups(Keyword.Declaration, Text.Whitespace, Keyword.Type)),
-                (r"\b(if|let|be|from|when|while|otherwise|zero|buffer|filled|with|at)\b", Keyword),
+                (r"\b(if|let|be|from|of|when|while|otherwise|zero|buffer|filled|with|at|does|gives)\b", Keyword),
                 (r"\b(true|false)\b", Keyword.Constant),
                 (r"\b(becomes|plus|minus|times|divided|by|remainder|and|or|not|as|bitwise|shifted|left|right|xor)\b", Operator.Word),
                 (r"\b(is|equal|less|greater|than)\b", Operator.Word),

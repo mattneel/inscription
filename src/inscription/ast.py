@@ -30,16 +30,17 @@ class Program:
 @dataclass(frozen=True)
 class Parameter:
     name: str
-    type_name: TypeName
+    type_name: "ValueType"
 
 
 @dataclass(frozen=True)
 class Function:
     name: str
     params: tuple[Parameter, ...]
-    return_type: TypeName
+    return_type: TypeName | None
     body: tuple["Stmt", ...]
     line: int
+    display_name: str
 
 
 @dataclass(frozen=True)
@@ -64,6 +65,9 @@ class Variable:
 class BufferType:
     length: int
     element_type: TypeName
+
+
+ValueType = TypeName | BufferType
 
 
 @dataclass(frozen=True)
@@ -159,6 +163,12 @@ class BufferStoreStmt:
 
 
 @dataclass(frozen=True)
+class CallStmt:
+    call: Call
+    line: int
+
+
+@dataclass(frozen=True)
 class WhileStmt:
     condition: Expr
     body: tuple["BodyStmt", ...]
@@ -179,5 +189,5 @@ class ReturnStmt:
     line: int
 
 
-BodyStmt = SetStmt | BufferBinding | AssignStmt | BufferStoreStmt | WhileStmt | IfStmt
+BodyStmt = SetStmt | BufferBinding | AssignStmt | BufferStoreStmt | CallStmt | WhileStmt | IfStmt
 Stmt = BodyStmt | ReturnStmt

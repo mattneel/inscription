@@ -1,0 +1,18 @@
+fill bytes bytes: buffer of 4 u8 with value: u8 does:
+  let i be 0
+  while i is less than 4:
+    bytes at i becomes value
+    i becomes i plus 1
+
+sum bytes bytes: buffer of 4 u8 gives i32:
+  let total be 0
+  let i be 0
+  while i is less than 4:
+    total becomes total plus (bytes at i as i32)
+    i becomes i plus 1
+  total
+
+main gives i32:
+  let bytes be buffer of 4 u8 filled with 0
+  fill bytes bytes with 9
+  sum bytes bytes

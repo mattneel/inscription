@@ -13,6 +13,7 @@ from .ast import (
     BufferStoreStmt,
     BufferType,
     Call,
+    CallStmt,
     Cast,
     Comparison,
     Expr,
@@ -25,6 +26,7 @@ from .ast import (
     SetStmt,
     TypeName,
     Unary,
+    ValueType,
     Variable,
     WhenCase,
     WhenExpr,
@@ -36,7 +38,7 @@ NAME_RE = re.compile(r"[a-z][a-z0-9_]*")
 TOKEN_RE = re.compile(r"\s*(-?\d+|[a-z][a-z0-9_]*|[(),])")
 RESERVED = {
     "address", "and", "arguments", "array", "as", "at", "be", "becomes", "bitwise", "buffer", "by", "call",
-    "divided", "do", "else", "end", "equal", "false", "filled", "float", "from", "function", "gives",
+    "divided", "do", "does", "else", "end", "equal", "false", "filled", "float", "from", "function", "gives",
     "greater", "i1", "i32", "i64", "if", "input",
     "i8", "i16", "is", "less", "let", "memref", "minus", "no", "not", "or", "otherwise", "output", "parameters",
     "pointer", "plus", "print", "remainder", "return", "set", "shifted", "takes", "than", "then", "times", "to",
@@ -69,7 +71,7 @@ class Line:
 @dataclass(frozen=True)
 class PhraseHole:
     name: str
-    type_name: TypeName
+    type_name: ValueType
 
 
 PhrasePart = str | PhraseHole
@@ -81,6 +83,8 @@ class PhraseTemplate:
     parts: tuple[PhrasePart, ...]
     params: tuple[Parameter, ...]
     line: int
+    return_type: TypeName | None
+    display_name: str
 
 
 class Parser:
@@ -125,34 +129,48 @@ class Parser:
             if not self._looks_like_phrase_header(line):
                 raise InscriptionError("expected phrase definition", line.number)
             template, return_type = self._parse_phrase_header(line)
-            body, index = self._parse_phrase_body(index + 1, template.symbol, line.number)
-            functions.append(Function(template.symbol, template.params, return_type, tuple(body), line.number))
+            body, index = self._parse_phrase_body(index + 1, template, line.number)
+            functions.append(
+                Function(
+                    template.symbol,
+                    template.params,
+                    return_type,
+                    tuple(body),
+                    line.number,
+                    template.display_name,
+                )
+            )
         if not functions:
             raise InscriptionError("program must contain at least one phrase definition")
         return Program(tuple(functions))
 
     def _looks_like_phrase_header(self, line: Line) -> bool:
-        return line.is_header and re.fullmatch(r".+? gives [a-z][a-z0-9_]*", line.text) is not None
+        return line.is_header and re.fullmatch(r".+? (?:gives [a-z][a-z0-9_]*|does)", line.text) is not None
 
-    def _parse_phrase_header(self, line: Line) -> tuple[PhraseTemplate, TypeName]:
-        match = re.fullmatch(r"(.+?) gives ([a-z][a-z0-9_]*)", line.text)
+    def _parse_phrase_header(self, line: Line) -> tuple[PhraseTemplate, TypeName | None]:
+        match = re.fullmatch(r"(.+?) (?:gives ([a-z][a-z0-9_]*)|does)", line.text)
         if not line.is_header or not match:
             raise InscriptionError("expected phrase definition", line.number)
         phrase_text = match.group(1).strip()
-        return_type = self._type_name(match.group(2), line.number)
-        template = self._parse_phrase_template(phrase_text, line.number)
+        return_type = self._type_name(match.group(2), line.number) if match.group(2) is not None else None
+        template = self._parse_phrase_template(phrase_text, line.number, return_type)
         return template, return_type
 
-    def _parse_phrase_template(self, text: str, line: int) -> PhraseTemplate:
+    def _parse_phrase_template(self, text: str, line: int, return_type: TypeName | None) -> PhraseTemplate:
         parts: list[PhrasePart] = []
         params: list[Parameter] = []
         param_names: set[str] = set()
         pos = 0
-        holes = list(re.finditer(r"\b([a-z][a-z0-9_]*):\s*([a-z][a-z0-9_]*)\b", text))
+        holes = list(
+            re.finditer(
+                r"\b([a-z][a-z0-9_]*):\s*(buffer\s+of\s+-?\d+\s+[a-z][a-z0-9_]*|[a-z][a-z0-9_]*)\b",
+                text,
+            )
+        )
         for match in holes:
             self._append_literal_parts(parts, text[pos : match.start()], line)
             name = self._name(match.group(1), line)
-            type_name = self._type_name(match.group(2), line)
+            type_name = self._value_type(match.group(2), line)
             if name in param_names:
                 raise InscriptionError(f"duplicate parameter '{name}'", line)
             param_names.add(name)
@@ -163,7 +181,8 @@ class Parser:
         if not parts or all(isinstance(part, PhraseHole) for part in parts):
             raise InscriptionError("phrase definition must include literal words", line)
         symbol = self._phrase_symbol(parts, line)
-        return PhraseTemplate(symbol, tuple(parts), tuple(params), line)
+        display_name = " ".join("_" if isinstance(part, PhraseHole) else part for part in parts)
+        return PhraseTemplate(symbol, tuple(parts), tuple(params), line, return_type, display_name)
 
     def _append_literal_parts(self, parts: list[PhrasePart], text: str, line: int) -> None:
         stripped = text.strip()
@@ -189,19 +208,46 @@ class Parser:
             raise InscriptionError(f"invalid generated function name '{symbol}'", line)
         return symbol
 
-    def _parse_phrase_body(self, index: int, name: str, line: int) -> tuple[list[BodyStmt | ReturnStmt], int]:
+    def _parse_phrase_body(
+        self, index: int, template: PhraseTemplate, line: int
+    ) -> tuple[list[BodyStmt | ReturnStmt], int]:
+        if template.return_type is None:
+            return self._parse_does_body(index, line)
+        return self._parse_gives_body(index, template.symbol, line)
+
+    def _parse_does_body(self, index: int, line: int) -> tuple[list[BodyStmt | ReturnStmt], int]:
+        body_items: list[BodyStmt] = []
+        while index < len(self.lines):
+            current = self.lines[index]
+            if self._looks_like_phrase_header(current):
+                break
+            if not self._is_body_item_start(current, include_phrase_calls=True):
+                if current.is_header:
+                    raise InscriptionError("unexpected ':' inside does phrase body", current.number)
+                if self._parse_phrase_call_expr(current) is not None:
+                    item, index = self._parse_body_item(index, include_phrase_calls=True)
+                    body_items.append(item)
+                    continue
+                raise InscriptionError("does phrase body cannot end with a value expression", current.number)
+            item, index = self._parse_body_item(index, include_phrase_calls=True)
+            body_items.append(item)
+        if not body_items:
+            raise InscriptionError("does phrase body must contain at least one step", line)
+        return body_items, index
+
+    def _parse_gives_body(self, index: int, name: str, line: int) -> tuple[list[BodyStmt | ReturnStmt], int]:
         body_items: list[BodyStmt] = []
         value_lines: list[Line] = []
         while index < len(self.lines):
             current = self.lines[index]
             if self._looks_like_phrase_header(current):
                 break
-            if self._is_body_item_start(current):
+            if self._is_gives_body_item_start(current, index):
                 if value_lines:
                     if current.text.startswith("let "):
                         raise InscriptionError("let bindings must appear before the value block", current.number)
                     raise InscriptionError("body items must appear before the value block", current.number)
-                item, index = self._parse_body_item(index, in_while=False)
+                item, index = self._parse_body_item(index, include_phrase_calls=True)
                 body_items.append(item)
             else:
                 if current.is_header:
@@ -212,7 +258,28 @@ class Parser:
             raise InscriptionError(f"phrase '{name}' must evaluate to a value", line)
         return [*body_items, ReturnStmt(self._parse_value_block(value_lines), value_lines[-1].number)], index
 
-    def _is_body_item_start(self, line: Line) -> bool:
+    def _is_gives_body_item_start(self, line: Line, index: int) -> bool:
+        if self._is_body_item_start(line, include_phrase_calls=False):
+            return True
+        call = self._parse_phrase_call_expr(line)
+        if call is None:
+            return False
+        target = self._template_for_call(call)
+        if target is not None and target.return_type is None:
+            return True
+        return self._has_following_body_line(index + 1, line.indent)
+
+    def _has_following_body_line(self, index: int, indent: int) -> bool:
+        while index < len(self.lines):
+            current = self.lines[index]
+            if self._looks_like_phrase_header(current):
+                return False
+            if current.indent < indent:
+                return False
+            return True
+        return False
+
+    def _is_body_item_start(self, line: Line, *, include_phrase_calls: bool) -> bool:
         return (
             line.text.startswith("let ")
             or line.text.startswith("track ")
@@ -220,9 +287,10 @@ class Parser:
             or self._assignment_match(line) is not None
             or (line.is_header and line.text.startswith("if "))
             or (line.is_header and line.text.startswith("while "))
+            or (include_phrase_calls and self._parse_phrase_call_expr(line) is not None)
         )
 
-    def _parse_body_item(self, index: int, *, in_while: bool) -> tuple[BodyStmt, int]:
+    def _parse_body_item(self, index: int, *, include_phrase_calls: bool) -> tuple[BodyStmt, int]:
         current = self.lines[index]
         if current.text.startswith("let "):
             return self._parse_let(current), index + 1
@@ -238,6 +306,10 @@ class Parser:
             return self._parse_if(index)
         if current.is_header and current.text.startswith("while "):
             return self._parse_while(index)
+        if include_phrase_calls:
+            call = self._parse_phrase_call_expr(current)
+            if call is not None:
+                return CallStmt(call, current.number), index + 1
         raise InscriptionError("expected phrase body item", current.number)
 
     def _parse_while(self, index: int) -> tuple[WhileStmt, int]:
@@ -279,9 +351,12 @@ class Parser:
                 break
             if self._looks_like_phrase_header(current):
                 raise InscriptionError(f"phrase definitions cannot appear inside {name}", current.number)
-            if not self._is_body_item_start(current):
-                raise InscriptionError(f"{name} only supports let bindings, assignments, while loops, and if blocks", current.number)
-            item, body_index = self._parse_body_item(body_index, in_while=True)
+            if not self._is_body_item_start(current, include_phrase_calls=True):
+                raise InscriptionError(
+                    f"{name} only supports let bindings, assignments, phrase calls, while loops, and if blocks",
+                    current.number,
+                )
+            item, body_index = self._parse_body_item(body_index, include_phrase_calls=True)
             body.append(item)
         return body, body_index
 
@@ -381,12 +456,36 @@ class Parser:
     def _parse_comparison(self, text: str, line: int) -> Comparison:
         return parse_comparison(text, line, self.phrases)
 
+    def _parse_phrase_call_expr(self, line: Line) -> Call | None:
+        if line.is_header:
+            return None
+        try:
+            expr = self._parse_expression(line.text, line.number)
+        except InscriptionError:
+            return None
+        if isinstance(expr, Call):
+            return expr
+        return None
+
+    def _template_for_call(self, call: Call) -> PhraseTemplate | None:
+        for template in self.phrases:
+            if template.symbol == call.name:
+                return template
+        return None
+
     def _name(self, value: str, line: int) -> str:
         if not NAME_RE.fullmatch(value):
             raise InscriptionError(f"invalid identifier '{value}'", line)
         if value in RESERVED:
             raise InscriptionError(f"reserved word '{value}' cannot be an identifier", line)
         return value
+
+    def _value_type(self, value: str, line: int) -> ValueType:
+        value = " ".join(value.split())
+        buffer_match = re.fullmatch(r"buffer of (-?\d+) ([a-z][a-z0-9_]*)", value)
+        if buffer_match is not None:
+            return BufferType(int(buffer_match.group(1)), self._type_name(buffer_match.group(2), line))
+        return self._type_name(value, line)
 
     def _type_name(self, value: str, line: int) -> TypeName:
         if value in TYPE_NAMES:

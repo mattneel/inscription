@@ -137,6 +137,7 @@ class CompilerTests(unittest.TestCase):
                 (GOLDENS / "27_pack_bytes.ins").read_text(),
                 (GOLDENS / "28_unsigned_comparison.ins").read_text(),
                 (GOLDENS / "29_buffer_sum.ins").read_text(),
+                (GOLDENS / "35_fill_buffer_procedure.ins").read_text(),
                 "highlight new widths a: i8 and b: i16 and c: u64 gives u64:\n  c bitwise xor c\n",
             ]
         )
@@ -255,6 +256,14 @@ main gives i32:
         self.assertIn("arith.index_cast", mlir)
         self.assertNotIn("memref.alloc()", mlir)
         self.assertNotIn("memref.dealloc", mlir)
+
+    def test_v05_buffer_parameters_and_does_phrases_lower_to_memref_calls(self):
+        mlir = compile_source(self.fixture("fill_buffer_procedure.ins"))
+        self.assertIn("func.func @fill_buffer(%cells: memref<4xi32>, %value: i32)", mlir)
+        self.assertIn("func.call @fill_buffer", mlir)
+        self.assertIn(": (memref<4xi32>, i32) -> ()", mlir)
+        self.assertIn("memref.store %value, %cells", mlir)
+        self.assertIn("func.func @sum_buffer(%cells: memref<4xi32>) -> i32", mlir)
 
     def test_valid_identifier_cannot_collide_with_generated_ssa_names(self):
         source = """echo of v0: i32 gives i32:
@@ -487,12 +496,50 @@ main gives i32:
             ),
             "buffer passed to phrase call": (
                 "identity of x: i32 gives i32:\n  x\n\nbad gives i32:\n  let cells be buffer of 4 i32 filled with 0\n  identity of cells\n",
-                "buffer cells cannot be used as a scalar value; use `cells at index`",
+                "argument cells must have type i32, got buffer of 4 i32",
             ),
             "branch local buffer does not escape": (
                 "bad gives i32:\n  let flag be true\n  if flag:\n    let cells be buffer of 1 i32 filled with 1\n  otherwise:\n    let cells be buffer of 1 i32 filled with 2\n  cells at 0\n",
                 "unknown binding cells",
             ),
+            "store to readonly buffer parameter": (
+                "bad buffer cells: buffer of 4 i32 gives i32:\n  cells at 0 becomes 1\n  0\n",
+                "cannot store to read-only buffer parameter cells",
+            ),
+            "does phrase used as expression": (
+                "fill buffer cells: buffer of 4 i32 with value: i32 does:\n  cells at 0 becomes value\n\nbad gives i32:\n  let cells be buffer of 4 i32 filled with 0\n  let x be fill buffer cells with 7\n  x\n",
+                "phrase `fill buffer _ with _` does not return a value",
+            ),
+            "gives phrase used as step": (
+                "sum buffer cells: buffer of 4 i32 gives i32:\n  0\n\nbad gives i32:\n  let cells be buffer of 4 i32 filled with 0\n  sum buffer cells\n  0\n",
+                "phrase `sum buffer _` returns i32 and cannot be used as a step",
+            ),
+            "buffer parameter length mismatch": (
+                "sum buffer cells: buffer of 4 i32 gives i32:\n  0\n\nbad gives i32:\n  let cells be buffer of 5 i32 filled with 0\n  sum buffer cells\n",
+                "buffer argument cells must have type buffer of 4 i32, got buffer of 5 i32",
+            ),
+            "buffer parameter element mismatch": (
+                "sum buffer cells: buffer of 4 i32 gives i32:\n  0\n\nbad gives i32:\n  let cells be buffer of 4 u32 filled with 0\n  sum buffer cells\n",
+                "buffer argument cells must have type buffer of 4 i32, got buffer of 4 u32",
+            ),
+            "scalar passed where buffer expected": (
+                "sum buffer cells: buffer of 4 i32 gives i32:\n  0\n\nbad gives i32:\n  let cells be 0\n  sum buffer cells\n",
+                "argument cells must be buffer of 4 i32, got i32",
+            ),
+            "duplicate buffer actuals": (
+                "copy from source: buffer of 4 i32 to destination: buffer of 4 i32 does:\n  destination at 0 becomes source at 0\n\nbad gives i32:\n  let cells be buffer of 4 i32 filled with 1\n  copy from cells to cells\n  0\n",
+                "buffer cells cannot be passed to multiple buffer parameters in one call",
+            ),
+            "readonly buffer passed to does phrase": (
+                "clear cells: buffer of 4 i32 does:\n  cells at 0 becomes 0\n\nbad buffer cells: buffer of 4 i32 gives i32:\n  clear cells\n  0\n",
+                "cannot pass read-only buffer cells to effectful phrase `clear _`",
+            ),
+            "buffer parameter cannot be rebound": (
+                "bad buffer cells: buffer of 4 i32 does:\n  cells becomes 1\n",
+                "cannot rebind buffer cells; use `cells at index becomes value`",
+            ),
+            "does phrase with final scalar value": ("bad does:\n  1\n", "does phrase body cannot end with a value expression"),
+            "empty does phrase": ("bad does:\n", "does phrase body must contain at least one step"),
         }
         for name, (source, contains) in cases.items():
             with self.subTest(name=name):

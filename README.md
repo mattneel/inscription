@@ -6,7 +6,7 @@ The language is readable, but it is **not** natural-language interpretation: eve
 
 ## Status
 
-This repository currently implements **Inscription v0.4**:
+This repository currently implements **Inscription v0.5**:
 
 - source-visible scalar types: `i1`, signed integers `i8`/`i16`/`i32`/`i64`, and unsigned integers `u8`/`u16`/`u32`/`u64`
 - phrase-shaped function definitions and phrase-shaped calls
@@ -15,7 +15,9 @@ This repository currently implements **Inscription v0.4**:
 - local scalar bindings with `let name be expression` and `let name: type be expression`
 - scalar rebinding with `name becomes expression`
 - local fixed-size stack buffers with `let name be buffer of LENGTH TYPE filled with expression`
+- buffer parameter holes with `name: buffer of LENGTH TYPE`
 - buffer loads with `name at index` and buffer stores with `name at index becomes expression`
+- side-effect-only `does` phrases used as standalone steps
 - `while condition:` step blocks lowered as loop-carried SSA values through `scf.while`
 - nested `while` loops
 - step-level `if condition:` / `otherwise:` blocks lowered through `scf.if` SSA results
@@ -31,9 +33,9 @@ This repository currently implements **Inscription v0.4**:
 - exact MLIR golden conformance tests in [`tests/goldens`](tests/goldens)
 - MLIR emission using `func`, `arith`, `scf.if`, `scf.for`, `scf.while`, and local `memref.alloca`/`memref.load`/`memref.store` for buffers
 - LLVM 22 lowering and execution through `mlir-opt`, `mlir-translate`, and `lli`
-- no source-level I/O, heap allocation, pointers, dynamic-size buffers, buffer parameters, returning buffers, buffer aliasing, structs, floats, strings, statement-level `return`, `break`, `continue`, overloading, type coercions, or natural-language inference
+- no source-level I/O, heap allocation, pointers, dynamic-size buffers, buffer return values, buffer aliasing, slices, structs, floats, strings, statement-level `return`, `break`, `continue`, overloading, type coercions, or natural-language inference
 
-See [`docs/inscription-v0.4-spec.md`](docs/inscription-v0.4-spec.md) and [`grammar/inscription-v0.4.ebnf`](grammar/inscription-v0.4.ebnf) for the exact current language contract. The immutable previous contracts remain in [`docs/inscription-v0-spec.md`](docs/inscription-v0-spec.md), [`docs/inscription-v0.1-spec.md`](docs/inscription-v0.1-spec.md), [`docs/inscription-v0.2-spec.md`](docs/inscription-v0.2-spec.md), [`docs/inscription-v0.3-spec.md`](docs/inscription-v0.3-spec.md), [`grammar/inscription-v0.ebnf`](grammar/inscription-v0.ebnf), [`grammar/inscription-v0.1.ebnf`](grammar/inscription-v0.1.ebnf), [`grammar/inscription-v0.2.ebnf`](grammar/inscription-v0.2.ebnf), and [`grammar/inscription-v0.3.ebnf`](grammar/inscription-v0.3.ebnf).
+See [`docs/inscription-v0.5-spec.md`](docs/inscription-v0.5-spec.md) and [`grammar/inscription-v0.5.ebnf`](grammar/inscription-v0.5.ebnf) for the exact current language contract. The immutable previous contracts remain in [`docs/inscription-v0-spec.md`](docs/inscription-v0-spec.md), [`docs/inscription-v0.1-spec.md`](docs/inscription-v0.1-spec.md), [`docs/inscription-v0.2-spec.md`](docs/inscription-v0.2-spec.md), [`docs/inscription-v0.3-spec.md`](docs/inscription-v0.3-spec.md), [`docs/inscription-v0.4-spec.md`](docs/inscription-v0.4-spec.md), [`grammar/inscription-v0.ebnf`](grammar/inscription-v0.ebnf), [`grammar/inscription-v0.1.ebnf`](grammar/inscription-v0.1.ebnf), [`grammar/inscription-v0.2.ebnf`](grammar/inscription-v0.2.ebnf), [`grammar/inscription-v0.3.ebnf`](grammar/inscription-v0.3.ebnf), and [`grammar/inscription-v0.4.ebnf`](grammar/inscription-v0.4.ebnf).
 
 ## Requirements
 
@@ -73,8 +75,8 @@ Run directly from a checkout:
 
 ```sh
 PYTHONPATH=src python -m inscription check-tools --show-pipeline
-PYTHONPATH=src python -m inscription compile tests/fixtures/positive/buffer_sum.ins --verify
-PYTHONPATH=src python -m inscription run tests/fixtures/positive/buffer_sum.ins
+PYTHONPATH=src python -m inscription compile tests/fixtures/positive/fill_buffer_procedure.ins --verify
+PYTHONPATH=src python -m inscription run tests/fixtures/positive/fill_buffer_procedure.ins
 ```
 
 Or install an editable copy:
@@ -82,9 +84,9 @@ Or install an editable copy:
 ```sh
 python -m pip install -e .
 inscription check-tools --show-pipeline
-inscription compile tests/fixtures/positive/buffer_sum.ins --verify
-inscription highlight tests/fixtures/positive/buffer_sum.ins
-inscription run tests/fixtures/positive/buffer_sum.ins
+inscription compile tests/fixtures/positive/fill_buffer_procedure.ins --verify
+inscription highlight tests/fixtures/positive/fill_buffer_procedure.ins
+inscription run tests/fixtures/positive/fill_buffer_procedure.ins
 ```
 
 `compile` accepts library-style source files without `main`. `run` executes the lowered module through `lli`; executable fixtures define a no-hole `main` and return an exit status in `0..255`.
@@ -92,35 +94,38 @@ inscription run tests/fixtures/positive/buffer_sum.ins
 ## Example program
 
 ```text
-buffer sum gives i32:
-  let bytes be buffer of 4 u8 filled with 0
-  bytes at 0 becomes 10
-  bytes at 1 becomes 20
-  bytes at 2 becomes 30
-  bytes at 3 becomes 40
+fill buffer cells: buffer of 4 i32 with value: i32 does:
+  let i be 0
+  while i is less than 4:
+    cells at i becomes value
+    i becomes i plus 1
+
+sum buffer cells: buffer of 4 i32 gives i32:
   let total be 0
   let i be 0
   while i is less than 4:
-    total becomes total plus (bytes at i as i32)
+    total becomes total plus cells at i
     i becomes i plus 1
   total
 
 main gives i32:
-  buffer sum
+  let cells be buffer of 4 i32 filled with 0
+  fill buffer cells with 7
+  sum buffer cells
 ```
 
 Compile it to MLIR:
 
 ```sh
-PYTHONPATH=src python -m inscription compile tests/fixtures/positive/buffer_sum.ins --verify
+PYTHONPATH=src python -m inscription compile tests/fixtures/positive/fill_buffer_procedure.ins --verify
 ```
 
 Run it:
 
 ```sh
-PYTHONPATH=src python -m inscription run tests/fixtures/positive/buffer_sum.ins
+PYTHONPATH=src python -m inscription run tests/fixtures/positive/fill_buffer_procedure.ins
 echo $?
-# 100
+# 28
 ```
 
 ## CLI
@@ -144,9 +149,12 @@ A program is a list of phrase definitions:
 <phrase with typed holes> gives <type>:
   <body item>*
   <value block>
+
+<phrase with typed holes> does:
+  <body item>+
 ```
 
-A scalar type is one of `i1`, `i8`, `i16`, `i32`, `i64`, `u8`, `u16`, `u32`, or `u64`. `i1` is boolean only; all other scalar types are integer numeric types. Signedness is source-semantic: MLIR integers are signless, but Inscription signedness selects division, remainder, ordered comparison, right-shift, widening cast, and dynamic buffer-index conversion operations. A typed hole is written `name: type`. The call site mirrors the definition by filling the holes:
+A scalar type is one of `i1`, `i8`, `i16`, `i32`, `i64`, `u8`, `u16`, `u32`, or `u64`. A buffer parameter type is written `buffer of LENGTH TYPE`, where `TYPE` is an integer numeric scalar type, not `i1`. `i1` is boolean only; all other scalar types are integer numeric types. Signedness is source-semantic: MLIR integers are signless, but Inscription signedness selects division, remainder, ordered comparison, right-shift, widening cast, and dynamic buffer-index conversion operations. A scalar typed hole is written `name: type`; a buffer typed hole is written `name: buffer of LENGTH type`. The call site mirrors the definition by filling the holes:
 
 ```text
 square of n: i32 gives i32:
@@ -156,13 +164,14 @@ main gives i32:
   square of 12
 ```
 
-Body items may introduce scalar `let` bindings, local buffers, scalar rebindings, buffer stores, while loops, or step-level if/otherwise blocks:
+Body items may introduce scalar `let` bindings, local buffers, scalar rebindings, buffer stores, `does` phrase calls, while loops, or step-level if/otherwise blocks:
 
 ```text
 let total be 0
 total becomes total plus 1
 let bytes be buffer of 4 u8 filled with 0
 bytes at 0 becomes 255
+fill buffer bytes with 9
 while total is less than 10:
   total becomes total plus 1
 if total is greater than 10:
@@ -180,7 +189,32 @@ let bytes be buffer of 4 u8 filled with 0
 let cells be buffer of 8 i32 filled with zero
 ```
 
-Buffers are initialized with `filled with`, read with `name at index`, and written with `name at index becomes value`. Buffer storage lowers to `memref.alloca`, `memref.load`, and `memref.store`. Literal indices are checked at compile time. Dynamic indices are not runtime-checked in v0.4; dynamic out-of-bounds access is undefined behavior. Buffers cannot be passed, returned, aliased, rebound, cast, compared, or used as scalar values.
+Buffers are initialized with `filled with`, read with `name at index`, and written with `name at index becomes value`. Buffer storage lowers to `memref.alloca`, `memref.load`, and `memref.store`. Literal indices are checked at compile time. Dynamic indices are not runtime-checked in v0.5; dynamic out-of-bounds access is undefined behavior. Buffers can be borrowed by phrase calls through buffer parameters, but cannot be returned, stored in scalar bindings, dynamically sized, heap allocated, rebound, cast, compared, or used as scalar values.
+
+
+`gives` phrases return scalar values and can accept read-only buffer parameters:
+
+```text
+sum buffer cells: buffer of 4 i32 gives i32:
+  let total be 0
+  let i be 0
+  while i is less than 4:
+    total becomes total plus cells at i
+    i becomes i plus 1
+  total
+```
+
+`does` phrases return no value and are used as standalone steps for side effects. Buffer parameters in `does` phrases are writable:
+
+```text
+fill buffer cells: buffer of 4 i32 with value: i32 does:
+  let i be 0
+  while i is less than 4:
+    cells at i becomes value
+    i becomes i plus 1
+```
+
+Buffer arguments are borrowed; ownership stays with the caller. A read-only buffer parameter from a `gives` phrase cannot be passed to an effectful `does` phrase. Passing the same buffer to multiple buffer holes in one call is rejected in v0.5.
 
 Conditional value blocks return the first matching line, with a required fallback:
 
@@ -270,7 +304,7 @@ left is greater than right
 left is greater than or equal to right
 ```
 
-Important v0.4 rules:
+Important v0.5 rules:
 
 - function names are generated from the leading literal words in a phrase definition
 - phrase names are unique; there is no overloading
@@ -282,6 +316,9 @@ Important v0.4 rules:
 - buffer lengths must be positive decimal integer literals
 - buffer element types must be integer numeric types, not `i1`
 - buffer fill and store expressions must match the element type
+- buffer parameter actuals must exactly match length and element type
+- buffer parameters in `gives` phrases are read-only; buffer parameters in `does` phrases are writable
+- duplicate buffer actuals in one phrase call are rejected
 - buffer index expressions must be integer numeric types, not `i1`
 - literal buffer indices must be in range; dynamic indices are not runtime-checked
 - buffers are lexical storage objects and cannot be used as scalar values
@@ -332,6 +369,11 @@ PYTHONPATH=src python -m inscription run tests/fixtures/positive/filled_buffer.i
 PYTHONPATH=src python -m inscription run tests/fixtures/positive/swap_endpoints.ins        # exits 16
 PYTHONPATH=src python -m inscription run tests/fixtures/positive/branch_store.ins          # exits 7
 PYTHONPATH=src python -m inscription run tests/fixtures/positive/loop_writes.ins           # exits 10
+PYTHONPATH=src python -m inscription run tests/fixtures/positive/sum_buffer_parameter.ins  # exits 10
+PYTHONPATH=src python -m inscription run tests/fixtures/positive/fill_buffer_procedure.ins # exits 28
+PYTHONPATH=src python -m inscription run tests/fixtures/positive/copy_buffer_procedure.ins # exits 12
+PYTHONPATH=src python -m inscription run tests/fixtures/positive/nested_procedure_calls.ins # exits 24
+PYTHONPATH=src python -m inscription run tests/fixtures/positive/u8_buffer_parameter.ins   # exits 36
 ```
 
 ## Repository layout
@@ -342,12 +384,14 @@ docs/inscription-v0-spec.md   original v0 language and toolchain specification
 docs/inscription-v0.1-spec.md v0.1 language and toolchain specification
 docs/inscription-v0.2-spec.md v0.2 language and toolchain specification
 docs/inscription-v0.3-spec.md v0.3 language and toolchain specification
-docs/inscription-v0.4-spec.md current v0.4 language and toolchain specification
+docs/inscription-v0.4-spec.md v0.4 language and toolchain specification
+docs/inscription-v0.5-spec.md current v0.5 language and toolchain specification
 grammar/inscription-v0.ebnf   original v0 grammar
 grammar/inscription-v0.1.ebnf v0.1 grammar
 grammar/inscription-v0.2.ebnf v0.2 grammar
 grammar/inscription-v0.3.ebnf v0.3 grammar
-grammar/inscription-v0.4.ebnf current v0.4 grammar
+grammar/inscription-v0.4.ebnf v0.4 grammar
+grammar/inscription-v0.5.ebnf current v0.5 grammar
 tests/goldens/                exact MLIR conformance goldens
 tests/                        unit tests and executable fixtures
 ```
