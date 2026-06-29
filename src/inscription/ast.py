@@ -26,6 +26,8 @@ RecordLayoutKind = Literal["value", "natural", "packed"]
 @dataclass(frozen=True)
 class Program:
     records: tuple["RecordDecl", ...]
+    constants: tuple["ConstantDecl", ...]
+    checks: tuple["CheckStmt", ...]
     functions: tuple["Function", ...]
 
 
@@ -89,7 +91,7 @@ class Variable:
 
 @dataclass(frozen=True)
 class BufferType:
-    length: int
+    length: "BufferLength"
     element_type: "ValueType"
 
 
@@ -100,6 +102,14 @@ class RecordType:
 
 ValueType = TypeName | BufferType | RecordType
 ReturnType = TypeName | RecordType | None
+
+
+@dataclass(frozen=True)
+class ConstantDecl:
+    name: str
+    type_name: TypeName
+    expr: "Expr"
+    line: int
 
 
 @dataclass(frozen=True)
@@ -234,6 +244,8 @@ Expr = (
     | WhenExpr
 )
 
+BufferLength = int | Expr
+
 
 @dataclass(frozen=True)
 class SetStmt:
@@ -283,6 +295,12 @@ class LayoutWriteStmt:
 
 
 @dataclass(frozen=True)
+class CheckStmt:
+    expr: Expr
+    line: int
+
+
+@dataclass(frozen=True)
 class CallStmt:
     call: Call
     line: int
@@ -328,7 +346,8 @@ class ReturnStmt:
 
 
 BodyStmt = (
-    SetStmt
+    CheckStmt
+    | SetStmt
     | BufferBinding
     | AssignStmt
     | BufferStoreStmt

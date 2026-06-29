@@ -1,0 +1,11 @@
+packed layout record Word:
+  value: u16
+
+constant start: i32 be 0
+
+main gives i32:
+  let bytes be buffer of (size of Word) u8 filled with 0
+  bytes at 0 becomes 42
+  bytes at 1 becomes 0
+  let word be read Word from bytes at start
+  word.value as i32

@@ -1,0 +1,10 @@
+constant count: i32 be 5
+
+sum constant range gives i32:
+  let total be 0
+  for i from 0 up to count:
+    total becomes total plus i
+  total
+
+main gives i32:
+  sum constant range

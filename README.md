@@ -6,7 +6,7 @@ The language is readable, but it is **not** natural-language interpretation: eve
 
 ## Status
 
-This repository currently implements **Inscription v0.8**:
+This repository currently implements **Inscription v0.9**:
 
 - source-visible scalar types: `i1`, signed integers `i8`/`i16`/`i32`/`i64`, and unsigned integers `u8`/`u16`/`u32`/`u64`
 - phrase-shaped function definitions and phrase-shaped calls
@@ -16,7 +16,9 @@ This repository currently implements **Inscription v0.8**:
 - scalar rebinding with `name becomes expression`
 - source-level value records declared with `record TypeName:` and scalar fields
 - layout-aware value records declared with `layout record TypeName:` or `packed layout record TypeName:`
-- local fixed-size stack buffers with `let name be buffer of LENGTH TYPE filled with expression`
+- top-level typed compile-time constants with `constant name: type be expression`
+- compile-time assertions with `check expression` at top level or inside phrase bodies
+- local fixed-size stack buffers with `let name be buffer of LENGTH TYPE filled with expression`, where `LENGTH` may be a literal, constant name, or parenthesized compile-time expression
 - buffer parameter holes with `name: buffer of LENGTH TYPE`
 - buffer loads with `name at index` and buffer stores with `name at index becomes expression`
 - static buffer length expressions with `length of name`
@@ -43,9 +45,9 @@ This repository currently implements **Inscription v0.8**:
 - exact MLIR golden conformance tests in [`tests/goldens`](tests/goldens)
 - MLIR emission using `func`, `arith`, `scf.if`, `scf.for`, `scf.while`, flattened scalar SSA for records, and local `memref.alloca`/`memref.load`/`memref.store` for buffers
 - LLVM 22 lowering and execution through `mlir-opt`, `mlir-translate`, and `lli`
-- no source-level I/O, heap allocation, pointers, dynamic-size buffers, buffer return values, buffer aliasing, slices, LLVM/C ABI structs, floats, strings, statement-level `return`, `break`, `continue`, overloading, type coercions, or natural-language inference
+- no source-level I/O, heap allocation, pointers, dynamic-size buffers, buffer return values, buffer aliasing, slices, LLVM/C ABI structs, floats, strings, statement-level `return`, `break`, `continue`, macros, imports, generics, global storage, runtime assertions, overloading, type coercions, or natural-language inference
 
-See [`docs/inscription-v0.8-spec.md`](docs/inscription-v0.8-spec.md) and [`grammar/inscription-v0.8.ebnf`](grammar/inscription-v0.8.ebnf) for the exact current language contract. The immutable previous contracts remain in [`docs/inscription-v0-spec.md`](docs/inscription-v0-spec.md), [`docs/inscription-v0.1-spec.md`](docs/inscription-v0.1-spec.md), [`docs/inscription-v0.2-spec.md`](docs/inscription-v0.2-spec.md), [`docs/inscription-v0.3-spec.md`](docs/inscription-v0.3-spec.md), [`docs/inscription-v0.4-spec.md`](docs/inscription-v0.4-spec.md), [`docs/inscription-v0.5-spec.md`](docs/inscription-v0.5-spec.md), [`docs/inscription-v0.6-spec.md`](docs/inscription-v0.6-spec.md), [`docs/inscription-v0.7-spec.md`](docs/inscription-v0.7-spec.md), [`grammar/inscription-v0.ebnf`](grammar/inscription-v0.ebnf), [`grammar/inscription-v0.1.ebnf`](grammar/inscription-v0.1.ebnf), [`grammar/inscription-v0.2.ebnf`](grammar/inscription-v0.2.ebnf), [`grammar/inscription-v0.3.ebnf`](grammar/inscription-v0.3.ebnf), [`grammar/inscription-v0.4.ebnf`](grammar/inscription-v0.4.ebnf), [`grammar/inscription-v0.5.ebnf`](grammar/inscription-v0.5.ebnf), [`grammar/inscription-v0.6.ebnf`](grammar/inscription-v0.6.ebnf), and [`grammar/inscription-v0.7.ebnf`](grammar/inscription-v0.7.ebnf).
+See [`docs/inscription-v0.9-spec.md`](docs/inscription-v0.9-spec.md) and [`grammar/inscription-v0.9.ebnf`](grammar/inscription-v0.9.ebnf) for the exact current language contract. The immutable previous contracts remain in [`docs/inscription-v0-spec.md`](docs/inscription-v0-spec.md), [`docs/inscription-v0.1-spec.md`](docs/inscription-v0.1-spec.md), [`docs/inscription-v0.2-spec.md`](docs/inscription-v0.2-spec.md), [`docs/inscription-v0.3-spec.md`](docs/inscription-v0.3-spec.md), [`docs/inscription-v0.4-spec.md`](docs/inscription-v0.4-spec.md), [`docs/inscription-v0.5-spec.md`](docs/inscription-v0.5-spec.md), [`docs/inscription-v0.6-spec.md`](docs/inscription-v0.6-spec.md), [`docs/inscription-v0.7-spec.md`](docs/inscription-v0.7-spec.md), [`grammar/inscription-v0.ebnf`](grammar/inscription-v0.ebnf), [`grammar/inscription-v0.1.ebnf`](grammar/inscription-v0.1.ebnf), [`grammar/inscription-v0.2.ebnf`](grammar/inscription-v0.2.ebnf), [`grammar/inscription-v0.3.ebnf`](grammar/inscription-v0.3.ebnf), [`grammar/inscription-v0.4.ebnf`](grammar/inscription-v0.4.ebnf), [`grammar/inscription-v0.5.ebnf`](grammar/inscription-v0.5.ebnf), [`grammar/inscription-v0.6.ebnf`](grammar/inscription-v0.6.ebnf), and [`grammar/inscription-v0.7.ebnf`](grammar/inscription-v0.7.ebnf). The v0.8 layout-record contract remains in [`docs/inscription-v0.8-spec.md`](docs/inscription-v0.8-spec.md) and [`grammar/inscription-v0.8.ebnf`](grammar/inscription-v0.8.ebnf).
 
 ## Requirements
 
@@ -149,9 +151,12 @@ Commands return `2` for compiler, diagnostic, toolchain, or filesystem errors.
 
 ## Language summary
 
-A program is a list of top-level record declarations and phrase definitions:
+A program is a list of top-level constants, compile-time checks, record declarations, layout-record declarations, and phrase definitions:
 
 ```text
+constant name: type be expression
+check expression
+
 record TypeName:
   field: type
 
@@ -163,7 +168,7 @@ record TypeName:
   <body item>+
 ```
 
-A scalar type is one of `i1`, `i8`, `i16`, `i32`, `i64`, `u8`, `u16`, `u32`, or `u64`. A record type is a nominal top-level name declared with scalar fields. A buffer parameter type is written `buffer of LENGTH TYPE`, where `TYPE` is an integer numeric scalar type, not `i1`. `i1` is boolean only; all other scalar types are integer numeric types. Signedness is source-semantic: MLIR integers are signless, but Inscription signedness selects division, remainder, ordered comparison, right-shift, widening cast, and dynamic buffer-index conversion operations. A scalar typed hole is written `name: type`; a buffer typed hole is written `name: buffer of LENGTH type`. The call site mirrors the definition by filling the holes:
+A scalar type is one of `i1`, `i8`, `i16`, `i32`, `i64`, `u8`, `u16`, `u32`, or `u64`. A record type is a nominal top-level name declared with scalar fields. A buffer parameter type is written `buffer of LENGTH TYPE`, where `TYPE` is an integer numeric scalar type, not `i1`, and `LENGTH` is a compile-time integer length. `i1` is boolean only; all other scalar types are integer numeric types. Signedness is source-semantic: MLIR integers are signless, but Inscription signedness selects division, remainder, ordered comparison, right-shift, widening cast, and dynamic buffer-index conversion operations. A scalar typed hole is written `name: type`; a buffer typed hole is written `name: buffer of LENGTH type`. The call site mirrors the definition by filling the holes:
 
 ```text
 square of n: i32 gives i32:
@@ -207,7 +212,7 @@ main gives i32:
   size of Header plus offset of flags in Header plus copy.tag as i32
 ```
 
-Natural `layout record` declarations use scalar byte widths and alignments, including deterministic padding and final size rounding. `packed layout record` declarations use consecutive byte offsets, size equal to the sum of field widths, and alignment 1. `size of TypeName`, `alignment of TypeName`, and `offset of field in TypeName` are compile-time `i32` constants. `read TypeName from bytes at index` and `write value into bytes at index` operate only on `u8` buffers, use little-endian multi-byte fields, and write padding bytes as zero. Dynamic layout read/write indices are not runtime-checked in v0.8.
+Natural `layout record` declarations use scalar byte widths and alignments, including deterministic padding and final size rounding. `packed layout record` declarations use consecutive byte offsets, size equal to the sum of field widths, and alignment 1. `size of TypeName`, `alignment of TypeName`, and `offset of field in TypeName` are compile-time `i32` constants. `read TypeName from bytes at index` and `write value into bytes at index` operate only on `u8` buffers, use little-endian multi-byte fields, and write padding bytes as zero. Dynamic layout read/write indices are not runtime-checked in v0.9.
 
 Body items may introduce scalar or record `let` bindings, local buffers, scalar/record/field rebindings, buffer stores, `does` phrase calls, counted for loops, buffer index loops, while loops, or step-level if/otherwise blocks:
 
@@ -232,16 +237,20 @@ otherwise:
   total becomes total
 ```
 
+A top-level constant is introduced with `constant name: type be expression`. Constants are compile-time scalar values, emit inline `arith.constant` operations at use sites, and cannot be rebound or shadowed. They may be used in expressions, for-loop bounds, buffer indices, record constructors, layout checks, and buffer lengths. A compile-time assertion is written `check expression`; checks emit no MLIR and must not depend on runtime phrase holes, runtime lets, record fields, or buffer loads.
+
 A local scalar or record binding is introduced with `let`. A scalar binding, a whole record, or an individual record field is rebound with `becomes`. Rebinding lowers to SSA values, `scf.while` loop-carried results, and `scf.if` results, not memory storage.
 
 A local buffer binding uses fixed-size stack storage:
 
 ```text
+constant cell_count: i32 be 8
 let bytes be buffer of 4 u8 filled with 0
-let cells be buffer of 8 i32 filled with zero
+let cells be buffer of cell_count i32 filled with zero
+let header_bytes be buffer of (size of Header) u8 filled with 0
 ```
 
-Buffers are initialized with `filled with`, read with `name at index`, and written with `name at index becomes value`. `length of name` returns the static buffer length as `i32`. Buffer storage lowers to `memref.alloca`, `memref.load`, and `memref.store`. Literal indices are checked at compile time. Dynamic indices are not runtime-checked in v0.8; dynamic out-of-bounds access is undefined behavior. Buffers can be borrowed by phrase calls through buffer parameters, but cannot be returned, stored in scalar bindings, dynamically sized, heap allocated, rebound, cast, compared, or used as scalar values.
+Buffers are initialized with `filled with`, read with `name at index`, and written with `name at index becomes value`. `length of name` returns the static buffer length as `i32`. Buffer storage lowers to `memref.alloca`, `memref.load`, and `memref.store`. Literal indices are checked at compile time. Dynamic indices are not runtime-checked in v0.9; dynamic out-of-bounds access is undefined behavior. Buffers can be borrowed by phrase calls through buffer parameters, but cannot be returned, stored in scalar bindings, dynamically sized, heap allocated, rebound, cast, compared, or used as scalar values.
 
 
 `gives` phrases return scalar values and can accept read-only buffer parameters:
@@ -371,7 +380,7 @@ left is greater than right
 left is greater than or equal to right
 ```
 
-Important v0.8 rules:
+Important v0.9 rules:
 
 - function names are generated from the leading literal words in a phrase definition
 - phrase names are unique; there is no overloading
@@ -391,7 +400,9 @@ Important v0.8 rules:
 - rebinding a phrase hole does not mutate the caller
 - each scalar binding type is fixed after initialization or annotation
 - typed `let` initializers and rebinding right-hand sides must match the binding type
-- buffer lengths must be positive decimal integer literals
+- buffer lengths must be compile-time integer values written as decimal literals, constant names, or parenthesized compile-time expressions
+- constants are top-level scalar compile-time values, cannot be shadowed, cannot be rebound, and lower inline at use sites
+- checks are compile-time assertions, emit no MLIR, require `i1`, and cannot depend on runtime values
 - buffer element types must be integer numeric types, not `i1`
 - buffer fill and store expressions must match the element type
 - buffer parameter actuals must exactly match length and element type
@@ -479,6 +490,13 @@ PYTHONPATH=src python -m inscription run tests/fixtures/positive/layout_little_e
 PYTHONPATH=src python -m inscription run tests/fixtures/positive/layout_little_endian_read.ins    # exits 42
 PYTHONPATH=src python -m inscription run tests/fixtures/positive/layout_write_procedure.ins       # exits 11
 PYTHONPATH=src python -m inscription run tests/fixtures/positive/layout_padding_zero.ins          # exits 0
+PYTHONPATH=src python -m inscription run tests/fixtures/positive/constants_layout_checks.ins       # exits 10
+PYTHONPATH=src python -m inscription run tests/fixtures/positive/constant_buffer_length.ins        # exits 8
+PYTHONPATH=src python -m inscription run tests/fixtures/positive/layout_length_expression.ins      # exits 42
+PYTHONPATH=src python -m inscription run tests/fixtures/positive/phrase_body_check.ins             # exits 7
+PYTHONPATH=src python -m inscription run tests/fixtures/positive/constant_bitwise_mask.ins         # exits 15
+PYTHONPATH=src python -m inscription run tests/fixtures/positive/constant_for_bounds.ins           # exits 10
+PYTHONPATH=src python -m inscription run tests/fixtures/positive/constant_layout_index.ins         # exits 42
 ```
 
 ## Repository layout
@@ -493,7 +511,8 @@ docs/inscription-v0.4-spec.md v0.4 language and toolchain specification
 docs/inscription-v0.5-spec.md v0.5 language and toolchain specification
 docs/inscription-v0.6-spec.md v0.6 language and toolchain specification
 docs/inscription-v0.7-spec.md v0.7 language and toolchain specification
-docs/inscription-v0.8-spec.md current v0.8 language and toolchain specification
+docs/inscription-v0.8-spec.md v0.8 language and toolchain specification
+docs/inscription-v0.9-spec.md current v0.9 language and toolchain specification
 grammar/inscription-v0.ebnf   original v0 grammar
 grammar/inscription-v0.1.ebnf v0.1 grammar
 grammar/inscription-v0.2.ebnf v0.2 grammar
@@ -502,7 +521,8 @@ grammar/inscription-v0.4.ebnf v0.4 grammar
 grammar/inscription-v0.5.ebnf v0.5 grammar
 grammar/inscription-v0.6.ebnf v0.6 grammar
 grammar/inscription-v0.7.ebnf v0.7 grammar
-grammar/inscription-v0.8.ebnf current v0.8 grammar
+grammar/inscription-v0.8.ebnf v0.8 grammar
+grammar/inscription-v0.9.ebnf current v0.9 grammar
 tests/goldens/                exact MLIR conformance goldens
 tests/                        unit tests and executable fixtures
 ```

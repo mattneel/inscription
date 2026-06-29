@@ -15,7 +15,9 @@ from .ast import (
     Call,
     CallStmt,
     Cast,
+    CheckStmt,
     Comparison,
+    ConstantDecl,
     Expr,
     FieldAccess,
     FieldAssignStmt,
@@ -30,6 +32,7 @@ from .ast import (
     LayoutRead,
     LayoutWriteStmt,
     OffsetOfField,
+    Parameter,
     Program,
     RecordConstructor,
     RecordDecl,
@@ -72,7 +75,7 @@ INTEGER_RANGES: dict[TypeName, tuple[int, int]] = {
     "u32": (0, 2**32 - 1),
     "u64": (0, 2**64 - 1),
 }
-BindingKind = Literal["param", "let", "buffer", "index"]
+BindingKind = Literal["param", "let", "buffer", "index", "constant"]
 
 
 @dataclass(frozen=True)
@@ -83,14 +86,30 @@ class Binding:
     writable: bool = True
 
 
+@dataclass(frozen=True)
+class ConstValue:
+    type_name: TypeName
+    value: int | bool
+
+
+class CompileTimeEvaluationError(Exception):
+    def __init__(self, message: str, line: int | None = None):
+        super().__init__(message)
+        self.line = line
+
+
 def analyze(program: Program) -> None:
     records = record_table(program)
     functions = function_table(program)
+    constants = constant_table(program, records, functions)
+    functions = resolve_function_table(functions, records, constants)
+    for check in program.checks:
+        _check_compile_time_check(check, {}, functions, records, constants)
     main = functions.get("main")
     if main is not None and main.params:
         raise InscriptionError("main must take no parameters", main.line)
     for fn in program.functions:
-        _check_function(fn, functions, records)
+        _check_function(fn, functions, records, constants)
 
 
 def record_table(program: Program) -> dict[str, RecordDecl]:
@@ -135,6 +154,65 @@ def function_table(program: Program) -> dict[str, Function]:
                 raise InscriptionError(f"duplicate parameter '{param.name}'", fn.line)
             seen_params.add(param.name)
     return functions
+
+
+def constant_table(
+    program: Program,
+    records: dict[str, RecordDecl],
+    functions: dict[str, Function],
+) -> dict[str, ConstValue]:
+    constants: dict[str, ConstValue] = {}
+    for const in program.constants:
+        if const.name in constants:
+            raise InscriptionError(f"constant {const.name} is already defined", const.line)
+        if const.name in SCALAR_TYPES:
+            raise InscriptionError(f"constant {const.name} conflicts with scalar type {const.name}", const.line)
+        if const.name in records:
+            raise InscriptionError(f"constant {const.name} conflicts with record {const.name}", const.line)
+        if const.type_name not in SCALAR_TYPES:
+            raise InscriptionError(f"constant {const.name} must have a scalar type", const.line)
+        env = _constant_env_types(constants)
+        try:
+            value = evaluate_const_expr(const.expr, env, functions, records, constants, expected=const.type_name)
+        except CompileTimeEvaluationError as exc:
+            raise InscriptionError(f"constant {const.name} must be compile-time evaluable", exc.line or const.line) from exc
+        except InscriptionError as exc:
+            message = getattr(exc, "message", str(exc))
+            if (
+                _should_preserve_expected_error(exc)
+                or message.startswith("unknown binding")
+                or message.startswith("constant expression")
+                or message.startswith("constant shift")
+            ):
+                raise
+            try:
+                actual = infer_expr_type(const.expr, env, functions, records)
+            except InscriptionError:
+                raise exc
+            raise InscriptionError(
+                f"constant {const.name} must have type {const.type_name}, got {format_type(actual)}", const.line
+            ) from exc
+        if value.type_name != const.type_name:
+            raise InscriptionError(
+                f"constant {const.name} must have type {const.type_name}, got {format_type(value.type_name)}", const.line
+            )
+        constants[const.name] = value
+    return constants
+
+
+def resolve_function_table(
+    functions: dict[str, Function],
+    records: dict[str, RecordDecl],
+    constants: dict[str, ConstValue],
+) -> dict[str, Function]:
+    resolved: dict[str, Function] = {}
+    for name, fn in functions.items():
+        params = tuple(
+            Parameter(param.name, resolve_value_type(param.type_name, fn.line, records, constants, functions, {}))
+            for param in fn.params
+        )
+        resolved[name] = Function(fn.name, params, fn.return_type, fn.body, fn.line, fn.display_name)
+    return resolved
 
 
 def mlir_type(type_name: TypeName) -> str:
@@ -204,20 +282,29 @@ def all_ones_constant_value(_type_name: TypeName) -> int:
     return -1
 
 
-def _check_function(fn: Function, functions: dict[str, Function], records: dict[str, RecordDecl]) -> None:
+def _check_function(
+    fn: Function,
+    functions: dict[str, Function],
+    records: dict[str, RecordDecl],
+    constants: dict[str, ConstValue],
+) -> None:
+    resolved_params: list[tuple[str, ValueType]] = []
     for param in fn.params:
-        _check_parameter_type(param.type_name, fn.line, records)
+        if param.name in constants:
+            raise InscriptionError(f"binding {param.name} conflicts with constant {param.name}", fn.line)
+        resolved_type = resolve_value_type(param.type_name, fn.line, records, constants, functions, {})
+        _check_parameter_type(resolved_type, fn.line, records, constants, functions)
+        resolved_params.append((param.name, resolved_type))
     if fn.return_type is None:
-        _check_does_function(fn, functions, records)
+        _check_does_function(fn, functions, records, constants, resolved_params)
         return
     if isinstance(fn.return_type, RecordType):
         raise InscriptionError("record return types are not supported in v0.7", fn.line)
     if not fn.body:
         raise InscriptionError(f"phrase '{fn.name}' must evaluate to a value", fn.line)
-    bindings: dict[str, Binding] = {
-        param.name: Binding(param.type_name, "param", fn.line, writable=not isinstance(param.type_name, BufferType))
-        for param in fn.params
-    }
+    bindings = _constant_bindings(constants)
+    for name, type_name in resolved_params:
+        bindings[name] = Binding(type_name, "param", fn.line, writable=not isinstance(type_name, BufferType))
     returned = False
     for index, stmt in enumerate(fn.body):
         if returned:
@@ -226,30 +313,42 @@ def _check_function(fn: Function, functions: dict[str, Function], records: dict[
         if isinstance(stmt, ReturnStmt):
             if not is_last:
                 raise InscriptionError("value expression must be the final phrase body form", stmt.line)
-            actual = infer_expr_type(stmt.expr, _env_types(bindings), functions, records, expected=fn.return_type)
+            actual = infer_expr_type(stmt.expr, _env_types(bindings), functions, records, expected=fn.return_type, constants=constants)
             require_type(actual, fn.return_type, stmt.line)
             returned = True
         else:
-            _check_body_stmt(stmt, bindings, functions, records)
+            _check_body_stmt(stmt, bindings, functions, records, constants)
     if not returned:
         raise InscriptionError(f"phrase '{fn.name}' must evaluate to a value", fn.line)
 
 
-def _check_does_function(fn: Function, functions: dict[str, Function], records: dict[str, RecordDecl]) -> None:
+def _check_does_function(
+    fn: Function,
+    functions: dict[str, Function],
+    records: dict[str, RecordDecl],
+    constants: dict[str, ConstValue],
+    resolved_params: list[tuple[str, ValueType]],
+) -> None:
     if not fn.body:
         raise InscriptionError("does phrase body must contain at least one step", fn.line)
-    bindings: dict[str, Binding] = {
-        param.name: Binding(param.type_name, "param", fn.line, writable=True) for param in fn.params
-    }
+    bindings = _constant_bindings(constants)
+    for name, type_name in resolved_params:
+        bindings[name] = Binding(type_name, "param", fn.line, writable=True)
     for stmt in fn.body:
         if isinstance(stmt, ReturnStmt):
             raise InscriptionError("does phrase body cannot end with a value expression", stmt.line)
-        _check_body_stmt(stmt, bindings, functions, records)
+        _check_body_stmt(stmt, bindings, functions, records, constants)
 
 
-def _check_parameter_type(type_name: ValueType, line: int, records: dict[str, RecordDecl]) -> None:
+def _check_parameter_type(
+    type_name: ValueType,
+    line: int,
+    records: dict[str, RecordDecl],
+    constants: dict[str, ConstValue],
+    functions: dict[str, Function],
+) -> None:
     if isinstance(type_name, BufferType):
-        _check_buffer_type(type_name, line)
+        _check_buffer_type(type_name, line, records, constants, functions, {})
         return
     if isinstance(type_name, RecordType):
         if type_name.name not in records:
@@ -259,11 +358,19 @@ def _check_parameter_type(type_name: ValueType, line: int, records: dict[str, Re
         raise InscriptionError("supported scalar types are i1, i8, i16, i32, i64, u8, u16, u32, and u64", line)
 
 
-def _check_buffer_type(buffer_type: BufferType, line: int) -> None:
-    if buffer_type.length < 1:
+def _check_buffer_type(
+    buffer_type: BufferType,
+    line: int,
+    records: dict[str, RecordDecl],
+    constants: dict[str, ConstValue],
+    functions: dict[str, Function],
+    env: dict[str, ValueType],
+) -> None:
+    resolved = resolve_buffer_type(buffer_type, line, records, constants, functions, env)
+    if resolved.length < 1:
         raise InscriptionError("buffer length must be at least 1", line)
-    if not is_integer_type(buffer_type.element_type):
-        raise InscriptionError(f"buffer element type must be an integer type, got {format_type(buffer_type.element_type)}", line)
+    if not is_integer_type(resolved.element_type):
+        raise InscriptionError(f"buffer element type must be an integer type, got {format_type(resolved.element_type)}", line)
 
 
 def _check_body_stmt(
@@ -271,39 +378,43 @@ def _check_body_stmt(
     bindings: dict[str, Binding],
     functions: dict[str, Function],
     records: dict[str, RecordDecl],
+    constants: dict[str, ConstValue],
 ) -> None:
+    if isinstance(stmt, CheckStmt):
+        _check_compile_time_check(stmt, _env_types(bindings), functions, records, constants)
+        return
     if isinstance(stmt, SetStmt):
-        _declare_let(stmt, bindings, functions, records)
+        _declare_let(stmt, bindings, functions, records, constants)
         return
     if isinstance(stmt, BufferBinding):
-        _declare_buffer(stmt, bindings, functions, records)
+        _declare_buffer(stmt, bindings, functions, records, constants)
         return
     if isinstance(stmt, AssignStmt):
-        _check_assignment(stmt, bindings, functions, records)
+        _check_assignment(stmt, bindings, functions, records, constants)
         return
     if isinstance(stmt, BufferStoreStmt):
-        _check_buffer_store(stmt, bindings, functions, records)
+        _check_buffer_store(stmt, bindings, functions, records, constants)
         return
     if isinstance(stmt, FieldAssignStmt):
-        _check_field_assignment(stmt, bindings, functions, records)
+        _check_field_assignment(stmt, bindings, functions, records, constants)
         return
     if isinstance(stmt, LayoutWriteStmt):
-        _check_layout_write(stmt, bindings, functions, records)
+        _check_layout_write(stmt, bindings, functions, records, constants)
         return
     if isinstance(stmt, CallStmt):
-        _check_call_stmt(stmt, bindings, functions, records)
+        _check_call_stmt(stmt, bindings, functions, records, constants)
         return
     if isinstance(stmt, WhileStmt):
-        _check_while(stmt, bindings, functions, records)
+        _check_while(stmt, bindings, functions, records, constants)
         return
     if isinstance(stmt, ForStmt):
-        _check_for(stmt, bindings, functions, records)
+        _check_for(stmt, bindings, functions, records, constants)
         return
     if isinstance(stmt, ForEachStmt):
-        _check_for_each(stmt, bindings, functions, records)
+        _check_for_each(stmt, bindings, functions, records, constants)
         return
     if isinstance(stmt, IfStmt):
-        _check_if(stmt, bindings, functions, records)
+        _check_if(stmt, bindings, functions, records, constants)
         return
     raise AssertionError(stmt)  # pragma: no cover
 
@@ -316,6 +427,8 @@ def _check_no_shadow(name: str, line: int, bindings: dict[str, Binding], *, kind
         raise InscriptionError(f"{kind} binding '{name}' cannot shadow phrase hole", line)
     if existing.kind == "buffer":
         raise InscriptionError(f"{kind} binding '{name}' cannot shadow buffer binding", line)
+    if existing.kind == "constant":
+        raise InscriptionError(f"binding {name} conflicts with constant {name}", line)
     raise InscriptionError(f"duplicate {kind} binding '{name}'", line)
 
 
@@ -324,19 +437,21 @@ def _declare_let(
     bindings: dict[str, Binding],
     functions: dict[str, Function],
     records: dict[str, RecordDecl],
+    constants: dict[str, ConstValue],
 ) -> None:
     _check_no_shadow(stmt.name, stmt.line, bindings, kind="let")
     if stmt.type_name is not None:
+        resolved_declared_type = resolve_value_type(stmt.type_name, stmt.line, records, constants, functions, _env_types(bindings))
         if isinstance(stmt.type_name, RecordType) and stmt.type_name.name not in records:
             raise InscriptionError(f"unknown type {stmt.type_name.name}", stmt.line)
-        actual = _infer_declared_type(stmt.expr, stmt.type_name, _env_types(bindings), functions, records)
-        if actual != stmt.type_name:
+        actual = _infer_declared_type(stmt.expr, resolved_declared_type, _env_types(bindings), functions, records, constants)
+        if actual != resolved_declared_type:
             raise InscriptionError(
-                f"let {stmt.name} must have type {format_type(stmt.type_name)}, got {format_type(actual)}", stmt.line
+                f"let {stmt.name} must have type {format_type(resolved_declared_type)}, got {format_type(actual)}", stmt.line
             )
-        bindings[stmt.name] = Binding(stmt.type_name, "let", stmt.line)
+        bindings[stmt.name] = Binding(resolved_declared_type, "let", stmt.line)
         return
-    type_name = infer_expr_type(stmt.expr, _env_types(bindings), functions, records)
+    type_name = infer_expr_type(stmt.expr, _env_types(bindings), functions, records, constants=constants)
     bindings[stmt.name] = Binding(type_name, "let", stmt.line)
 
 
@@ -345,12 +460,13 @@ def _declare_buffer(
     bindings: dict[str, Binding],
     functions: dict[str, Function],
     records: dict[str, RecordDecl],
+    constants: dict[str, ConstValue],
 ) -> None:
     _check_no_shadow(stmt.name, stmt.line, bindings, kind="buffer")
-    buffer_type = stmt.buffer_type
-    _check_buffer_type(buffer_type, stmt.line)
+    buffer_type = resolve_buffer_type(stmt.buffer_type, stmt.line, records, constants, functions, _env_types(bindings))
+    _check_buffer_type(buffer_type, stmt.line, records, constants, functions, _env_types(bindings))
     assert isinstance(buffer_type.element_type, str)
-    actual = _infer_declared_type(stmt.fill, buffer_type.element_type, _env_types(bindings), functions, records)
+    actual = _infer_declared_type(stmt.fill, buffer_type.element_type, _env_types(bindings), functions, records, constants)
     if actual != buffer_type.element_type:
         raise InscriptionError(
             f"buffer {stmt.name} fill must have type {buffer_type.element_type}, got {format_type(actual)}", stmt.line
@@ -363,6 +479,7 @@ def _check_assignment(
     bindings: dict[str, Binding],
     functions: dict[str, Function],
     records: dict[str, RecordDecl],
+    constants: dict[str, ConstValue],
 ) -> None:
     binding = bindings.get(stmt.name)
     if binding is None:
@@ -372,10 +489,12 @@ def _check_assignment(
             f"cannot rebind buffer {stmt.name}; use `{stmt.name} at index becomes value`", stmt.line
         )
     if not binding.writable:
+        if binding.kind == "constant":
+            raise InscriptionError(f"cannot rebind constant {stmt.name}", stmt.line)
         if binding.kind == "index":
             raise InscriptionError(f"cannot rebind for-loop index {stmt.name}", stmt.line)
         raise InscriptionError(f"cannot rebind {stmt.name}", stmt.line)
-    actual = _infer_declared_type(stmt.expr, binding.type_name, _env_types(bindings), functions, records)
+    actual = _infer_declared_type(stmt.expr, binding.type_name, _env_types(bindings), functions, records, constants)
     if actual != binding.type_name:
         raise InscriptionError(
             f"assignment to {stmt.name} must have type {format_type(binding.type_name)}, got {format_type(actual)}", stmt.line
@@ -387,14 +506,15 @@ def _check_buffer_store(
     bindings: dict[str, Binding],
     functions: dict[str, Function],
     records: dict[str, RecordDecl],
+    constants: dict[str, ConstValue],
 ) -> None:
     binding = _require_buffer_binding(stmt.name, stmt.line, bindings)
     buffer_type = binding.type_name
     if not binding.writable:
         raise InscriptionError(f"cannot store to read-only buffer parameter {stmt.name}", stmt.line)
-    _check_buffer_index(stmt.name, buffer_type, stmt.index, _env_types(bindings), functions, records)
+    _check_buffer_index(stmt.name, buffer_type, stmt.index, _env_types(bindings), functions, records, constants)
     assert isinstance(buffer_type.element_type, str)
-    actual = _infer_declared_type(stmt.value, buffer_type.element_type, _env_types(bindings), functions, records)
+    actual = _infer_declared_type(stmt.value, buffer_type.element_type, _env_types(bindings), functions, records, constants)
     if actual != buffer_type.element_type:
         raise InscriptionError(
             f"store to {stmt.name} must have type {buffer_type.element_type}, got {format_type(actual)}", stmt.line
@@ -406,10 +526,11 @@ def _check_field_assignment(
     bindings: dict[str, Binding],
     functions: dict[str, Function],
     records: dict[str, RecordDecl],
+    constants: dict[str, ConstValue],
 ) -> None:
     record_type = _require_record_type(stmt.name, stmt.line, _env_types(bindings))
     field_type = _require_record_field(record_type, stmt.field, stmt.line, records)
-    actual = _infer_declared_type(stmt.expr, field_type, _env_types(bindings), functions, records)
+    actual = _infer_declared_type(stmt.expr, field_type, _env_types(bindings), functions, records, constants)
     if actual != field_type:
         raise InscriptionError(
             f"field {stmt.field} of {record_type.name} must have type {field_type}, got {format_type(actual)}", stmt.line
@@ -421,6 +542,7 @@ def _check_layout_write(
     bindings: dict[str, Binding],
     functions: dict[str, Function],
     records: dict[str, RecordDecl],
+    constants: dict[str, ConstValue],
 ) -> None:
     record_type = _require_record_type(stmt.record_name, stmt.line, _env_types(bindings))
     record = _record_decl(record_type, stmt.line, records)
@@ -445,6 +567,7 @@ def _check_layout_write(
         _env_types(bindings),
         functions,
         records,
+        constants,
     )
 
 
@@ -453,13 +576,14 @@ def _check_call_stmt(
     bindings: dict[str, Binding],
     functions: dict[str, Function],
     records: dict[str, RecordDecl],
+    constants: dict[str, ConstValue],
 ) -> None:
     target = _lookup_phrase(stmt.call.name, stmt.line, functions)
     if target.return_type is not None:
         raise InscriptionError(
             f"phrase `{target.display_name}` returns {target.return_type} and cannot be used as a step", stmt.line
         )
-    _check_call_arguments(stmt.call, target, bindings, functions, records, effectful=True)
+    _check_call_arguments(stmt.call, target, bindings, functions, records, constants, effectful=True)
 
 
 def _check_while(
@@ -467,6 +591,7 @@ def _check_while(
     bindings: dict[str, Binding],
     functions: dict[str, Function],
     records: dict[str, RecordDecl],
+    constants: dict[str, ConstValue],
 ) -> None:
     condition_type = infer_expr_type(stmt.condition, _env_types(bindings), functions, records)
     if condition_type != "i1":
@@ -475,7 +600,7 @@ def _check_while(
         raise InscriptionError("while loop requires at least one body step", stmt.line)
     scoped = dict(bindings)
     for body_stmt in stmt.body:
-        _check_body_stmt(body_stmt, scoped, functions, records)
+        _check_body_stmt(body_stmt, scoped, functions, records, constants)
 
 
 def _check_for(
@@ -483,6 +608,7 @@ def _check_for(
     bindings: dict[str, Binding],
     functions: dict[str, Function],
     records: dict[str, RecordDecl],
+    constants: dict[str, ConstValue],
 ) -> None:
     start_type = infer_expr_type(stmt.start, _env_types(bindings), functions, records)
     end_type = infer_expr_type(stmt.end, _env_types(bindings), functions, records)
@@ -503,7 +629,7 @@ def _check_for(
     scoped = dict(bindings)
     scoped[stmt.name] = Binding(start_type, "index", stmt.line, writable=False)
     for body_stmt in stmt.body:
-        _check_body_stmt(body_stmt, scoped, functions, records)
+        _check_body_stmt(body_stmt, scoped, functions, records, constants)
 
 
 def _check_for_each(
@@ -511,6 +637,7 @@ def _check_for_each(
     bindings: dict[str, Binding],
     functions: dict[str, Function],
     records: dict[str, RecordDecl],
+    constants: dict[str, ConstValue],
 ) -> None:
     binding = bindings.get(stmt.buffer_name)
     if binding is None:
@@ -523,7 +650,7 @@ def _check_for_each(
     scoped = dict(bindings)
     scoped[stmt.name] = Binding("i32", "index", stmt.line, writable=False)
     for body_stmt in stmt.body:
-        _check_body_stmt(body_stmt, scoped, functions, records)
+        _check_body_stmt(body_stmt, scoped, functions, records, constants)
 
 
 def _check_index_shadow(name: str, line: int, bindings: dict[str, Binding]) -> None:
@@ -536,6 +663,7 @@ def _check_if(
     bindings: dict[str, Binding],
     functions: dict[str, Function],
     records: dict[str, RecordDecl],
+    constants: dict[str, ConstValue],
 ) -> None:
     condition_type = infer_expr_type(stmt.condition, _env_types(bindings), functions, records)
     if condition_type != "i1":
@@ -547,11 +675,11 @@ def _check_if(
 
     then_scope = dict(bindings)
     for body_stmt in stmt.then_body:
-        _check_body_stmt(body_stmt, then_scope, functions, records)
+        _check_body_stmt(body_stmt, then_scope, functions, records, constants)
 
     else_scope = dict(bindings)
     for body_stmt in stmt.else_body:
-        _check_body_stmt(body_stmt, else_scope, functions, records)
+        _check_body_stmt(body_stmt, else_scope, functions, records, constants)
 
 
 def _lookup_phrase(name: str, line: int, functions: dict[str, Function]) -> Function:
@@ -567,6 +695,7 @@ def _check_call_arguments(
     bindings: dict[str, Binding],
     functions: dict[str, Function],
     records: dict[str, RecordDecl],
+    constants: dict[str, ConstValue],
     *,
     effectful: bool,
 ) -> None:
@@ -574,7 +703,7 @@ def _check_call_arguments(
     seen_buffers: set[str] = set()
     env = _env_types(bindings)
     for arg, param in zip(call.args, target.params, strict=True):
-        expected = param.type_name
+        expected = resolve_value_type(param.type_name, call.line, records, constants, functions, {})
         if isinstance(expected, BufferType):
             name, binding = _require_buffer_argument(arg, expected, env, getattr(arg, "line", call.line), records)
             if name in seen_buffers:
@@ -601,11 +730,13 @@ def _check_call_argument_types(
     env: dict[str, ValueType],
     functions: dict[str, Function],
     records: dict[str, RecordDecl],
+    constants: dict[str, ConstValue] | None = None,
 ) -> None:
     _check_call_arity(call, target)
+    constants = constants or {}
     seen_buffers: set[str] = set()
     for arg, param in zip(call.args, target.params, strict=True):
-        expected = param.type_name
+        expected = resolve_value_type(param.type_name, call.line, records, constants, functions, {})
         if isinstance(expected, BufferType):
             name, _binding_type = _require_buffer_argument(arg, expected, env, getattr(arg, "line", call.line), records)
             if name in seen_buffers:
@@ -706,14 +837,15 @@ def _infer_declared_type(
     env: dict[str, ValueType],
     functions: dict[str, Function],
     records: dict[str, RecordDecl],
+    constants: dict[str, ConstValue] | None = None,
 ) -> ValueType:
     try:
-        return infer_expr_type(expr, env, functions, records, expected=expected)
+        return infer_expr_type(expr, env, functions, records, expected=expected, constants=constants)
     except InscriptionError as expected_error:
         if _should_preserve_expected_error(expected_error):
             raise
         try:
-            return infer_expr_type(expr, env, functions, records)
+            return infer_expr_type(expr, env, functions, records, constants=constants)
         except InscriptionError:
             raise expected_error
 
@@ -727,6 +859,241 @@ def _env_types(bindings: dict[str, Binding]) -> dict[str, ValueType]:
     return {name: binding.type_name for name, binding in bindings.items()}
 
 
+def _constant_env_types(constants: dict[str, ConstValue]) -> dict[str, ValueType]:
+    return {name: value.type_name for name, value in constants.items()}
+
+
+def _constant_bindings(constants: dict[str, ConstValue]) -> dict[str, Binding]:
+    return {
+        name: Binding(value.type_name, "constant", 0, writable=False)
+        for name, value in constants.items()
+    }
+
+
+def resolve_value_type(
+    type_name: ValueType,
+    line: int,
+    records: dict[str, RecordDecl],
+    constants: dict[str, ConstValue],
+    functions: dict[str, Function],
+    env: dict[str, ValueType],
+) -> ValueType:
+    if isinstance(type_name, BufferType):
+        return resolve_buffer_type(type_name, line, records, constants, functions, env)
+    return type_name
+
+
+def resolve_buffer_type(
+    buffer_type: BufferType,
+    line: int,
+    records: dict[str, RecordDecl],
+    constants: dict[str, ConstValue],
+    functions: dict[str, Function],
+    env: dict[str, ValueType],
+) -> BufferType:
+    length = evaluate_buffer_length(buffer_type.length, line, records, constants, functions, env)
+    return BufferType(length, buffer_type.element_type)
+
+
+def evaluate_buffer_length(
+    length: int | Expr,
+    line: int,
+    records: dict[str, RecordDecl],
+    constants: dict[str, ConstValue],
+    functions: dict[str, Function],
+    env: dict[str, ValueType],
+) -> int:
+    if isinstance(length, int):
+        value = length
+        value_type: ValueType = "i32"
+    else:
+        merged_env = {**_constant_env_types(constants), **env}
+        try:
+            const_value = evaluate_const_expr(length, merged_env, functions, records, constants)
+        except CompileTimeEvaluationError as exc:
+            raise InscriptionError("buffer length must be compile-time evaluable", exc.line or line) from exc
+        value = int(const_value.value)
+        value_type = const_value.type_name
+    if not is_integer_type(value_type):
+        raise InscriptionError(f"buffer length must be an integer type, got {format_type(value_type)}", line)
+    if value < 1:
+        raise InscriptionError("buffer length must be at least 1", line)
+    return value
+
+
+def _check_compile_time_check(
+    stmt: CheckStmt,
+    env: dict[str, ValueType],
+    functions: dict[str, Function],
+    records: dict[str, RecordDecl],
+    constants: dict[str, ConstValue],
+) -> None:
+    merged_env = {**_constant_env_types(constants), **env}
+    actual = infer_expr_type(stmt.expr, merged_env, functions, records, constants=constants)
+    if actual != "i1":
+        raise InscriptionError(f"check expression must have type i1, got {format_type(actual)}", stmt.line)
+    try:
+        value = evaluate_const_expr(stmt.expr, merged_env, functions, records, constants, expected="i1")
+    except CompileTimeEvaluationError as exc:
+        detail = str(exc)
+        suffix = f"; {detail}" if detail.endswith("runtime binding") else ""
+        raise InscriptionError(f"check expression must be compile-time evaluable{suffix}", exc.line or stmt.line) from exc
+    if value.value is not True:
+        raise InscriptionError("compile-time check failed", stmt.line)
+
+
+def evaluate_const_expr(
+    expr: Expr,
+    env: dict[str, ValueType],
+    functions: dict[str, Function],
+    records: dict[str, RecordDecl],
+    constants: dict[str, ConstValue],
+    *,
+    expected: ValueType | None = None,
+) -> ConstValue:
+    type_name = infer_expr_type(expr, env, functions, records, expected=expected, constants=constants)
+    if not isinstance(type_name, str):
+        raise CompileTimeEvaluationError("record value is not compile-time evaluable", getattr(expr, "line", None))
+
+    if isinstance(expr, Integer):
+        assert is_integer_type(type_name)
+        return ConstValue(type_name, normalize_integer(expr.value, type_name))
+    if isinstance(expr, Boolean):
+        return ConstValue("i1", expr.value)
+    if isinstance(expr, Variable):
+        if expr.name in constants:
+            value = constants[expr.name]
+            if expected is not None and value.type_name != expected:
+                require_type(value.type_name, expected, expr.line)
+            return value
+        if expr.name in env:
+            raise CompileTimeEvaluationError(f"{expr.name} is a runtime binding", expr.line)
+        raise InscriptionError(f"unknown binding {expr.name}", expr.line)
+    if isinstance(expr, LengthOf):
+        binding_type = env.get(expr.name)
+        if binding_type is None:
+            raise InscriptionError(f"unknown binding {expr.name}", expr.line)
+        if not isinstance(binding_type, BufferType):
+            raise InscriptionError(f"length of {expr.name} requires a buffer, got {format_type(binding_type)}", expr.line)
+        if not isinstance(binding_type.length, int):
+            raise CompileTimeEvaluationError(f"length of {expr.name} is not compile-time evaluable", expr.line)
+        return ConstValue("i32", binding_type.length)
+    if isinstance(expr, SizeOfType):
+        return ConstValue("i32", layout_info(records[expr.type_name]).size)
+    if isinstance(expr, AlignmentOfType):
+        return ConstValue("i32", layout_info(records[expr.type_name]).alignment)
+    if isinstance(expr, OffsetOfField):
+        return ConstValue("i32", layout_info(records[expr.type_name]).field_offsets[expr.field])
+    if isinstance(expr, Cast):
+        source = evaluate_const_expr(expr.expr, env, functions, records, constants)
+        assert is_integer_type(source.type_name)
+        assert is_integer_type(expr.target_type)
+        return ConstValue(expr.target_type, cast_const_value(source.value, source.type_name, expr.target_type))
+    if isinstance(expr, Unary):
+        operand_expected = "i1" if expr.op == "not" else type_name
+        operand = evaluate_const_expr(expr.expr, env, functions, records, constants, expected=operand_expected)
+        if expr.op == "not":
+            return ConstValue("i1", not bool(operand.value))
+        if expr.op == "bitwise not":
+            return ConstValue(type_name, normalize_integer(~to_bits(int(operand.value), type_name), type_name))
+    if isinstance(expr, Binary):
+        if expr.op in {"and", "or"}:
+            left = evaluate_const_expr(expr.left, env, functions, records, constants, expected="i1")
+            right = evaluate_const_expr(expr.right, env, functions, records, constants, expected="i1")
+            return ConstValue("i1", bool(left.value) and bool(right.value) if expr.op == "and" else bool(left.value) or bool(right.value))
+        left = evaluate_const_expr(expr.left, env, functions, records, constants, expected=type_name)
+        right = evaluate_const_expr(expr.right, env, functions, records, constants, expected=type_name)
+        return ConstValue(type_name, evaluate_integer_binary(expr.op, int(left.value), int(right.value), type_name, expr.line))
+    if isinstance(expr, Comparison):
+        operand_type = infer_comparison_operand_type(expr, env, functions, records)
+        left = evaluate_const_expr(expr.left, env, functions, records, constants, expected=operand_type)
+        right = evaluate_const_expr(expr.right, env, functions, records, constants, expected=operand_type)
+        return ConstValue("i1", evaluate_comparison(expr.pred, int(left.value), int(right.value), operand_type))
+    raise CompileTimeEvaluationError("expression is not compile-time evaluable", getattr(expr, "line", None))
+
+
+def normalize_integer(value: int, type_name: TypeName) -> int:
+    bits = TYPE_WIDTHS[type_name]
+    mask = (1 << bits) - 1
+    raw = value & mask
+    if is_signed_type(type_name) and raw >= (1 << (bits - 1)):
+        return raw - (1 << bits)
+    return raw
+
+
+def to_bits(value: int, type_name: TypeName) -> int:
+    return value & ((1 << TYPE_WIDTHS[type_name]) - 1)
+
+
+def cast_const_value(value: int | bool, source_type: TypeName, target_type: TypeName) -> int:
+    source_bits = to_bits(int(value), source_type)
+    if type_width(source_type) == type_width(target_type):
+        return normalize_integer(source_bits, target_type)
+    if type_width(source_type) > type_width(target_type):
+        return normalize_integer(source_bits, target_type)
+    if is_signed_type(source_type):
+        return normalize_integer(normalize_integer(source_bits, source_type), target_type)
+    return normalize_integer(source_bits, target_type)
+
+
+def trunc_div(left: int, right: int) -> int:
+    quotient = abs(left) // abs(right)
+    return -quotient if (left < 0) ^ (right < 0) else quotient
+
+
+def evaluate_integer_binary(op: str, left: int, right: int, type_name: TypeName, line: int) -> int:
+    if op == "plus":
+        return normalize_integer(left + right, type_name)
+    if op == "minus":
+        return normalize_integer(left - right, type_name)
+    if op == "times":
+        return normalize_integer(left * right, type_name)
+    if op == "divided by":
+        if right == 0:
+            raise InscriptionError("constant expression divides by zero", line)
+        result = trunc_div(left, right) if is_signed_type(type_name) else to_bits(left, type_name) // to_bits(right, type_name)
+        return normalize_integer(result, type_name)
+    if op == "remainder":
+        if right == 0:
+            raise InscriptionError("constant expression divides by zero", line)
+        result = left - trunc_div(left, right) * right if is_signed_type(type_name) else to_bits(left, type_name) % to_bits(right, type_name)
+        return normalize_integer(result, type_name)
+    if op == "bitwise and":
+        return normalize_integer(to_bits(left, type_name) & to_bits(right, type_name), type_name)
+    if op == "bitwise xor":
+        return normalize_integer(to_bits(left, type_name) ^ to_bits(right, type_name), type_name)
+    if op == "bitwise or":
+        return normalize_integer(to_bits(left, type_name) | to_bits(right, type_name), type_name)
+    if op in {"shifted left by", "shifted right by"}:
+        amount = int(right)
+        if amount < 0 or amount >= type_width(type_name):
+            raise InscriptionError(f"constant shift amount {amount} is out of range for {type_name}", line)
+        if op == "shifted left by":
+            return normalize_integer(to_bits(left, type_name) << amount, type_name)
+        if is_signed_type(type_name):
+            return normalize_integer(left >> amount, type_name)
+        return normalize_integer(to_bits(left, type_name) >> amount, type_name)
+    raise AssertionError(op)  # pragma: no cover
+
+
+def evaluate_comparison(pred: str, left: int, right: int, type_name: TypeName) -> bool:
+    lhs = left if is_signed_type(type_name) else to_bits(left, type_name)
+    rhs = right if is_signed_type(type_name) else to_bits(right, type_name)
+    if pred == "eq":
+        return lhs == rhs
+    if pred == "ne":
+        return lhs != rhs
+    if pred == "slt":
+        return lhs < rhs
+    if pred == "sle":
+        return lhs <= rhs
+    if pred == "sgt":
+        return lhs > rhs
+    if pred == "sge":
+        return lhs >= rhs
+    raise AssertionError(pred)  # pragma: no cover
+
+
 def infer_expr_type(
     expr: Expr,
     env: dict[str, ValueType],
@@ -734,7 +1101,9 @@ def infer_expr_type(
     records: dict[str, RecordDecl],
     *,
     expected: ValueType | None = None,
+    constants: dict[str, ConstValue] | None = None,
 ) -> ValueType:
+    constants = constants or {}
     if isinstance(expr, Integer):
         if expected is not None:
             if not is_integer_type(expected):
@@ -749,7 +1118,7 @@ def infer_expr_type(
             require_type("i1", expected, expr.line)
         return "i1"
     if isinstance(expr, Variable):
-        actual = _lookup_binding_type(expr.name, expr.line, env)
+        actual = constants[expr.name].type_name if expr.name in constants and expr.name not in env else _lookup_binding_type(expr.name, expr.line, env)
         if isinstance(actual, BufferType):
             raise InscriptionError(f"buffer {expr.name} cannot be used as a scalar value; use `{expr.name} at index`", expr.line)
         if isinstance(actual, RecordType):
@@ -765,7 +1134,7 @@ def infer_expr_type(
         return actual
     if isinstance(expr, BufferLoad):
         buffer_type = _require_buffer_type(expr.name, expr.line, env)
-        _check_buffer_index(expr.name, buffer_type, expr.index, env, functions, records)
+        _check_buffer_index(expr.name, buffer_type, expr.index, env, functions, records, constants)
         if expected is not None:
             assert isinstance(expected, str)
             require_type(buffer_type.element_type, expected, expr.line)
@@ -776,6 +1145,8 @@ def infer_expr_type(
             raise InscriptionError(f"unknown binding {expr.name}", expr.line)
         if not isinstance(binding_type, BufferType):
             raise InscriptionError(f"length of {expr.name} requires a buffer, got {format_type(binding_type)}", expr.line)
+        if not isinstance(binding_type.length, int):
+            raise InscriptionError("buffer length must be compile-time evaluable", expr.line)
         if binding_type.length > INTEGER_RANGES["i32"][1]:
             raise InscriptionError(f"buffer length {binding_type.length} does not fit in i32", expr.line)
         if expected is not None:
@@ -815,7 +1186,7 @@ def infer_expr_type(
             raise InscriptionError(f"expected {format_type(expected)}, got {format_type(actual)}", expr.line)
         return actual
     if isinstance(expr, LayoutRead):
-        actual = infer_layout_read_type(expr, env, functions, records)
+        actual = infer_layout_read_type(expr, env, functions, records, constants)
         if expected is not None and actual != expected:
             raise InscriptionError(f"expected {format_type(expected)}, got {format_type(actual)}", expr.line)
         return actual
@@ -831,7 +1202,7 @@ def infer_expr_type(
             raise InscriptionError(f"phrase `{target.display_name}` does not return a value", expr.line)
         if isinstance(target.return_type, RecordType):
             raise InscriptionError("record return types are not supported in v0.7", expr.line)
-        _check_call_argument_types(expr, target, env, functions, records)
+        _check_call_argument_types(expr, target, env, functions, records, constants)
         if expected is not None:
             assert isinstance(expected, str)
             require_type(target.return_type, expected, expr.line)
@@ -1142,6 +1513,7 @@ def infer_layout_read_type(
     env: dict[str, ValueType],
     functions: dict[str, Function],
     records: dict[str, RecordDecl],
+    constants: dict[str, ConstValue] | None = None,
 ) -> RecordType:
     record = _require_layout_record_decl(expr.type_name, expr.line, records, f"read {expr.type_name}")
     buffer_type = _require_buffer_type(expr.buffer_name, expr.line, env)
@@ -1158,6 +1530,7 @@ def infer_layout_read_type(
         env,
         functions,
         records,
+        constants,
     )
     return RecordType(expr.type_name)
 
@@ -1169,10 +1542,14 @@ def _check_buffer_index(
     env: dict[str, ValueType],
     functions: dict[str, Function],
     records: dict[str, RecordDecl],
+    constants: dict[str, ConstValue] | None = None,
 ) -> None:
-    if isinstance(index, Integer) and not 0 <= index.value < buffer_type.length:
+    constants = constants or {}
+    static_index = _static_integer_value(index, env, functions, records, constants)
+    assert isinstance(buffer_type.length, int)
+    if static_index is not None and not 0 <= static_index < buffer_type.length:
         raise InscriptionError(
-            f"buffer index {index.value} is out of bounds for buffer {name} of length {buffer_type.length}", index.line
+            f"buffer index {static_index} is out of bounds for buffer {name} of length {buffer_type.length}", getattr(index, "line", None)
         )
     index_type = infer_expr_type(index, env, functions, records)
     if not is_integer_type(index_type):
@@ -1192,17 +1569,37 @@ def _check_layout_index(
     env: dict[str, ValueType],
     functions: dict[str, Function],
     records: dict[str, RecordDecl],
+    constants: dict[str, ConstValue] | None = None,
 ) -> None:
-    if isinstance(index, Integer) and not 0 <= index.value <= buffer_type.length - record_size:
+    constants = constants or {}
+    static_index = _static_integer_value(index, env, functions, records, constants)
+    assert isinstance(buffer_type.length, int)
+    if static_index is not None and not 0 <= static_index <= buffer_type.length - record_size:
         raise InscriptionError(
-            f"{action} {type_name} at index {index.value} exceeds buffer {buffer_name} of length {buffer_type.length}",
-            index.line,
+            f"{action} {type_name} at index {static_index} exceeds buffer {buffer_name} of length {buffer_type.length}",
+            getattr(index, "line", None),
         )
     index_type = infer_expr_type(index, env, functions, records)
     if not is_integer_type(index_type):
         raise InscriptionError(
             f"{index_label} index must be an integer type, got {format_type(index_type)}", getattr(index, "line", None)
         )
+
+
+def _static_integer_value(
+    expr: Expr,
+    env: dict[str, ValueType],
+    functions: dict[str, Function],
+    records: dict[str, RecordDecl],
+    constants: dict[str, ConstValue],
+) -> int | None:
+    try:
+        value = evaluate_const_expr(expr, {**_constant_env_types(constants), **env}, functions, records, constants)
+    except (CompileTimeEvaluationError, InscriptionError):
+        return None
+    if not is_integer_type(value.type_name):
+        return None
+    return int(value.value)
 
 
 def _check_integer_literal_range(value: int, type_name: TypeName, line: int) -> None:

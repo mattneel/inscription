@@ -15,6 +15,7 @@ from .ast import (
     Call,
     CallStmt,
     Cast,
+    CheckStmt,
     Comparison,
     Expr,
     FieldAccess,
@@ -48,6 +49,7 @@ from .semantic import (
     all_ones_constant_value,
     analyze,
     byte_width,
+    constant_table,
     function_table,
     infer_comparison_operand_type,
     infer_expr_type,
@@ -56,6 +58,8 @@ from .semantic import (
     memref_type,
     mlir_type,
     record_table,
+    resolve_buffer_type,
+    resolve_function_table,
     type_width,
 )
 
@@ -119,8 +123,10 @@ def emit_mlir(program: Program) -> str:
 
 class MlirEmitter:
     def __init__(self, program: Program):
-        self.functions = function_table(program)
         self.records = record_table(program)
+        raw_functions = function_table(program)
+        self.top_constants = constant_table(program, self.records, raw_functions)
+        self.functions = resolve_function_table(raw_functions, self.records, self.top_constants)
         self.counter = 0
         self.constants: dict[ConstantKey, Value] = {}
         self.binding_order: list[str] = []
@@ -145,6 +151,7 @@ class MlirEmitter:
         return "\n".join(lines) + "\n"
 
     def emit_function(self, fn: Function, lines: list[str]) -> None:
+        fn = self.functions[fn.name]
         self.counter = 0
         self.constants = {}
         self.binding_order = [param.name for param in fn.params if not isinstance(param.type_name, BufferType | RecordType)]
@@ -220,9 +227,13 @@ class MlirEmitter:
                 self.emit_body_stmt(stmt, env, lines, indent)
 
     def emit_body_stmt(self, stmt: Stmt, env: dict[str, EnvValue], lines: list[str], indent: str) -> None:
+        if isinstance(stmt, CheckStmt):
+            return
         if isinstance(stmt, SetStmt):
             env_types = self.env_types(env)
-            type_name = stmt.type_name or infer_expr_type(stmt.expr, env_types, self.functions, self.records)
+            type_name = stmt.type_name or infer_expr_type(
+                stmt.expr, env_types, self.functions, self.records, constants=self.top_constants
+            )
             if isinstance(type_name, RecordType):
                 env[stmt.name] = self.emit_record_expr(stmt.expr, env, lines, indent, expected=type_name)
                 self.record_order.append(stmt.name)
@@ -277,7 +288,9 @@ class MlirEmitter:
         expected: TypeName | None = None,
     ) -> Value:
         env_types = self.env_types(env)
-        type_name = infer_expr_type(expr, env_types, self.functions, self.records, expected=expected)
+        type_name = infer_expr_type(
+            expr, env_types, self.functions, self.records, expected=expected, constants=self.top_constants
+        )
         if isinstance(type_name, RecordType):
             raise AssertionError("record expression used where scalar value was expected")  # pragma: no cover
         if isinstance(expr, Integer):
@@ -285,6 +298,8 @@ class MlirEmitter:
         if isinstance(expr, Boolean):
             return self.emit_boolean(expr.value, lines, indent)
         if isinstance(expr, Variable):
+            if expr.name in self.top_constants:
+                return self.emit_const_value(self.top_constants[expr.name], lines, indent)
             return self.require_scalar(env[expr.name])
         if isinstance(expr, BufferLoad):
             return self.emit_buffer_load(expr, env, lines, indent)
@@ -415,8 +430,15 @@ class MlirEmitter:
         lines.append(f"{indent}{out.name} = arith.constant {literal}")
         return out
 
+    def emit_const_value(self, value, lines: list[str], indent: str) -> Value:
+        if value.type_name == "i1":
+            return self.emit_boolean(bool(value.value), lines, indent)
+        return self.emit_integer(int(value.value), value.type_name, lines, indent)
+
     def emit_buffer_binding(self, stmt: BufferBinding, env: dict[str, EnvValue], lines: list[str], indent: str) -> None:
-        buffer_type = stmt.buffer_type
+        buffer_type = resolve_buffer_type(
+            stmt.buffer_type, stmt.line, self.records, self.top_constants, self.functions, self.env_types(env)
+        )
         buffer = BufferStorage(self.fresh(), buffer_type)
         lines.append(f"{indent}{buffer.name} = memref.alloca() : {memref_type(buffer_type)}")
         fill = self.emit_expr(stmt.fill, env, lines, indent, expected=buffer_type.element_type)
@@ -751,7 +773,7 @@ class MlirEmitter:
         self.for_counter += 1
         arg_suffix = "" if self.for_depth == 0 else f"_for{loop_id}"
         env_types = self.env_types(env)
-        loop_type = infer_expr_type(stmt.start, env_types, self.functions, self.records)
+        loop_type = infer_expr_type(stmt.start, env_types, self.functions, self.records, constants=self.top_constants)
         assert not isinstance(loop_type, BufferType | RecordType)
         start = self.emit_index(stmt.start, env, lines, indent)
         end = self.emit_index(stmt.end, env, lines, indent)
@@ -1012,7 +1034,7 @@ class MlirEmitter:
         env[slot.name] = RecordStorage(record.record_type, fields)
 
     def env_types(self, env: dict[str, EnvValue]) -> dict[str, ValueType]:
-        result: dict[str, ValueType] = {}
+        result: dict[str, ValueType] = {name: value.type_name for name, value in self.top_constants.items()}
         for name, value in env.items():
             if isinstance(value, BufferStorage):
                 result[name] = value.buffer_type

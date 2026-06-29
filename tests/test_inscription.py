@@ -146,6 +146,8 @@ class CompilerTests(unittest.TestCase):
                 (GOLDENS / "53_layout_introspection.ins").read_text(),
                 (GOLDENS / "55_layout_roundtrip.ins").read_text(),
                 (GOLDENS / "58_layout_write_procedure.ins").read_text(),
+                (GOLDENS / "60_constants_layout_checks.ins").read_text(),
+                (GOLDENS / "63_phrase_body_check.ins").read_text(),
                 "highlight new widths a: i8 and b: i16 and c: u64 gives u64:\n  c bitwise xor c\n",
             ]
         )
@@ -324,6 +326,20 @@ main gives i32:
         self.assertIn("arith.shrui", roundtrip_mlir)
         self.assertIn("arith.trunci", roundtrip_mlir)
         self.assertNotIn("llvm.struct", roundtrip_mlir)
+
+    def test_v09_constants_checks_and_compile_time_lengths_emit_inline_constants(self):
+        constants_mlir = compile_source(self.fixture("constants_layout_checks.ins"))
+        self.assertIn("arith.constant 6 : i32", constants_mlir)
+        self.assertIn("arith.constant 4 : i32", constants_mlir)
+        self.assertNotIn("global", constants_mlir)
+
+        length_mlir = compile_source(self.fixture("constant_buffer_length.ins"))
+        self.assertIn("memref<4xi32>", length_mlir)
+        self.assertIn("func.func @sum_cells(%cells: memref<4xi32>) -> i32", length_mlir)
+
+        check_mlir = compile_source(self.fixture("phrase_body_check.ins"))
+        self.assertIn("memref<6xi8>", check_mlir)
+        self.assertNotIn("check", check_mlir)
 
     def test_record_parameter_rebinding_does_not_mutate_caller(self):
         source = """record Point:
@@ -821,6 +837,64 @@ main gives i32:
             "write used as expression": (
                 "packed layout record Word:\n  value: u16\n\nbad gives i32:\n  let bytes be buffer of 2 u8 filled with 0\n  let word be Word with value be 1\n  let result be write word into bytes at 0\n  0\n",
                 "write is a step and cannot be used as an expression",
+            ),
+            "duplicate constant": ("constant x: i32 be 1\nconstant x: i32 be 2\n", "constant x is already defined"),
+            "constant collides with record": (
+                "record Point:\n  x: i32\n\nconstant Point: i32 be 1\n",
+                "constant Point conflicts with record Point",
+            ),
+            "constant forward reference": (
+                "constant b: i32 be a plus 1\nconstant a: i32 be 1\n",
+                "unknown binding a",
+            ),
+            "constant initializer type mismatch": ("constant x: i32 be true\n", "constant x must have type i32, got i1"),
+            "check expression not compile-time evaluable": (
+                "identity of x: i32 gives i32:\n  x\n\nbad of x: i32 gives i32:\n  check identity of x is equal to 1\n  x\n",
+                "check expression must be compile-time evaluable",
+            ),
+            "check expression is not i1": ("check 1\n", "check expression must have type i1, got i32"),
+            "failing top-level check": ("check 1 is equal to 2\n", "compile-time check failed"),
+            "failing phrase-body check": (
+                "bad gives i32:\n  check 1 is equal to 2\n  0\n",
+                "compile-time check failed",
+            ),
+            "rebind constant": (
+                "constant x: i32 be 1\n\nbad gives i32:\n  x becomes 2\n  x\n",
+                "cannot rebind constant x",
+            ),
+            "local binding shadows constant": (
+                "constant x: i32 be 1\n\nbad gives i32:\n  let x be 2\n  x\n",
+                "binding x conflicts with constant x",
+            ),
+            "buffer length constant is boolean": (
+                "constant n: i1 be true\n\nbad gives i32:\n  let cells be buffer of n i32 filled with 0\n  0\n",
+                "buffer length must be an integer type, got i1",
+            ),
+            "buffer length constant is zero": (
+                "constant n: i32 be 0\n\nbad gives i32:\n  let cells be buffer of n i32 filled with 0\n  0\n",
+                "buffer length must be at least 1",
+            ),
+            "buffer length expression not compile-time evaluable": (
+                "bad of n: i32 gives i32:\n  let cells be buffer of (n plus 1) i32 filled with 0\n  0\n",
+                "buffer length must be compile-time evaluable",
+            ),
+            "buffer parameter length mismatch after constant evaluation": (
+                "constant four: i32 be 4\nconstant five: i32 be 5\n\nsum cells cells: buffer of four i32 gives i32:\n  0\n\nbad gives i32:\n  let cells be buffer of five i32 filled with 0\n  sum cells cells\n",
+                "buffer argument cells must have type buffer of 4 i32, got buffer of 5 i32",
+            ),
+            "constant layout read out of bounds": (
+                "packed layout record Word:\n  value: u16\n\nconstant start: i32 be 1\n\nbad gives i32:\n  let bytes be buffer of (size of Word) u8 filled with 0\n  let word be read Word from bytes at start\n  0\n",
+                "read Word at index 1 exceeds buffer bytes of length 2",
+            ),
+            "constant layout write out of bounds": (
+                "packed layout record Word:\n  value: u16\n\nconstant start: i32 be 1\n\nbad gives i32:\n  let bytes be buffer of (size of Word) u8 filled with 0\n  let word be Word with value be 1\n  write word into bytes at start\n  0\n",
+                "write Word at index 1 exceeds buffer bytes of length 2",
+            ),
+            "constant division by zero": ("constant x: i32 be 1 divided by 0\n", "constant expression divides by zero"),
+            "constant shift too large": ("constant x: u8 be 1 shifted left by 8\n", "constant shift amount 8 is out of range for u8"),
+            "check used as expression": (
+                "bad gives i32:\n  let x be check 1 is equal to 1\n  0\n",
+                "check is a step and cannot be used as an expression",
             ),
         }
         for name, (source, contains) in cases.items():

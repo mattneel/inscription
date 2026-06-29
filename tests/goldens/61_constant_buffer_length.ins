@@ -1,0 +1,11 @@
+constant cell_count: i32 be 4
+
+sum cells cells: buffer of cell_count i32 gives i32:
+  let total be 0
+  for each index i of cells:
+    total becomes total plus cells at i
+  total
+
+main gives i32:
+  let cells be buffer of cell_count i32 filled with 2
+  sum cells cells

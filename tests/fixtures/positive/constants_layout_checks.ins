@@ -1,0 +1,13 @@
+layout record Header:
+  tag: u8
+  length: u16
+  flags: u8
+
+constant header_size: i32 be size of Header
+constant flags_offset: i32 be offset of flags in Header
+
+check header_size is equal to 6
+check flags_offset is equal to 4
+
+main gives i32:
+  header_size plus flags_offset
