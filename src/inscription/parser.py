@@ -39,6 +39,7 @@ from .ast import (
     RecordFieldDecl,
     RecordFieldInit,
     RecordType,
+    RequireStmt,
     ReturnType,
     ReturnStmt,
     SetStmt,
@@ -63,7 +64,7 @@ RESERVED = {
     "check", "constant", "divided", "do", "does", "each", "else", "equal", "false", "filled", "float", "for", "from",
     "function", "gives", "greater", "i1", "i32", "i64", "if", "in", "index", "input", "into", "import",
     "i8", "i16", "is", "layout", "length", "less", "let", "memref", "minus", "module", "no", "not", "or", "otherwise", "output", "packed", "parameters",
-    "pointer", "plus", "print", "read", "remainder", "return", "set", "shifted", "size", "takes", "than", "then", "times", "to",
+    "pointer", "plus", "print", "read", "remainder", "require", "return", "set", "shifted", "size", "takes", "than", "then", "times", "to",
     "track", "true", "u8", "u16", "u32", "u64", "up", "record", "view", "when", "while", "with", "write", "xor", "zero",
 }
 TYPE_NAMES: set[str] = {"i1", "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64"}
@@ -201,6 +202,8 @@ class Parser:
                 checks.append(self._parse_check_stmt(line))
                 index += 1
                 continue
+            if line.text.startswith("require "):
+                raise InscriptionError("require may only appear inside phrase bodies", line.number)
             if not self._looks_like_phrase_header(line):
                 raise InscriptionError("expected phrase definition, record declaration, constant declaration, check, module, or import", line.number)
             template, return_type = self._parse_phrase_header(line)
@@ -233,7 +236,7 @@ class Parser:
         return (
             self._looks_like_phrase_header(line)
             or self._looks_like_record_header(line)
-            or (line.indent == 0 and (line.text.startswith("constant ") or line.text.startswith("check ") or line.text.startswith("module ") or line.text.startswith("import ")))
+            or (line.indent == 0 and (line.text.startswith("constant ") or line.text.startswith("check ") or line.text.startswith("module ") or line.text.startswith("import ") or line.text.startswith("require ")))
         )
 
     def _parse_record_decl(self, index: int) -> tuple[RecordDecl, int]:
@@ -277,6 +280,11 @@ class Parser:
         if line.is_header:
             raise InscriptionError("malformed check", line.number)
         return CheckStmt(self._parse_expression(line.text[len("check ") :], line.number), line.number)
+
+    def _parse_require_stmt(self, line: Line) -> RequireStmt:
+        if line.is_header:
+            raise InscriptionError("malformed require", line.number)
+        return RequireStmt(self._parse_expression(line.text[len("require ") :], line.number), line.number)
 
     def _looks_like_phrase_header(self, line: Line) -> bool:
         return line.is_header and re.fullmatch(r".+? (?:gives .+|does)", line.text) is not None
@@ -391,7 +399,7 @@ class Parser:
                 value_lines.append(current)
                 index += 1
         if not value_lines:
-            raise InscriptionError(f"phrase '{name}' must evaluate to a value", line)
+            raise InscriptionError("gives phrase body must end with a value expression", line)
         return [*body_items, ReturnStmt(self._parse_value_block(value_lines), value_lines[-1].number)], index
 
     def _is_gives_body_item_start(self, line: Line, index: int) -> bool:
@@ -418,6 +426,7 @@ class Parser:
     def _is_body_item_start(self, line: Line, *, include_phrase_calls: bool) -> bool:
         return (
             line.text.startswith("check ")
+            or line.text.startswith("require ")
             or line.text.startswith("let ")
             or line.text.startswith("track ")
             or self._layout_write_match(line) is not None
@@ -434,6 +443,8 @@ class Parser:
         current = self.lines[index]
         if current.text.startswith("check "):
             return self._parse_check_stmt(current), index + 1
+        if current.text.startswith("require "):
+            return self._parse_require_stmt(current), index + 1
         if current.text.startswith("let "):
             return self._parse_let(current), index + 1
         if current.text.startswith("track "):
@@ -1022,6 +1033,8 @@ class ExpressionParser:
         token = self.pop()
         if token == "check":
             raise InscriptionError("check is a step and cannot be used as an expression", self.line)
+        if token == "require":
+            raise InscriptionError("require is a step and cannot be used as an expression", self.line)
         if token == "write":
             raise InscriptionError("write is a step and cannot be used as an expression", self.line)
         if token == "(":

@@ -18,10 +18,12 @@ def main(argv: list[str] | None = None) -> int:
     compile_p.add_argument("-o", "--output", type=Path)
     compile_p.add_argument("--verify", action="store_true", help="verify emitted MLIR with LLVM 22 mlir-opt")
     compile_p.add_argument("--module-root", type=Path, help="root directory for resolving imported modules")
+    compile_p.add_argument("--runtime-checks", action="store_true", help="emit runtime assertions for dynamic storage bounds")
 
     run_p = sub.add_parser("run", help="compile and execute through LLVM 22 lli")
     run_p.add_argument("source", type=Path)
     run_p.add_argument("--module-root", type=Path, help="root directory for resolving imported modules")
+    run_p.add_argument("--runtime-checks", action="store_true", help="emit runtime assertions for dynamic storage bounds")
 
     highlight_p = sub.add_parser("highlight", help="syntax-highlight an Inscription source file")
     highlight_p.add_argument("source", type=Path)
@@ -36,7 +38,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         if args.command == "compile":
-            mlir = compile_file(args.source, module_root=args.module_root)
+            mlir = compile_file(args.source, module_root=args.module_root, runtime_checks=args.runtime_checks)
             if args.verify:
                 verify_mlir(mlir)
             if args.output:
@@ -45,7 +47,7 @@ def main(argv: list[str] | None = None) -> int:
                 sys.stdout.write(mlir)
             return 0
         if args.command == "run":
-            result = run_file(args.source, module_root=args.module_root)
+            result = run_file(args.source, module_root=args.module_root, runtime_checks=args.runtime_checks)
             return result.exit_status
         if args.command == "highlight":
             from .highlighting import HighlightError, highlight_source

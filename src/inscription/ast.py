@@ -324,6 +324,12 @@ class CheckStmt:
 
 
 @dataclass(frozen=True)
+class RequireStmt:
+    expr: Expr
+    line: int
+
+
+@dataclass(frozen=True)
 class CallStmt:
     call: Call
     line: int
@@ -370,6 +376,7 @@ class ReturnStmt:
 
 BodyStmt = (
     CheckStmt
+    | RequireStmt
     | SetStmt
     | BufferBinding
     | ViewBinding

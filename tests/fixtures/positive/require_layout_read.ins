@@ -1,0 +1,12 @@
+packed layout record Word:
+  value: u16
+
+read word checked bytes: view of u8 gives i32:
+  require length of bytes is greater than or equal to size of Word
+  let word be read Word from bytes at 0
+  word.value as i32
+
+main gives i32:
+  let bytes be buffer of 2 u8 filled with 0
+  bytes at 0 becomes 42
+  read word checked bytes

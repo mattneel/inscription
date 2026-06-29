@@ -66,9 +66,10 @@ def run_source(
     *,
     source_path: Path | None = None,
     module_root: Path | None = None,
+    runtime_checks: bool = False,
 ) -> RunResult:
     toolchain = toolchain or resolve_toolchain()
-    mlir = compile_source(source, source_path=source_path, module_root=module_root)
+    mlir = compile_source(source, source_path=source_path, module_root=module_root, runtime_checks=runtime_checks)
     with tempfile.TemporaryDirectory(prefix="inscription-run-") as tmp:
         tmp_path = Path(tmp)
         input_mlir = tmp_path / "input.mlir"
@@ -89,9 +90,15 @@ def run_source(
 
 
 
-def run_file(source_path: Path, toolchain: Toolchain | None = None, *, module_root: Path | None = None) -> RunResult:
+def run_file(
+    source_path: Path,
+    toolchain: Toolchain | None = None,
+    *,
+    module_root: Path | None = None,
+    runtime_checks: bool = False,
+) -> RunResult:
     toolchain = toolchain or resolve_toolchain()
-    mlir = compile_file(source_path, module_root=module_root)
+    mlir = compile_file(source_path, module_root=module_root, runtime_checks=runtime_checks)
     with tempfile.TemporaryDirectory(prefix="inscription-run-") as tmp:
         tmp_path = Path(tmp)
         input_mlir = tmp_path / "input.mlir"

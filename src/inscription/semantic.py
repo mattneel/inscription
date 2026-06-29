@@ -37,6 +37,7 @@ from .ast import (
     RecordConstructor,
     RecordDecl,
     RecordType,
+    RequireStmt,
     ReturnStmt,
     SetStmt,
     SizeOfType,
@@ -409,6 +410,9 @@ def _check_body_stmt(
 ) -> None:
     if isinstance(stmt, CheckStmt):
         _check_compile_time_check(stmt, _env_types(bindings), functions, records, constants)
+        return
+    if isinstance(stmt, RequireStmt):
+        _check_require(stmt, _env_types(bindings), functions, records, constants)
         return
     if isinstance(stmt, SetStmt):
         _declare_let(stmt, bindings, functions, records, constants)
@@ -1087,6 +1091,25 @@ def _check_compile_time_check(
         raise InscriptionError(f"check expression must be compile-time evaluable{suffix}", exc.line or stmt.line) from exc
     if value.value is not True:
         raise InscriptionError("compile-time check failed", stmt.line)
+
+
+def _check_require(
+    stmt: RequireStmt,
+    env: dict[str, ValueType],
+    functions: dict[str, Function],
+    records: dict[str, RecordDecl],
+    constants: dict[str, ConstValue],
+) -> None:
+    merged_env = {**_constant_env_types(constants), **env}
+    actual = infer_expr_type(stmt.expr, merged_env, functions, records, constants=constants)
+    if actual != "i1":
+        raise InscriptionError(f"require condition must have type i1, got {format_type(actual)}", stmt.line)
+    try:
+        value = evaluate_const_expr(stmt.expr, merged_env, functions, records, constants, expected="i1")
+    except CompileTimeEvaluationError:
+        return
+    if value.value is not True:
+        raise InscriptionError("require condition is known to be false", stmt.line)
 
 
 def evaluate_const_expr(

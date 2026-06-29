@@ -40,7 +40,7 @@ def _make_lexer():
                 (r"\b(packed)(\s+)(layout)(\s+)(record)(\s+)([A-Z][A-Za-z0-9_]*)", bygroups(Keyword.Declaration, Text.Whitespace, Keyword.Declaration, Text.Whitespace, Keyword.Declaration, Text.Whitespace, Name.Class)),
                 (r"\b(layout)(\s+)(record)(\s+)([A-Z][A-Za-z0-9_]*)", bygroups(Keyword.Declaration, Text.Whitespace, Keyword.Declaration, Text.Whitespace, Name.Class)),
                 (r"\b(record)(\s+)([A-Z][A-Za-z0-9_]*)", bygroups(Keyword.Declaration, Text.Whitespace, Name.Class)),
-                (r"\b(if|let|be|from|of|when|while|for|each|index|up|to|otherwise|zero|buffer|view|filled|with|at|does|gives|length|record|layout|packed|size|alignment|offset|in|read|write|into|constant|check|module|import)\b", Keyword),
+                (r"\b(if|let|be|from|of|when|while|for|each|index|up|to|otherwise|zero|buffer|view|filled|with|at|does|gives|length|record|layout|packed|size|alignment|offset|in|read|write|into|constant|check|require|module|import)\b", Keyword),
                 (r"\b(true|false)\b", Keyword.Constant),
                 (r"\b(becomes|plus|minus|times|divided|by|remainder|and|or|not|as|bitwise|shifted|left|right|xor)\b", Operator.Word),
                 (r"\b(is|equal|less|greater|than)\b", Operator.Word),

@@ -33,6 +33,7 @@ from .ast import (
     Program,
     RecordConstructor,
     RecordType,
+    RequireStmt,
     ReturnStmt,
     SetStmt,
     SizeOfType,
@@ -51,7 +52,9 @@ from .semantic import (
     all_ones_constant_value,
     analyze,
     byte_width,
+    CompileTimeEvaluationError,
     constant_table,
+    evaluate_const_expr,
     function_table,
     infer_comparison_operand_type,
     infer_expr_type,
@@ -149,18 +152,19 @@ def dynamic_memref_type(element_type: TypeName) -> str:
     return f"memref<?x{mlir_type(element_type)}>"
 
 
-def emit_mlir(program: Program) -> str:
+def emit_mlir(program: Program, *, runtime_checks: bool = False) -> str:
     analyze(program)
-    emitter = MlirEmitter(program)
+    emitter = MlirEmitter(program, runtime_checks=runtime_checks)
     return emitter.emit_program(program)
 
 
 class MlirEmitter:
-    def __init__(self, program: Program):
+    def __init__(self, program: Program, *, runtime_checks: bool = False):
         self.records = record_table(program)
         raw_functions = function_table(program)
         self.top_constants = constant_table(program, self.records, raw_functions)
         self.functions = resolve_function_table(raw_functions, self.records, self.top_constants)
+        self.runtime_checks = runtime_checks
         self.counter = 0
         self.constants: dict[ConstantKey, Value] = {}
         self.binding_order: list[str] = []
@@ -276,6 +280,9 @@ class MlirEmitter:
 
     def emit_body_stmt(self, stmt: Stmt, env: dict[str, EnvValue], lines: list[str], indent: str) -> None:
         if isinstance(stmt, CheckStmt):
+            return
+        if isinstance(stmt, RequireStmt):
+            self.emit_require(stmt, env, lines, indent)
             return
         if isinstance(stmt, SetStmt):
             env_types = self.env_types(env)
@@ -495,6 +502,46 @@ class MlirEmitter:
             return self.emit_boolean(bool(value.value), lines, indent)
         return self.emit_integer(int(value.value), value.type_name, lines, indent)
 
+    def emit_require(self, stmt: RequireStmt, env: dict[str, EnvValue], lines: list[str], indent: str) -> None:
+        static = self.static_boolean_value(stmt.expr, env)
+        if static is True:
+            return
+        condition = self.emit_expr(stmt.expr, env, lines, indent, expected="i1")
+        self.emit_runtime_assert(condition, f"require failed at line {stmt.line}", lines, indent)
+
+    def emit_runtime_assert(self, condition: Value, message: str, lines: list[str], indent: str) -> None:
+        escaped = message.replace("\\", "\\\\").replace('"', '\\"')
+        lines.append(f'{indent}cf.assert {condition.name}, "{escaped}"')
+
+    def emit_index_compare(self, pred: str, left: str, right: str, lines: list[str], indent: str) -> Value:
+        out = Value(self.fresh(), "i1")
+        lines.append(f"{indent}{out.name} = arith.cmpi {pred}, {left}, {right} : index")
+        return out
+
+    def emit_i32_compare(self, pred: str, left: Value, right: Value, lines: list[str], indent: str) -> Value:
+        out = Value(self.fresh(), "i1")
+        lines.append(f"{indent}{out.name} = arith.cmpi {pred}, {left.name}, {right.name} : i32")
+        return out
+
+    def emit_storage_length_i32(
+        self, storage: BufferStorage | ViewStorage, lines: list[str], indent: str
+    ) -> Value:
+        if isinstance(storage, BufferStorage):
+            return self.emit_integer(storage.buffer_type.length, "i32", lines, indent)
+        return storage.length
+
+    def emit_storage_length_index(
+        self, storage: BufferStorage | ViewStorage, lines: list[str], indent: str
+    ) -> str:
+        if isinstance(storage, BufferStorage):
+            return self.emit_index_constant(storage.buffer_type.length, lines, indent)
+        return self.emit_value_as_index(storage.length, lines, indent)
+
+    def storage_static_length(self, storage: BufferStorage | ViewStorage) -> int | None:
+        if isinstance(storage, BufferStorage):
+            return storage.buffer_type.length
+        return storage.static_length
+
     def emit_buffer_binding(self, stmt: BufferBinding, env: dict[str, EnvValue], lines: list[str], indent: str) -> None:
         buffer_type = resolve_buffer_type(
             stmt.buffer_type, stmt.line, self.records, self.top_constants, self.functions, self.env_types(env)
@@ -515,6 +562,7 @@ class MlirEmitter:
         source = self.require_indexable(env[stmt.source_name])
         start = self.emit_expr(stmt.start, env, lines, indent, expected="i32")
         count = self.emit_expr(stmt.count, env, lines, indent, expected="i32")
+        self.emit_view_binding_runtime_checks(stmt, source, start, count, env, lines, indent)
         if isinstance(source, BufferStorage):
             base = self.emit_memref_cast_to_dynamic(source.name, memref_type(source.buffer_type), source.buffer_type.element_type, lines, indent)
             root = stmt.source_name
@@ -524,6 +572,38 @@ class MlirEmitter:
         combined_start = self.emit_i32_add(source.start, start, lines, indent)
         static_length = self.static_integer_value(stmt.count, env)
         env[stmt.name] = ViewStorage(source.base, combined_start, count, source.element_type, static_length, source.root)
+
+    def emit_view_binding_runtime_checks(
+        self,
+        stmt: ViewBinding,
+        source: BufferStorage | ViewStorage,
+        start: Value,
+        count: Value,
+        env: dict[str, EnvValue],
+        lines: list[str],
+        indent: str,
+    ) -> None:
+        if not self.runtime_checks:
+            return
+        static_start = self.static_integer_value(stmt.start, env)
+        static_count = self.static_integer_value(stmt.count, env)
+        source_static_length = self.storage_static_length(source)
+        if static_start is not None and static_count is not None and source_static_length is not None:
+            return
+        zero = self.emit_integer(0, "i32", lines, indent)
+        if static_start is None:
+            nonnegative_start = self.emit_i32_compare("sge", start, zero, lines, indent)
+            self.emit_runtime_assert(nonnegative_start, f"view start check failed at line {stmt.line}", lines, indent)
+        if static_count is None:
+            nonnegative_count = self.emit_i32_compare("sge", count, zero, lines, indent)
+            self.emit_runtime_assert(nonnegative_count, f"view count check failed at line {stmt.line}", lines, indent)
+        length = self.emit_storage_length_i32(source, lines, indent)
+        start_in_range = self.emit_i32_compare("sle", start, length, lines, indent)
+        self.emit_runtime_assert(start_in_range, f"view start range check failed at line {stmt.line}", lines, indent)
+        remaining = Value(self.fresh(), "i32")
+        lines.append(f"{indent}{remaining.name} = arith.subi {length.name}, {start.name} : i32")
+        count_in_range = self.emit_i32_compare("sle", count, remaining, lines, indent)
+        self.emit_runtime_assert(count_in_range, f"view count range check failed at line {stmt.line}", lines, indent)
 
     def emit_memref_cast_to_dynamic(
         self,
@@ -574,7 +654,7 @@ class MlirEmitter:
         record = self.records[expected.name]
         info = layout_info(record)
         buffer = self.require_indexable(env[expr.buffer_name])
-        base = self.emit_storage_index(buffer, expr.index, env, lines, indent)
+        base = self.emit_storage_index(buffer, expr.index, env, lines, indent, check_width=info.size)
         fields: dict[str, Value] = {}
         for field in record.fields:
             assert isinstance(field.type_name, str)
@@ -621,7 +701,7 @@ class MlirEmitter:
         record_decl = self.records[record.record_type.name]
         info = layout_info(record_decl)
         buffer = self.require_indexable(env[stmt.buffer_name])
-        base = self.emit_storage_index(buffer, stmt.index, env, lines, indent)
+        base = self.emit_storage_index(buffer, stmt.index, env, lines, indent, check_width=info.size)
         field_bytes: dict[int, tuple[str, int]] = {}
         for field in record_decl.fields:
             assert isinstance(field.type_name, str)
@@ -745,14 +825,47 @@ class MlirEmitter:
         env: dict[str, EnvValue],
         lines: list[str],
         indent: str,
+        *,
+        check_width: int = 1,
     ) -> str:
-        index = self.emit_index(index_expr, env, lines, indent)
+        static_index = self.static_integer_value(index_expr, env)
+        if self.runtime_checks and static_index is None:
+            index_value = self.emit_expr(index_expr, env, lines, indent)
+            index = self.emit_value_as_index(index_value, lines, indent)
+            self.emit_storage_index_runtime_checks(storage, index, index_value, check_width, getattr(index_expr, "line", 0), lines, indent)
+        else:
+            index = self.emit_index(index_expr, env, lines, indent)
         if isinstance(storage, BufferStorage):
             return index
         start = self.emit_value_as_index(storage.start, lines, indent)
         out = self.fresh()
         lines.append(f"{indent}{out} = arith.addi {start}, {index} : index")
         return out
+
+    def emit_storage_index_runtime_checks(
+        self,
+        storage: BufferStorage | ViewStorage,
+        index: str,
+        index_value: Value,
+        check_width: int,
+        line: int,
+        lines: list[str],
+        indent: str,
+    ) -> None:
+        if is_signed_type(index_value.type_name):
+            zero = self.emit_index_constant(0, lines, indent)
+            nonnegative = self.emit_index_compare("sge", index, zero, lines, indent)
+            self.emit_runtime_assert(nonnegative, f"storage lower-bound check failed at line {line}", lines, indent)
+        length = self.emit_storage_length_index(storage, lines, indent)
+        if check_width == 1:
+            in_range = self.emit_index_compare("slt", index, length, lines, indent)
+            self.emit_runtime_assert(in_range, f"storage upper-bound check failed at line {line}", lines, indent)
+            return
+        width = self.emit_index_constant(check_width, lines, indent)
+        max_start = self.fresh()
+        lines.append(f"{indent}{max_start} = arith.subi {length}, {width} : index")
+        in_range = self.emit_index_compare("sle", index, max_start, lines, indent)
+        self.emit_runtime_assert(in_range, f"storage range check failed at line {line}", lines, indent)
 
     def emit_value_as_index(self, value: Value, lines: list[str], indent: str) -> str:
         out = self.fresh()
@@ -769,8 +882,6 @@ class MlirEmitter:
         return ViewStorage(base, start, length, storage.buffer_type.element_type, storage.buffer_type.length, storage.name)
 
     def static_integer_value(self, expr: Expr, env: dict[str, EnvValue]) -> int | None:
-        from .semantic import CompileTimeEvaluationError, evaluate_const_expr
-
         try:
             value = evaluate_const_expr(expr, self.env_types(env), self.functions, self.records, self.top_constants)
         except (CompileTimeEvaluationError, Exception):
@@ -778,6 +889,17 @@ class MlirEmitter:
         if value.type_name == "i1":
             return None
         return int(value.value)
+
+    def static_boolean_value(self, expr: Expr, env: dict[str, EnvValue]) -> bool | None:
+        try:
+            value = evaluate_const_expr(
+                expr, self.env_types(env), self.functions, self.records, self.top_constants, expected="i1"
+            )
+        except (CompileTimeEvaluationError, Exception):
+            return None
+        if value.type_name != "i1":
+            return None
+        return bool(value.value)
 
     def emit_index_to_integer(self, index_value: str, type_name: TypeName, lines: list[str], indent: str) -> Value:
         out = Value(self.fresh(), type_name)

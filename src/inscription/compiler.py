@@ -39,6 +39,7 @@ from .ast import (
     RecordFieldDecl,
     RecordFieldInit,
     RecordType,
+    RequireStmt,
     ReturnStmt,
     SetStmt,
     SizeOfType,
@@ -64,16 +65,19 @@ def compile_source(
     *,
     source_path: Path | None = None,
     module_root: Path | None = None,
+    runtime_checks: bool = False,
 ) -> str:
     if source_path is None and module_root is None and not _source_has_imports(source):
-        return emit_mlir(parse_source(source))
+        return emit_mlir(parse_source(source), runtime_checks=runtime_checks)
     resolver = ModuleResolver(module_root or (source_path.parent if source_path is not None else None))
-    return emit_mlir(resolver.load_entry(source, source_path=source_path))
+    return emit_mlir(resolver.load_entry(source, source_path=source_path), runtime_checks=runtime_checks)
 
 
-def compile_file(source_path: Path, *, module_root: Path | None = None) -> str:
+def compile_file(source_path: Path, *, module_root: Path | None = None, runtime_checks: bool = False) -> str:
     source_path = source_path.resolve()
-    return compile_source(source_path.read_text(), source_path=source_path, module_root=module_root)
+    return compile_source(
+        source_path.read_text(), source_path=source_path, module_root=module_root, runtime_checks=runtime_checks
+    )
 
 
 @dataclass(frozen=True)
@@ -287,6 +291,8 @@ def qualify_buffer_length(length, module_name: str, record_names: set[str], cons
 def qualify_stmt(stmt: Stmt, module_name: str, record_names: set[str], constant_names: set[str]):
     if isinstance(stmt, CheckStmt):
         return CheckStmt(qualify_expr(stmt.expr, module_name, record_names, constant_names), stmt.line)
+    if isinstance(stmt, RequireStmt):
+        return RequireStmt(qualify_expr(stmt.expr, module_name, record_names, constant_names), stmt.line)
     if isinstance(stmt, SetStmt):
         type_name = qualify_type(stmt.type_name, module_name, record_names, constant_names) if stmt.type_name is not None else None
         return SetStmt(stmt.name, type_name, qualify_expr(stmt.expr, module_name, record_names, constant_names), stmt.line)

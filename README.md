@@ -6,7 +6,7 @@ The language is readable, but it is **not** natural-language interpretation: eve
 
 ## Status
 
-This repository currently implements **Inscription v0.11**:
+This repository currently implements **Inscription v0.12**:
 
 - source-visible scalar types: `i1`, signed integers `i8`/`i16`/`i32`/`i64`, and unsigned integers `u8`/`u16`/`u32`/`u64`
 - phrase-shaped function definitions and phrase-shaped calls
@@ -20,12 +20,14 @@ This repository currently implements **Inscription v0.11**:
 - qualified calls to imported phrases, such as `math.add 1 and 2`, lowered to stable module-qualified MLIR symbols
 - top-level typed compile-time constants with `constant name: type be expression`
 - compile-time assertions with `check expression` at top level or inside phrase bodies
+- runtime requirements with `require expression` inside phrase bodies
 - local fixed-size stack buffers with `let name be buffer of LENGTH TYPE filled with expression`, where `LENGTH` may be a literal, constant name, or parenthesized compile-time expression
 - buffer parameter holes with `name: buffer of LENGTH TYPE`
 - buffer/view loads with `name at index` and buffer/view stores with `name at index becomes expression`
 - borrowed non-owning buffer views with `let name be view of source from start for count`
 - view parameter holes with `name: view of TYPE`
 - buffer/view length expressions with `length of name`
+- optional checked storage mode with `--runtime-checks` for dynamic buffer, view, and layout bounds
 - local record values with constructors such as `Point with x be 1 and y be 2`
 - record field reads and rebindings with `p.x` and `p.x becomes expression`
 - compile-time layout introspection with `size of TypeName`, `alignment of TypeName`, and `offset of field in TypeName`
@@ -47,11 +49,11 @@ This repository currently implements **Inscription v0.11**:
 - parenthesized expressions
 - deterministic parsing and semantic checks
 - exact MLIR golden conformance tests in [`tests/goldens`](tests/goldens)
-- MLIR emission using `func`, `arith`, `scf.if`, `scf.for`, `scf.while`, flattened scalar SSA for records, and local `memref.alloca`/`memref.load`/`memref.store` for buffers
+- MLIR emission using `func`, `arith`, `scf.if`, `scf.for`, `scf.while`, flattened scalar SSA for records, local `memref.alloca`/`memref.load`/`memref.store` for buffers, and `cf.assert` when runtime assertions are emitted
 - LLVM 22 lowering and execution through `mlir-opt`, `mlir-translate`, and `lli`
-- no source-level I/O, heap allocation, pointers, dynamic-size buffers, buffer/view return values, buffer/view aliasing beyond conservative same-root rejection, slices, LLVM/C ABI structs, floats, strings, statement-level `return`, `break`, `continue`, macros, import aliases, wildcard imports, generics, global storage, runtime assertions, overloading, type coercions, or natural-language inference
+- no source-level I/O, heap allocation, pointers, dynamic-size buffers, buffer/view return values, buffer/view aliasing beyond conservative same-root rejection, slices, LLVM/C ABI structs, floats, strings, statement-level `return`, `break`, `continue`, macros, import aliases, wildcard imports, generics, global storage, exceptions, result/error values, source strings, source-level runtime assertion messages, overloading, type coercions, or natural-language inference
 
-See [`docs/inscription-v0.11-spec.md`](docs/inscription-v0.11-spec.md) and [`grammar/inscription-v0.11.ebnf`](grammar/inscription-v0.11.ebnf) for the exact current language contract. The immutable previous contracts remain in [`docs/`](docs) and [`grammar/`](grammar), including the v0.10 modules/imports contract.
+See [`docs/inscription-v0.12-spec.md`](docs/inscription-v0.12-spec.md) and [`grammar/inscription-v0.12.ebnf`](grammar/inscription-v0.12.ebnf) for the exact current language contract. The immutable previous contracts remain in [`docs/`](docs) and [`grammar/`](grammar), including the v0.11 borrowed-views contract.
 
 ## Requirements
 
@@ -143,9 +145,9 @@ echo $?
 ## CLI
 
 ```sh
-python -m inscription compile SOURCE [-o OUTPUT] [--verify] [--module-root ROOT]
+python -m inscription compile SOURCE [-o OUTPUT] [--verify] [--module-root ROOT] [--runtime-checks]
 python -m inscription highlight SOURCE [-o OUTPUT] [--format terminal|html] [--style STYLE] [--full]
-python -m inscription run SOURCE [--module-root ROOT]
+python -m inscription run SOURCE [--module-root ROOT] [--runtime-checks]
 python -m inscription check-tools [--show-pipeline]
 ```
 
@@ -231,12 +233,13 @@ main gives i32:
   size of Header plus offset of flags in Header plus copy.tag as i32
 ```
 
-Natural `layout record` declarations use scalar byte widths and alignments, including deterministic padding and final size rounding. `packed layout record` declarations use consecutive byte offsets, size equal to the sum of field widths, and alignment 1. `size of TypeName`, `alignment of TypeName`, and `offset of field in TypeName` are compile-time `i32` constants. `read TypeName from bytes at index` and `write value into bytes at index` operate only on `u8` buffers or `view of u8`, use little-endian multi-byte fields, and write padding bytes as zero. Dynamic layout read/write indices are not runtime-checked in v0.11.
+Natural `layout record` declarations use scalar byte widths and alignments, including deterministic padding and final size rounding. `packed layout record` declarations use consecutive byte offsets, size equal to the sum of field widths, and alignment 1. `size of TypeName`, `alignment of TypeName`, and `offset of field in TypeName` are compile-time `i32` constants. `read TypeName from bytes at index` and `write value into bytes at index` operate only on `u8` buffers or `view of u8`, use little-endian multi-byte fields, and write padding bytes as zero. Dynamic layout read/write indices are unchecked by default; `--runtime-checks` emits runtime assertions for dynamic layout bounds.
 
-Body items may introduce scalar or record `let` bindings, local buffers, local views, scalar/record/field rebindings, buffer/view stores, `does` phrase calls, counted for loops, buffer/view index loops, while loops, or step-level if/otherwise blocks:
+Body items may introduce scalar or record `let` bindings, local buffers, local views, compile-time `check` steps, runtime `require` steps, scalar/record/field rebindings, buffer/view stores, `does` phrase calls, counted for loops, buffer/view index loops, while loops, or step-level if/otherwise blocks:
 
 ```text
 let total be 0
+require total is greater than or equal to 0
 total becomes total plus 1
 let point be Point with x be 1 and y be 2
 point.x becomes point.x plus 1
@@ -258,7 +261,7 @@ otherwise:
   total becomes total
 ```
 
-A top-level constant is introduced with `constant name: type be expression`. Constants are compile-time scalar values, emit inline `arith.constant` operations at use sites, and cannot be rebound or shadowed. They may be used in expressions, for-loop bounds, buffer indices, record constructors, layout checks, and buffer lengths. A compile-time assertion is written `check expression`; checks emit no MLIR and must not depend on runtime phrase holes, runtime lets, record fields, or buffer loads.
+A top-level constant is introduced with `constant name: type be expression`. Constants are compile-time scalar values, emit inline `arith.constant` operations at use sites, and cannot be rebound or shadowed. They may be used in expressions, for-loop bounds, buffer indices, record constructors, layout checks, and buffer lengths. A compile-time assertion is written `check expression`; checks emit no MLIR and must not depend on runtime phrase holes, runtime lets, record fields, or buffer loads. A runtime requirement is written `require expression` inside a phrase body; a dynamic `require` lowers to a deterministic runtime assertion, while a statically false `require` fails compilation.
 
 A local scalar or record binding is introduced with `let`. A scalar binding, a whole record, or an individual record field is rebound with `becomes`. Rebinding lowers to SSA values, `scf.while` loop-carried results, and `scf.if` results, not memory storage.
 
@@ -271,7 +274,7 @@ let cells be buffer of cell_count i32 filled with zero
 let header_bytes be buffer of (size of Header) u8 filled with 0
 ```
 
-Buffers are initialized with `filled with`, read with `name at index`, and written with `name at index becomes value`. Borrowed views are introduced with `let window be view of cells from start for count`, read with `window at index`, and written with `window at index becomes value` when writable. `length of name` returns a buffer's static length or a view's runtime `i32` length. Buffer storage lowers to `memref.alloca`, `memref.load`, and `memref.store`; views lower to a memref base plus `i32` start and length. Literal/static indices are checked at compile time when the length is known. Dynamic indices are not runtime-checked in v0.11; dynamic out-of-bounds access is undefined behavior. Buffers can be borrowed by phrase calls through buffer parameters or view parameters. Views cannot be returned, stored in scalar bindings, dynamically sized, heap allocated, rebound, cast, compared, or used as scalar values.
+Buffers are initialized with `filled with`, read with `name at index`, and written with `name at index becomes value`. Borrowed views are introduced with `let window be view of cells from start for count`, read with `window at index`, and written with `window at index becomes value` when writable. `length of name` returns a buffer's static length or a view's runtime `i32` length. Buffer storage lowers to `memref.alloca`, `memref.load`, and `memref.store`; views lower to a memref base plus `i32` start and length. Literal/static indices are checked at compile time when the length is known. Dynamic storage bounds remain unchecked by default for v0.11 compatibility; pass `--runtime-checks` to emit runtime assertions for dynamic buffer indices, view creation ranges, view indices, and layout read/write bounds. Buffers can be borrowed by phrase calls through buffer parameters or view parameters. Views cannot be returned, stored in scalar bindings, dynamically sized, heap allocated, rebound, cast, compared, or used as scalar values.
 
 
 `gives` phrases return scalar values and can accept read-only buffer parameters:
@@ -401,7 +404,7 @@ left is greater than right
 left is greater than or equal to right
 ```
 
-Important v0.11 rules:
+Important v0.12 rules:
 
 - function names are generated from the leading literal words in a phrase definition
 - phrase names are unique; there is no overloading
@@ -424,6 +427,8 @@ Important v0.11 rules:
 - buffer lengths must be compile-time integer values written as decimal literals, constant names, or parenthesized compile-time expressions
 - constants are top-level scalar compile-time values, cannot be shadowed, cannot be rebound, and lower inline at use sites
 - checks are compile-time assertions, emit no MLIR, require `i1`, and cannot depend on runtime values
+- require steps are runtime requirements inside phrase bodies, require `i1`, may depend on runtime values, and lower to `cf.assert` when dynamic
+- top-level runtime requirements are invalid; use `check` for top-level compile-time assertions
 - buffer element types must be integer numeric types, not `i1`
 - buffer fill and store expressions must match the element type
 - buffer parameter actuals must exactly match length and element type
@@ -434,7 +439,7 @@ Important v0.11 rules:
 - buffers can be passed to `view of TYPE` parameters as full-buffer views
 - `length of buffer` returns the static buffer length as `i32`; `length of view` returns the view length as `i32`
 - buffer index expressions must be integer numeric types, not `i1`
-- literal/static buffer or view indices must be in range when the length is known; dynamic indices are not runtime-checked
+- literal/static buffer or view indices must be in range when the length is known; dynamic storage bounds are unchecked by default and checked with `--runtime-checks`
 - buffers and views are lexical storage objects and cannot be used as scalar values
 - views cannot be rebound, returned, stored in records or buffers, heap allocated, or used as scalar values
 - phrase calls reject multiple buffer/view arguments that are known to share the same root storage
@@ -540,7 +545,8 @@ docs/inscription-v0.7-spec.md v0.7 language and toolchain specification
 docs/inscription-v0.8-spec.md v0.8 language and toolchain specification
 docs/inscription-v0.9-spec.md v0.9 language and toolchain specification
 docs/inscription-v0.10-spec.md v0.10 language and toolchain specification
-docs/inscription-v0.11-spec.md current v0.11 language and toolchain specification
+docs/inscription-v0.11-spec.md v0.11 language and toolchain specification
+docs/inscription-v0.12-spec.md current v0.12 language and toolchain specification
 grammar/inscription-v0.ebnf   original v0 grammar
 grammar/inscription-v0.1.ebnf v0.1 grammar
 grammar/inscription-v0.2.ebnf v0.2 grammar
@@ -552,7 +558,8 @@ grammar/inscription-v0.7.ebnf v0.7 grammar
 grammar/inscription-v0.8.ebnf v0.8 grammar
 grammar/inscription-v0.9.ebnf v0.9 grammar
 grammar/inscription-v0.10.ebnf v0.10 grammar
-grammar/inscription-v0.11.ebnf current v0.11 grammar
+grammar/inscription-v0.11.ebnf v0.11 grammar
+grammar/inscription-v0.12.ebnf current v0.12 grammar
 tests/goldens/                exact MLIR conformance goldens
 tests/                        unit tests and executable fixtures
 ```

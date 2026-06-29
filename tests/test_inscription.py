@@ -42,6 +42,28 @@ class CompilerTests(unittest.TestCase):
                 )
                 self.assertEqual(actual, expected, diff)
 
+    def test_checked_goldens_match_exact_mlir(self):
+        checked = ROOT / "tests" / "goldens_checked"
+        for source_path in sorted(checked.glob("*.ins")):
+            with self.subTest(golden=source_path.name):
+                expected_path = source_path.with_suffix(".mlir")
+                expected = expected_path.read_text()
+                actual = compile_source(
+                    source_path.read_text(),
+                    source_path=source_path,
+                    module_root=checked,
+                    runtime_checks=True,
+                )
+                diff = "".join(
+                    difflib.unified_diff(
+                        expected.splitlines(True),
+                        actual.splitlines(True),
+                        fromfile=str(expected_path),
+                        tofile="actual",
+                    )
+                )
+                self.assertEqual(actual, expected, diff)
+
     def test_known_fixtures_execute_with_expected_exit_statuses(self):
         expected = json.loads((FIXTURES / "manifest.json").read_text())
         self.assertTrue(all(0 <= status <= 255 for status in expected.values()))
@@ -68,6 +90,30 @@ class CompilerTests(unittest.TestCase):
             check=False,
         )
         self.assertEqual(proc.returncode, 5)
+        self.assertEqual(proc.stdout, "")
+
+    def test_cli_runtime_checks_flag_runs_checked_fixture(self):
+        try:
+            resolve_toolchain()
+        except ToolchainError as exc:
+            self.skipTest(str(exc))
+        proc = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "inscription",
+                "run",
+                str(FIXTURES / "checked_dynamic_buffer_index.ins"),
+                "--runtime-checks",
+            ],
+            cwd=ROOT,
+            env={**os.environ, "PYTHONPATH": str(SRC)},
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(proc.returncode, 3, proc.stderr)
         self.assertEqual(proc.stdout, "")
 
     @unittest.skipUnless(importlib.util.find_spec("pygments"), "Pygments is not installed")
@@ -150,6 +196,7 @@ class CompilerTests(unittest.TestCase):
                 (GOLDENS / "63_phrase_body_check.ins").read_text(),
                 (GOLDENS / "67_module_import.ins").read_text(),
                 (GOLDENS / "75_view_parameter_sum.ins").read_text(),
+                (GOLDENS / "81_require_divide.ins").read_text(),
                 "highlight new widths a: i8 and b: i16 and c: u64 gives u64:\n  c bitwise xor c\n",
             ]
         )
@@ -366,6 +413,28 @@ main gives i32:
         self.assertIn("memref<?xi8>", layout_mlir)
         self.assertIn("arith.extui", layout_mlir)
 
+    def test_v012_require_and_runtime_checks_lower_to_cf_assert(self):
+        mlir = compile_source(self.fixture("require_divide.ins"))
+        self.assertIn('cf.assert', mlir)
+        self.assertIn('require failed at line 2', mlir)
+        self.assertIn("arith.divsi", mlir)
+
+        static_require_mlir = compile_source("always valid gives i32:\n  require true\n  7\n")
+        self.assertNotIn("cf.assert", static_require_mlir)
+
+        unchecked = compile_source(self.fixture("checked_dynamic_buffer_index.ins"))
+        checked = compile_source(self.fixture("checked_dynamic_buffer_index.ins"), runtime_checks=True)
+        self.assertNotIn("cf.assert", unchecked)
+        self.assertIn("storage lower-bound check failed", checked)
+        self.assertIn("storage upper-bound check failed", checked)
+
+        checked_view = compile_source(self.fixture("checked_dynamic_view.ins"), runtime_checks=True)
+        self.assertIn("view start range check failed", checked_view)
+        self.assertIn("view count range check failed", checked_view)
+
+        checked_layout = compile_source(self.fixture("checked_dynamic_layout.ins"), runtime_checks=True)
+        self.assertIn("storage range check failed", checked_layout)
+
     def test_v010_module_diagnostics(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -466,6 +535,25 @@ main gives i32:
         with self.assertRaises(InscriptionError) as ctx:
             compile_source(source)
         self.assertIn(contains, str(ctx.exception))
+
+    def assertCompileErrorWithRuntimeChecks(self, source: str, contains: str):
+        with self.assertRaises(InscriptionError) as ctx:
+            compile_source(source, runtime_checks=True)
+        self.assertIn(contains, str(ctx.exception))
+
+    def test_v012_runtime_checks_preserve_static_diagnostics(self):
+        self.assertCompileErrorWithRuntimeChecks(
+            "bad gives i32:\n  let cells be buffer of 4 i32 filled with 0\n  cells at 4\n",
+            "buffer index 4 is out of bounds for buffer cells of length 4",
+        )
+        self.assertCompileErrorWithRuntimeChecks(
+            "bad gives i32:\n  let cells be buffer of 4 i32 filled with 0\n  let window be view of cells from 3 for 2\n  0\n",
+            "view range 3 for 2 exceeds source cells of length 4",
+        )
+        self.assertCompileErrorWithRuntimeChecks(
+            "packed layout record Word:\n  value: u16\n\nbad gives i32:\n  let bytes be buffer of 2 u8 filled with 0\n  let word be read Word from bytes at 1\n  0\n",
+            "read Word at index 1 exceeds buffer bytes of length 2",
+        )
 
     def test_phrase_definitions_reject_unsupported_types(self):
         self.assertCompileError(
@@ -955,6 +1043,26 @@ main gives i32:
             "check used as expression": (
                 "bad gives i32:\n  let x be check 1 is equal to 1\n  0\n",
                 "check is a step and cannot be used as an expression",
+            ),
+            "require condition not i1": (
+                "bad gives i32:\n  require 1\n  0\n",
+                "require condition must have type i1, got i32",
+            ),
+            "require at top level": (
+                "require true\n\nmain gives i32:\n  0\n",
+                "require may only appear inside phrase bodies",
+            ),
+            "require used as expression": (
+                "bad gives i32:\n  let x be require true\n  0\n",
+                "require is a step and cannot be used as an expression",
+            ),
+            "compile-time false require": (
+                "bad gives i32:\n  require 1 is equal to 2\n  0\n",
+                "require condition is known to be false",
+            ),
+            "require does not satisfy value block": (
+                "bad gives i32:\n  require true\n",
+                "gives phrase body must end with a value expression",
             ),
             "view source unknown": (
                 "bad gives i32:\n  let window be view of cells from 0 for 1\n  0\n",
