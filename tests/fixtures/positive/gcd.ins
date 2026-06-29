@@ -1,0 +1,11 @@
+gcd of a0: i32 and b0: i32 gives i32:
+  track a: i32 from a0
+  track b: i32 from b0
+  while b is not equal to zero:
+    let next be a remainder b
+    a becomes b
+    b becomes next
+  a
+
+main gives i32:
+  gcd of 48 and 18

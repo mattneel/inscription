@@ -126,6 +126,9 @@ class CompilerTests(unittest.TestCase):
                 (GOLDENS / "07_average_with_let.ins").read_text(),
                 (GOLDENS / "09_factorial.ins").read_text(),
                 (GOLDENS / "12_equals_boolean.ins").read_text(),
+                (GOLDENS / "14_loop_sum.ins").read_text(),
+                (GOLDENS / "16_gcd.ins").read_text(),
+                (GOLDENS / "17_boolean_literals.ins").read_text(),
             ]
         )
         html = highlight_source(source, output_format="html")
@@ -195,6 +198,16 @@ main gives i32:
         self.assertIn("arith.cmpi", mlir)
         self.assertIn("scf.if", mlir)
         forbidden = ["memref", "alloca", "llvm.alloca", "global", "store", "load", "scf.while"]
+        for needle in forbidden:
+            self.assertNotIn(needle, mlir)
+
+    def test_loop_carried_state_lowers_to_scf_while_without_memory(self):
+        mlir = compile_source(self.fixture("gcd.ins"))
+        self.assertIn("scf.while", mlir)
+        self.assertIn("scf.condition", mlir)
+        self.assertIn("scf.yield", mlir)
+        self.assertIn("arith.remsi", mlir)
+        forbidden = ["memref", "alloca", "llvm.alloca", "global", "store", "load"]
         for needle in forbidden:
             self.assertNotIn(needle, mlir)
 
@@ -300,6 +313,35 @@ main gives i32:
             "memrefs": ("main gives i32:\n  memref\n", "unexpected token"),
             "reserved hole name": ("echo of let: i32 gives i32:\n  let\n\nmain gives i32:\n  0\n", "reserved word"),
             "out of range literal": ("main gives i64:\n  9223372036854775808\n", "outside signed 64-bit"),
+            "assignment to phrase hole": ("bad of x: i32 gives i32:\n  x becomes 1\n  x\n", "cannot assign to immutable phrase hole x"),
+            "assignment to let binding": ("bad gives i32:\n  let x be 1\n  x becomes 2\n  x\n", "cannot assign to immutable let binding x"),
+            "assignment to undeclared binding": ("bad gives i32:\n  y becomes 1\n  0\n", "unknown binding y"),
+            "track initializer type mismatch": ("bad gives i32:\n  track x: i32 from false\n  x\n", "track x initializer must have type i32, got i1"),
+            "assignment type mismatch": (
+                "bad gives i32:\n  track x: i32 from 0\n  x becomes x is equal to 0\n  x\n",
+                "assignment to x must have type i32, got i1",
+            ),
+            "while condition is not i1": (
+                "bad gives i32:\n  track x: i32 from 0\n  while x:\n    x becomes x plus 1\n  x\n",
+                "while condition must be i1",
+            ),
+            "while let does not escape": (
+                "bad gives i32:\n  track x: i32 from 0\n  while x is less than 1:\n    let y be 2\n    x becomes x plus 1\n  y\n",
+                "unknown binding y",
+            ),
+            "missing while body": (
+                "bad gives i32:\n  track x: i32 from 0\n  while x is less than 1:\n  x\n",
+                "while loop requires an indented body",
+            ),
+            "nested while rejected": (
+                "bad gives i32:\n  track x: i32 from 0\n  while x is less than 1:\n    while x is less than 1:\n      x becomes x plus 1\n  x\n",
+                "nested while loops are not supported until v0.2",
+            ),
+            "remainder on i1": ("bad gives i1:\n  true remainder false\n", "remainder requires numeric operands"),
+            "remainder mismatched operands": (
+                "to i64 of x: i32 gives i64:\n  1\n\nbad of y: i32 gives i32:\n  y remainder to i64 of y\n",
+                "remainder operands must have same type",
+            ),
         }
         for name, (source, contains) in cases.items():
             with self.subTest(name=name):

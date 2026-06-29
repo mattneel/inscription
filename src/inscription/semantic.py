@@ -1,9 +1,38 @@
 from __future__ import annotations
 
-from .ast import Binary, Call, Comparison, Expr, Function, Integer, Program, ReturnStmt, SetStmt, TypeName, Variable, WhenExpr
+from dataclasses import dataclass
+from typing import Literal
+
+from .ast import (
+    AssignStmt,
+    Binary,
+    BodyStmt,
+    Boolean,
+    Call,
+    Comparison,
+    Expr,
+    Function,
+    Integer,
+    Program,
+    ReturnStmt,
+    SetStmt,
+    TrackStmt,
+    TypeName,
+    Variable,
+    WhenExpr,
+    WhileStmt,
+)
 from .diagnostics import InscriptionError
 
 NUMERIC_TYPES: set[TypeName] = {"i32", "i64"}
+BindingKind = Literal["param", "let", "track"]
+
+
+@dataclass(frozen=True)
+class Binding:
+    type_name: TypeName
+    kind: BindingKind
+    line: int
 
 
 def analyze(program: Program) -> None:
@@ -32,24 +61,117 @@ def function_table(program: Program) -> dict[str, Function]:
 def _check_function(fn: Function, functions: dict[str, Function]) -> None:
     if not fn.body:
         raise InscriptionError(f"phrase '{fn.name}' must evaluate to a value", fn.line)
-    env: dict[str, TypeName] = {param.name: param.type_name for param in fn.params}
+    bindings: dict[str, Binding] = {
+        param.name: Binding(param.type_name, "param", fn.line) for param in fn.params
+    }
     returned = False
     for index, stmt in enumerate(fn.body):
         if returned:
             raise InscriptionError("unreachable statement after value expression", getattr(stmt, "line", None))
         is_last = index == len(fn.body) - 1
-        if isinstance(stmt, SetStmt):
-            env[stmt.name] = infer_expr_type(stmt.expr, env, functions)
-        elif isinstance(stmt, ReturnStmt):
+        if isinstance(stmt, ReturnStmt):
             if not is_last:
                 raise InscriptionError("value expression must be the final phrase body form", stmt.line)
-            actual = infer_expr_type(stmt.expr, env, functions, expected=fn.return_type)
+            actual = infer_expr_type(stmt.expr, _env_types(bindings), functions, expected=fn.return_type)
             require_type(actual, fn.return_type, stmt.line)
             returned = True
-        else:  # pragma: no cover
-            raise AssertionError(stmt)
+        else:
+            _check_body_stmt(stmt, bindings, functions)
     if not returned:
         raise InscriptionError(f"phrase '{fn.name}' must evaluate to a value", fn.line)
+
+
+def _check_body_stmt(stmt: BodyStmt, bindings: dict[str, Binding], functions: dict[str, Function]) -> None:
+    if isinstance(stmt, SetStmt):
+        _declare_let(stmt, bindings, functions)
+        return
+    if isinstance(stmt, TrackStmt):
+        _declare_track(stmt, bindings, functions)
+        return
+    if isinstance(stmt, AssignStmt):
+        _check_assignment(stmt, bindings, functions)
+        return
+    if isinstance(stmt, WhileStmt):
+        _check_while(stmt, bindings, functions)
+        return
+    raise AssertionError(stmt)  # pragma: no cover
+
+
+def _declare_let(stmt: SetStmt, bindings: dict[str, Binding], functions: dict[str, Function]) -> None:
+    existing = bindings.get(stmt.name)
+    if existing is not None:
+        if existing.kind == "param":
+            raise InscriptionError(f"let binding '{stmt.name}' cannot shadow phrase hole", stmt.line)
+        if existing.kind == "track":
+            raise InscriptionError(f"let binding '{stmt.name}' cannot shadow tracked binding", stmt.line)
+        raise InscriptionError(f"duplicate let binding '{stmt.name}'", stmt.line)
+    type_name = infer_expr_type(stmt.expr, _env_types(bindings), functions)
+    bindings[stmt.name] = Binding(type_name, "let", stmt.line)
+
+
+def _declare_track(stmt: TrackStmt, bindings: dict[str, Binding], functions: dict[str, Function]) -> None:
+    existing = bindings.get(stmt.name)
+    if existing is not None:
+        if existing.kind == "param":
+            raise InscriptionError(f"track binding '{stmt.name}' cannot shadow phrase hole", stmt.line)
+        if existing.kind == "let":
+            raise InscriptionError(f"track binding '{stmt.name}' cannot shadow let binding", stmt.line)
+        raise InscriptionError(f"duplicate track binding '{stmt.name}'", stmt.line)
+    actual = _infer_declared_type(stmt.expr, stmt.type_name, _env_types(bindings), functions)
+    if actual != stmt.type_name:
+        raise InscriptionError(
+            f"track {stmt.name} initializer must have type {stmt.type_name}, got {actual}", stmt.line
+        )
+    bindings[stmt.name] = Binding(stmt.type_name, "track", stmt.line)
+
+
+def _check_assignment(stmt: AssignStmt, bindings: dict[str, Binding], functions: dict[str, Function]) -> None:
+    binding = bindings.get(stmt.name)
+    if binding is None:
+        raise InscriptionError(f"unknown binding {stmt.name}", stmt.line)
+    if binding.kind == "param":
+        raise InscriptionError(f"cannot assign to immutable phrase hole {stmt.name}", stmt.line)
+    if binding.kind == "let":
+        raise InscriptionError(f"cannot assign to immutable let binding {stmt.name}", stmt.line)
+    actual = _infer_declared_type(stmt.expr, binding.type_name, _env_types(bindings), functions)
+    if actual != binding.type_name:
+        raise InscriptionError(
+            f"assignment to {stmt.name} must have type {binding.type_name}, got {actual}", stmt.line
+        )
+
+
+def _check_while(stmt: WhileStmt, bindings: dict[str, Binding], functions: dict[str, Function]) -> None:
+    condition_type = infer_expr_type(stmt.condition, _env_types(bindings), functions)
+    if condition_type != "i1":
+        raise InscriptionError(f"while condition must be i1, got {condition_type}", stmt.line)
+    if not stmt.body:
+        raise InscriptionError("while loop requires at least one body step", stmt.line)
+    scoped = dict(bindings)
+    for body_stmt in stmt.body:
+        if isinstance(body_stmt, WhileStmt):
+            raise InscriptionError("nested while loops are not supported until v0.2", body_stmt.line)
+        if isinstance(body_stmt, TrackStmt):
+            raise InscriptionError("track bindings inside while bodies are not supported in v0.1", body_stmt.line)
+        _check_body_stmt(body_stmt, scoped, functions)
+
+
+def _infer_declared_type(
+    expr: Expr,
+    expected: TypeName,
+    env: dict[str, TypeName],
+    functions: dict[str, Function],
+) -> TypeName:
+    try:
+        return infer_expr_type(expr, env, functions, expected=expected)
+    except InscriptionError:
+        try:
+            return infer_expr_type(expr, env, functions)
+        except InscriptionError:
+            raise
+
+
+def _env_types(bindings: dict[str, Binding]) -> dict[str, TypeName]:
+    return {name: binding.type_name for name, binding in bindings.items()}
 
 
 def infer_expr_type(
@@ -64,16 +186,24 @@ def infer_expr_type(
             require_numeric(expected, expr.line)
             return expected
         return "i32"
+    if isinstance(expr, Boolean):
+        if expected is not None:
+            require_type("i1", expected, expr.line)
+        return "i1"
     if isinstance(expr, Variable):
         try:
             actual = env[expr.name]
         except KeyError as exc:
-            raise InscriptionError(f"variable '{expr.name}' used before initialization", expr.line) from exc
+            raise InscriptionError(
+                f"unknown binding {expr.name}; variable '{expr.name}' used before initialization", expr.line
+            ) from exc
         if expected is not None:
             require_type(actual, expected, expr.line)
         return actual
     if isinstance(expr, Binary):
         target = expected if expected in NUMERIC_TYPES else None
+        if expr.op == "remainder":
+            return infer_remainder_type(expr.left, expr.right, env, functions, expr.line, expected=target)
         return infer_numeric_pair_type(expr.left, expr.right, env, functions, expr.line, expected=target)
     if isinstance(expr, Call):
         target = functions.get(expr.name)
@@ -138,6 +268,50 @@ def infer_numeric_pair_type(
     return left_type
 
 
+def infer_remainder_type(
+    left: Expr,
+    right: Expr,
+    env: dict[str, TypeName],
+    functions: dict[str, Function],
+    line: int,
+    *,
+    expected: TypeName | None = None,
+) -> TypeName:
+    if expected is not None:
+        require_remainder_numeric(expected, line)
+        try:
+            left_type = infer_expr_type(left, env, functions, expected=expected)
+        except InscriptionError:
+            left_type = infer_expr_type(left, env, functions)
+        try:
+            right_type = infer_expr_type(right, env, functions, expected=expected)
+        except InscriptionError:
+            right_type = infer_expr_type(right, env, functions)
+        require_remainder_numeric(left_type, line)
+        require_remainder_numeric(right_type, line)
+        if left_type != expected or right_type != expected:
+            raise InscriptionError(f"remainder operands must have same type, got {left_type} and {right_type}", line)
+        return expected
+
+    if isinstance(left, Integer) and not isinstance(right, Integer):
+        right_type = infer_expr_type(right, env, functions)
+        require_remainder_numeric(right_type, line)
+        left_type = infer_expr_type(left, env, functions, expected=right_type)
+        require_type(left_type, right_type, line)
+        return right_type
+
+    left_type = infer_expr_type(left, env, functions)
+    require_remainder_numeric(left_type, line)
+    try:
+        right_type = infer_expr_type(right, env, functions, expected=left_type)
+    except InscriptionError:
+        right_type = infer_expr_type(right, env, functions)
+    require_remainder_numeric(right_type, line)
+    if right_type != left_type:
+        raise InscriptionError(f"remainder operands must have same type, got {left_type} and {right_type}", line)
+    return left_type
+
+
 def infer_comparison_operand_type(
     condition: Comparison, env: dict[str, TypeName], functions: dict[str, Function]
 ) -> TypeName:
@@ -147,6 +321,11 @@ def infer_comparison_operand_type(
 def require_numeric(type_name: TypeName, line: int) -> None:
     if type_name not in NUMERIC_TYPES:
         raise InscriptionError(f"expected numeric value, got {type_name}", line)
+
+
+def require_remainder_numeric(type_name: TypeName, line: int) -> None:
+    if type_name not in NUMERIC_TYPES:
+        raise InscriptionError("remainder requires numeric operands", line)
 
 
 def require_type(actual: TypeName, expected: TypeName, line: int) -> None:

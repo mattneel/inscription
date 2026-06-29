@@ -1,7 +1,11 @@
 {
   "absolute_value.ins": 5,
   "add.ins": 5,
+  "adjust.ins": 3,
   "clamp.ins": 255,
+  "gcd.ins": 6,
+  "iterative_factorial.ins": 120,
+  "loop_sum.ins": 55,
   "phrase_max.ins": 7,
   "recursive_factorial.ins": 120
 }

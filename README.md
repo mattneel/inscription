@@ -1,28 +1,32 @@
 # Inscription
 
-Inscription is a deterministic, phrase-shaped compiler that lowers a small prose-like v0 language to MLIR and executes through LLVM 22.
+Inscription is a deterministic, phrase-shaped compiler that lowers a small prose-like language to MLIR and executes through LLVM 22.
 
 The language is readable, but it is **not** natural-language interpretation: every accepted line matches the grammar exactly. The core idea is that a phrase definition introduces a callable phrase, and each block evaluates to a value.
 
 ## Status
 
-This repository currently implements **Inscription v0**:
+This repository currently implements **Inscription v0.1**:
 
 - source-visible scalar types: `i1`, `i32`, and `i64`
 - phrase-shaped function definitions and phrase-shaped calls
 - value blocks with `expression when condition` and `otherwise expression`
 - implicit returns: the block value is the phrase result
-- `let name be expression` bindings before a value block
-- integer arithmetic: `plus`, `minus`, `times`, and `divided by`
+- immutable `let name be expression` bindings before a value block
+- tracked mutable source bindings with `track name: type from expression`
+- assignment to tracked bindings with `name becomes expression`
+- `while condition:` step blocks lowered as loop-carried SSA values through `scf.while`
+- integer arithmetic: `plus`, `minus`, `times`, `divided by`, and `remainder`
+- boolean literals: `true` and `false`
 - comparison expressions that evaluate to `i1`
 - parenthesized expressions
 - deterministic parsing and semantic checks
 - exact MLIR golden conformance tests in [`tests/goldens`](tests/goldens)
-- MLIR emission using `func`, `arith`, and `scf.if`
+- MLIR emission using `func`, `arith`, `scf.if`, and `scf.while`
 - LLVM 22 lowering and execution through `mlir-opt`, `mlir-translate`, and `lli`
-- no source-level I/O, arrays, floats, pointers, memrefs, mutable storage, statement-level `return`, or natural-language inference
+- no source-level I/O, arrays, floats, pointers, memrefs, storage allocation, statement-level `return`, `break`, `continue`, or natural-language inference
 
-See [`docs/inscription-v0-spec.md`](docs/inscription-v0-spec.md) and [`grammar/inscription-v0.ebnf`](grammar/inscription-v0.ebnf) for the exact language contract.
+See [`docs/inscription-v0.1-spec.md`](docs/inscription-v0.1-spec.md) and [`grammar/inscription-v0.1.ebnf`](grammar/inscription-v0.1.ebnf) for the exact current language contract. The original v0 contract remains in [`docs/inscription-v0-spec.md`](docs/inscription-v0-spec.md) and [`grammar/inscription-v0.ebnf`](grammar/inscription-v0.ebnf).
 
 ## Requirements
 
@@ -60,8 +64,8 @@ Run directly from a checkout:
 
 ```sh
 PYTHONPATH=src python -m inscription check-tools --show-pipeline
-PYTHONPATH=src python -m inscription compile tests/fixtures/positive/phrase_max.ins --verify
-PYTHONPATH=src python -m inscription run tests/fixtures/positive/phrase_max.ins
+PYTHONPATH=src python -m inscription compile tests/fixtures/positive/loop_sum.ins --verify
+PYTHONPATH=src python -m inscription run tests/fixtures/positive/loop_sum.ins
 ```
 
 Or install an editable copy:
@@ -69,9 +73,9 @@ Or install an editable copy:
 ```sh
 python -m pip install -e .
 inscription check-tools --show-pipeline
-inscription compile tests/fixtures/positive/phrase_max.ins --verify
-inscription highlight tests/fixtures/positive/phrase_max.ins
-inscription run tests/fixtures/positive/phrase_max.ins
+inscription compile tests/fixtures/positive/loop_sum.ins --verify
+inscription highlight tests/fixtures/positive/loop_sum.ins
+inscription run tests/fixtures/positive/loop_sum.ins
 ```
 
 `compile` accepts library-style source files without `main`. `run` executes the lowered module through `lli`; executable fixtures define a no-hole `main` and return an exit status in `0..255`.
@@ -79,26 +83,30 @@ inscription run tests/fixtures/positive/phrase_max.ins
 ## Example program
 
 ```text
-max of a: i32 and b: i32 gives i32:
-  a when a is greater than b
-  otherwise b
+sum through n: i32 gives i32:
+  track total: i32 from 0
+  track i: i32 from 1
+  while i is less than or equal to n:
+    total becomes total plus i
+    i becomes i plus 1
+  total
 
 main gives i32:
-  max of 7 and 3
+  sum through 10
 ```
 
 Compile it to MLIR:
 
 ```sh
-PYTHONPATH=src python -m inscription compile tests/fixtures/positive/phrase_max.ins --verify
+PYTHONPATH=src python -m inscription compile tests/fixtures/positive/loop_sum.ins --verify
 ```
 
 Run it:
 
 ```sh
-PYTHONPATH=src python -m inscription run tests/fixtures/positive/phrase_max.ins
+PYTHONPATH=src python -m inscription run tests/fixtures/positive/loop_sum.ins
 echo $?
-# 7
+# 55
 ```
 
 ## CLI
@@ -120,6 +128,7 @@ A program is a list of phrase definitions:
 
 ```text
 <phrase with typed holes> gives <type>:
+  <body item>*
   <value block>
 ```
 
@@ -132,6 +141,17 @@ square of n: i32 gives i32:
 main gives i32:
   square of 12
 ```
+
+Body items may introduce immutable lets, tracked bindings, assignments, or while loops:
+
+```text
+track total: i32 from 0
+total becomes total plus 1
+while total is less than 10:
+  total becomes total plus 1
+```
+
+Tracked bindings are source-level mutable names, but they lower to SSA values and `scf.while` loop-carried results, not memory.
 
 Conditional value blocks return the first matching line, with a required fallback:
 
@@ -166,7 +186,7 @@ factorial of n: i64 gives i64:
   otherwise n times factorial of (n minus 1)
 ```
 
-Comparison expressions return `i1`:
+Comparison expressions return `i1`, and boolean literals are `true` and `false`:
 
 ```text
 is zero x: i32 gives i1:
@@ -178,6 +198,8 @@ Expressions:
 ```text
 120
 zero
+true
+false
 name
 square of 12
 max of 7 and 3
@@ -185,6 +207,7 @@ left plus right
 left minus right
 left times right
 left divided by right
+left remainder right
 (a plus b) times 2
 x is equal to 0
 ```
@@ -200,18 +223,25 @@ left is greater than right
 left is greater than or equal to right
 ```
 
-Important v0 rules:
+Important v0.1 rules:
 
 - function names are generated from the leading literal words in a phrase definition
-- phrase names are unique; there is no overloading in v0
+- phrase names are unique; there is no overloading
 - library compilation does not require `main`; if `main` exists, it must take no holes
+- phrase holes and `let` bindings are immutable
+- assignment is valid only for tracked bindings
+- tracked binding initializers and assignments must match the declared tracked type
+- while conditions must be `i1`
+- while-body lets are scoped to that loop iteration and do not escape
+- nested while loops are intentionally rejected until v0.2
 - arithmetic operands must be numeric (`i32` or `i64`)
+- `remainder` requires matching numeric operands and lowers to `arith.remsi`
 - comparisons require numeric operands and return `i1`
-- variables must be initialized by a phrase hole or prior `let`
+- variables must be initialized by a phrase hole, prior `let`, or prior `track`
 - phrase calls must match a declared phrase template exactly
 - conditional value blocks require `otherwise`
 - removed ceremony words such as `Function`, `End function`, `Set`, `Return`, and `call ... with` are not valid Inscription syntax
-- unsupported I/O, arrays, floats, pointers, memrefs, mutable storage, and free prose are rejected
+- unsupported I/O, arrays, floats, pointers, memrefs, mutable storage lowering, and free prose are rejected
 
 ## Tests
 
@@ -227,18 +257,20 @@ With LLVM/MLIR 22 available, verify the toolchain and fixture exit codes:
 
 ```sh
 PYTHONPATH=src python -m inscription check-tools --show-pipeline
-PYTHONPATH=src python -m inscription run tests/fixtures/positive/add.ins                 # exits 5
-PYTHONPATH=src python -m inscription run tests/fixtures/positive/phrase_max.ins          # exits 7
-PYTHONPATH=src python -m inscription run tests/fixtures/positive/recursive_factorial.ins # exits 120
-PYTHONPATH=src python -m inscription run tests/fixtures/positive/clamp.ins               # exits 255
+PYTHONPATH=src python -m inscription run tests/fixtures/positive/adjust.ins              # exits 3
+PYTHONPATH=src python -m inscription run tests/fixtures/positive/loop_sum.ins            # exits 55
+PYTHONPATH=src python -m inscription run tests/fixtures/positive/iterative_factorial.ins # exits 120
+PYTHONPATH=src python -m inscription run tests/fixtures/positive/gcd.ins                 # exits 6
 ```
 
 ## Repository layout
 
 ```text
-src/inscription/            compiler implementation
-docs/inscription-v0-spec.md language and toolchain specification
-grammar/inscription-v0.ebnf formal v0 grammar
-tests/goldens/              exact MLIR v0 conformance goldens
-tests/                      unit tests and executable fixtures
+src/inscription/              compiler implementation
+docs/inscription-v0-spec.md   original v0 language and toolchain specification
+docs/inscription-v0.1-spec.md current v0.1 language and toolchain specification
+grammar/inscription-v0.ebnf   original v0 grammar
+grammar/inscription-v0.1.ebnf current v0.1 grammar
+tests/goldens/                exact MLIR conformance goldens
+tests/                        unit tests and executable fixtures
 ```

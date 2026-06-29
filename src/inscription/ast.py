@@ -5,7 +5,7 @@ from typing import Literal
 
 TypeName = Literal["i1", "i32", "i64"]
 CmpPredicate = Literal["eq", "ne", "slt", "sle", "sgt", "sge"]
-BinOp = Literal["plus", "minus", "times", "divided by"]
+BinOp = Literal["plus", "minus", "times", "divided by", "remainder"]
 
 
 @dataclass(frozen=True)
@@ -31,6 +31,12 @@ class Function:
 @dataclass(frozen=True)
 class Integer:
     value: int
+    line: int
+
+
+@dataclass(frozen=True)
+class Boolean:
+    value: bool
     line: int
 
 
@@ -77,7 +83,7 @@ class WhenExpr:
     line: int
 
 
-Expr = Integer | Variable | Binary | Call | Comparison | WhenExpr
+Expr = Integer | Boolean | Variable | Binary | Call | Comparison | WhenExpr
 
 
 @dataclass(frozen=True)
@@ -88,9 +94,32 @@ class SetStmt:
 
 
 @dataclass(frozen=True)
+class TrackStmt:
+    name: str
+    type_name: TypeName
+    expr: Expr
+    line: int
+
+
+@dataclass(frozen=True)
+class AssignStmt:
+    name: str
+    expr: Expr
+    line: int
+
+
+@dataclass(frozen=True)
+class WhileStmt:
+    condition: Expr
+    body: tuple["BodyStmt", ...]
+    line: int
+
+
+@dataclass(frozen=True)
 class ReturnStmt:
     expr: Expr
     line: int
 
 
-Stmt = SetStmt | ReturnStmt
+BodyStmt = SetStmt | TrackStmt | AssignStmt | WhileStmt
+Stmt = BodyStmt | ReturnStmt

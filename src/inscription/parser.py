@@ -3,16 +3,37 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-from .ast import Binary, Call, Comparison, Expr, Function, Integer, Parameter, Program, ReturnStmt, SetStmt, TypeName, Variable, WhenCase, WhenExpr
+from .ast import (
+    AssignStmt,
+    Binary,
+    BodyStmt,
+    Boolean,
+    Call,
+    Comparison,
+    Expr,
+    Function,
+    Integer,
+    Parameter,
+    Program,
+    ReturnStmt,
+    SetStmt,
+    TrackStmt,
+    TypeName,
+    Variable,
+    WhenCase,
+    WhenExpr,
+    WhileStmt,
+)
 from .diagnostics import InscriptionError
 
 NAME_RE = re.compile(r"[a-z][a-z0-9_]*")
 TOKEN_RE = re.compile(r"\s*(-?\d+|[a-z][a-z0-9_]*|[(),])")
 RESERVED = {
-    "address", "and", "arguments", "array", "be", "by", "call", "divided", "do", "else", "end", "equal", "float",
-    "function", "gives", "greater", "i1", "i32", "i64", "if", "input", "is", "less", "let", "memref", "minus",
-    "no", "not", "or", "otherwise", "output", "parameters", "pointer", "plus", "print", "return",
-    "set", "takes", "than", "then", "times", "to", "when", "while", "with", "zero",
+    "address", "and", "arguments", "array", "be", "becomes", "by", "call", "divided", "do", "else", "end",
+    "equal", "false", "float", "from", "function", "gives", "greater", "i1", "i32", "i64", "if", "input",
+    "is", "less", "let", "memref", "minus", "no", "not", "or", "otherwise", "output", "parameters",
+    "pointer", "plus", "print", "remainder", "return", "set", "takes", "than", "then", "times", "to",
+    "track", "true", "when", "while", "with", "zero",
 }
 COMPARATORS: tuple[tuple[tuple[str, ...], str], ...] = (
     (("equal", "to"), "eq"),
@@ -34,6 +55,7 @@ class Line:
     number: int
     text: str
     is_header: bool
+    indent: int
 
 
 @dataclass(frozen=True)
@@ -61,6 +83,9 @@ class Parser:
     def _preprocess(self, source: str) -> list[Line]:
         lines: list[Line] = []
         for number, raw in enumerate(source.splitlines(), start=1):
+            if "\t" in raw:
+                raise InscriptionError("tabs are not valid indentation", number)
+            indent = len(raw) - len(raw.lstrip(" "))
             stripped = raw.strip()
             if not stripped:
                 continue
@@ -72,7 +97,7 @@ class Parser:
                 is_header = False
             if not body:
                 raise InscriptionError("empty line is not valid syntax", number)
-            lines.append(Line(number, body, is_header))
+            lines.append(Line(number, body, is_header, indent))
         return lines
 
     def _collect_phrase_templates(self) -> tuple[PhraseTemplate, ...]:
@@ -156,25 +181,77 @@ class Parser:
             raise InscriptionError(f"invalid generated function name '{symbol}'", line)
         return symbol
 
-    def _parse_phrase_body(self, index: int, name: str, line: int) -> tuple[list[SetStmt | ReturnStmt], int]:
-        lets: list[SetStmt] = []
+    def _parse_phrase_body(self, index: int, name: str, line: int) -> tuple[list[BodyStmt | ReturnStmt], int]:
+        body_items: list[BodyStmt] = []
         value_lines: list[Line] = []
         while index < len(self.lines):
             current = self.lines[index]
             if self._looks_like_phrase_header(current):
                 break
-            if current.is_header:
-                raise InscriptionError("unexpected ':' inside phrase body", current.number)
-            if current.text.startswith("let "):
+            if self._is_body_item_start(current):
                 if value_lines:
-                    raise InscriptionError("let bindings must appear before the value block", current.number)
-                lets.append(self._parse_let(current))
+                    if current.text.startswith("let "):
+                        raise InscriptionError("let bindings must appear before the value block", current.number)
+                    raise InscriptionError("body items must appear before the value block", current.number)
+                item, index = self._parse_body_item(index, in_while=False)
+                body_items.append(item)
             else:
+                if current.is_header:
+                    raise InscriptionError("unexpected ':' inside phrase body", current.number)
                 value_lines.append(current)
-            index += 1
+                index += 1
         if not value_lines:
             raise InscriptionError(f"phrase '{name}' must evaluate to a value", line)
-        return [*lets, ReturnStmt(self._parse_value_block(value_lines), value_lines[-1].number)], index
+        return [*body_items, ReturnStmt(self._parse_value_block(value_lines), value_lines[-1].number)], index
+
+    def _is_body_item_start(self, line: Line) -> bool:
+        return (
+            line.text.startswith("let ")
+            or line.text.startswith("track ")
+            or self._assignment_match(line) is not None
+            or (line.is_header and line.text.startswith("while "))
+        )
+
+    def _parse_body_item(self, index: int, *, in_while: bool) -> tuple[BodyStmt, int]:
+        current = self.lines[index]
+        if current.text.startswith("let "):
+            return self._parse_let(current), index + 1
+        if current.text.startswith("track "):
+            if in_while:
+                raise InscriptionError("track bindings inside while bodies are not supported in v0.1", current.number)
+            return self._parse_track(current), index + 1
+        assignment = self._assignment_match(current)
+        if assignment is not None:
+            return self._parse_assignment(current, assignment), index + 1
+        if current.is_header and current.text.startswith("while "):
+            if in_while:
+                raise InscriptionError("nested while loops are not supported until v0.2", current.number)
+            return self._parse_while(index)
+        raise InscriptionError("expected phrase body item", current.number)
+
+    def _parse_while(self, index: int) -> tuple[WhileStmt, int]:
+        line = self.lines[index]
+        match = re.fullmatch(r"while (.+)", line.text)
+        if not line.is_header or not match:
+            raise InscriptionError("malformed while loop", line.number)
+        condition = self._parse_expression(match.group(1), line.number)
+        body: list[BodyStmt] = []
+        body_index = index + 1
+        if body_index >= len(self.lines) or self.lines[body_index].indent <= line.indent:
+            raise InscriptionError("while loop requires an indented body", line.number)
+        while body_index < len(self.lines):
+            current = self.lines[body_index]
+            if current.indent <= line.indent:
+                break
+            if self._looks_like_phrase_header(current):
+                raise InscriptionError("phrase definitions cannot appear inside while bodies", current.number)
+            if not self._is_body_item_start(current):
+                raise InscriptionError("while body only supports let bindings, assignments, and while loops", current.number)
+            item, body_index = self._parse_body_item(body_index, in_while=True)
+            body.append(item)
+        if not body:
+            raise InscriptionError("while loop requires at least one body step", line.number)
+        return WhileStmt(condition, tuple(body), line.number), body_index
 
     def _parse_value_block(self, lines: list[Line]) -> Expr:
         cases: list[WhenCase] = []
@@ -223,6 +300,29 @@ class Parser:
         if not match:
             raise InscriptionError("malformed let binding", line.number)
         return SetStmt(self._name(match.group(1), line.number), self._parse_expression(match.group(2), line.number), line.number)
+
+    def _parse_track(self, line: Line) -> TrackStmt:
+        match = re.fullmatch(r"track ([a-z][a-z0-9_]*):\s*([a-z][a-z0-9_]*) from (.+)", line.text)
+        if not match:
+            raise InscriptionError("malformed track binding", line.number)
+        return TrackStmt(
+            self._name(match.group(1), line.number),
+            self._type_name(match.group(2), line.number),
+            self._parse_expression(match.group(3), line.number),
+            line.number,
+        )
+
+    def _assignment_match(self, line: Line) -> re.Match[str] | None:
+        if line.is_header:
+            return None
+        return re.fullmatch(r"([a-z][a-z0-9_]*) becomes (.+)", line.text)
+
+    def _parse_assignment(self, line: Line, match: re.Match[str]) -> AssignStmt:
+        return AssignStmt(
+            self._name(match.group(1), line.number),
+            self._parse_expression(match.group(2), line.number),
+            line.number,
+        )
 
     def _parse_expression(self, text: str, line: int) -> Expr:
         return parse_expression(text, line, self.phrases)
@@ -322,7 +422,7 @@ def parse_comparison_tokens(
 
 
 class ExpressionParser:
-    PRECEDENCE = {"plus": 10, "minus": 10, "times": 20, "divided by": 20}
+    PRECEDENCE = {"plus": 10, "minus": 10, "times": 20, "divided by": 20, "remainder": 20}
 
     def __init__(self, tokens: list[str], line: int, phrases: tuple[PhraseTemplate, ...] = ()):
         self.tokens = tokens
@@ -371,7 +471,7 @@ class ExpressionParser:
             if self.pos + 1 < len(self.tokens) and self.tokens[self.pos + 1] == "by":
                 return "divided by", self.PRECEDENCE["divided by"], 2
             return None
-        if token in {"plus", "minus", "times"}:
+        if token in {"plus", "minus", "times", "remainder"}:
             return token, self.PRECEDENCE[token], 1
         return None
 
@@ -397,6 +497,10 @@ class ExpressionParser:
             return Integer(value, self.line)
         if token == "zero":
             return Integer(0, self.line)
+        if token == "true":
+            return Boolean(True, self.line)
+        if token == "false":
+            return Boolean(False, self.line)
         if NAME_RE.fullmatch(token) and token not in RESERVED:
             return Variable(token, self.line)
         raise InscriptionError(f"unexpected token '{token}' in expression", self.line)
