@@ -41,7 +41,7 @@ def _make_lexer():
                 (r"\b(layout)(\s+)(record)(\s+)([A-Z][A-Za-z0-9_]*)", bygroups(Keyword.Declaration, Text.Whitespace, Keyword.Declaration, Text.Whitespace, Name.Class)),
                 (r"\b(record)(\s+)([A-Z][A-Za-z0-9_]*)", bygroups(Keyword.Declaration, Text.Whitespace, Name.Class)),
                 (r"\b(i1|i8|i16|i32|i64|u8|u16|u32|u64|f32|f64)\b", Keyword.Type),
-                (r"\b(if|let|be|from|of|when|while|for|each|index|up|to|otherwise|zero|buffer|array|view|filled|containing|with|at|does|gives|length|record|layout|packed|size|alignment|offset|in|read|write|into|constant|check|require|module|import|extern|export|enum|union|match|type|byte|bytes)\b", Keyword),
+                (r"\b(if|let|be|from|of|when|while|for|each|index|up|to|otherwise|zero|buffer|array|view|filled|containing|with|at|does|gives|length|record|layout|packed|size|alignment|offset|in|read|write|into|constant|check|require|module|import|extern|export|enum|union|match|type|byte|bytes|owned)\b", Keyword),
                 (r"\b(true|false)\b", Keyword.Constant),
                 (r"\b(becomes|plus|minus|times|divided|by|remainder|and|or|not|as|bitwise|shifted|left|right|xor)\b", Operator.Word),
                 (r"\b(is|equal|less|greater|than)\b", Operator.Word),

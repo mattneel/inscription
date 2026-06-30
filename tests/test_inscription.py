@@ -2177,6 +2177,7 @@ class CompilerTests(unittest.TestCase):
                 "union HighlightMaybe:\n  none\n  some value: i32\n\nhighlight union gives i32:\n  match HighlightMaybe.some with value be 1:\n    HighlightMaybe.some with value gives value\n    otherwise gives 0\n",
                 "union HighlightToken:\n  eof\n  operator symbol: u8 and precedence: u8\n\nhighlight token gives i32:\n  match HighlightToken.operator with symbol be 1 and precedence be 2:\n    HighlightToken.operator with symbol as op and precedence as prec gives (op as i32) plus (prec as i32)\n    otherwise gives 0\n",
                 "highlight bytes gives i32:\n  let text be array of bytes \"A\\n\"\n  match text at 0:\n    byte \"A\" gives length of bytes \"A\\n\"\n    otherwise gives 0\n",
+                "highlight owned n: i32 gives i32:\n  let cells be owned buffer of n i32 filled with 1\n  length of cells\n",
             ]
         )
         html = highlight_source(source, output_format="html")
@@ -3538,6 +3539,153 @@ main gives i32:
             run = subprocess.run([str(executable)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False)
             self.assertEqual(run.returncode, 5, run.stderr)
 
+
+    def test_v029_owned_buffers_lower_to_heap_storage_and_deallocate(self):
+        owned_sum = compile_source(self.fixture("owned_buffer_sum.ins"))
+        self.assertIn("memref.alloc(", owned_sum)
+        self.assertIn("memref<?xi32>", owned_sum)
+        self.assertIn("memref.dealloc", owned_sum)
+        self.assertIn("scf.for", owned_sum)
+
+        write_indices = compile_source(self.fixture("owned_buffer_write_indices.ins"))
+        self.assertIn("memref.store", write_indices)
+        self.assertIn("memref.load", write_indices)
+
+        view = compile_source(self.fixture("owned_buffer_view.ins"))
+        self.assertIn("memref<?xi32>", view)
+        self.assertIn("memref.dealloc", view)
+
+        view_parameter = compile_source(self.fixture("owned_buffer_view_parameter.ins"))
+        self.assertIn("func.call @sum_view", view_parameter)
+        self.assertIn("memref<?xi32>", view_parameter)
+
+        layout = compile_source(self.fixture("owned_buffer_layout.ins"))
+        self.assertIn("memref<?xi8>", layout)
+        self.assertIn("memref.dealloc", layout)
+
+        float_buffer = compile_source(self.fixture("owned_buffer_float.ins"))
+        self.assertIn("memref<?xf64>", float_buffer)
+
+        enum_buffer = compile_source(self.fixture("owned_buffer_enum.ins"))
+        self.assertIn("memref<?xi8>", enum_buffer)
+
+        alias_buffer = compile_source(self.fixture("owned_buffer_alias_element.ins"))
+        self.assertIn("arith.constant 65 : i8", alias_buffer)
+
+    def test_v029_owned_buffer_artifacts_and_runtime_checks(self):
+        try:
+            resolve_toolchain()
+        except ToolchainError:
+            return
+
+        env = {**os.environ, "PYTHONPATH": str(SRC)}
+        for fixture, status in [
+            ("checked_owned_index.ins", 3),
+            ("checked_owned_length.ins", 5),
+            ("checked_owned_view.ins", 7),
+        ]:
+            with self.subTest(runtime_checked=fixture):
+                checked = subprocess.run(
+                    [
+                        sys.executable,
+                        "-m",
+                        "inscription",
+                        "run",
+                        str(FIXTURES / fixture),
+                        "--runtime-checks",
+                    ],
+                    cwd=ROOT,
+                    env=env,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    check=False,
+                )
+                self.assertEqual(checked.returncode, status, checked.stderr)
+                self.assertEqual(checked.stdout, "")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            llvm_ir = tmp_path / "owned_buffer_sum.ll"
+            llvm_proc = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "inscription",
+                    "compile",
+                    str(FIXTURES / "owned_buffer_sum.ins"),
+                    "--emit",
+                    "llvm-ir",
+                    "--verify",
+                    "-o",
+                    str(llvm_ir),
+                ],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(llvm_proc.returncode, 0, llvm_proc.stderr)
+            self.assertIn("define i32 @main", llvm_ir.read_text())
+
+            try:
+                resolve_toolchain(require_static_library=True)
+            except ToolchainError:
+                pass
+            else:
+                archive = tmp_path / "libowned_buffer_sum.a"
+                archive_proc = subprocess.run(
+                    [
+                        sys.executable,
+                        "-m",
+                        "inscription",
+                        "compile",
+                        str(FIXTURES / "owned_buffer_sum.ins"),
+                        "--emit",
+                        "static-library",
+                        "-o",
+                        str(archive),
+                    ],
+                    cwd=ROOT,
+                    env=env,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    check=False,
+                )
+                self.assertEqual(archive_proc.returncode, 0, archive_proc.stderr)
+                self.assertGreater(archive.stat().st_size, 0)
+
+            try:
+                resolve_toolchain(require_executable=True)
+            except ToolchainError:
+                return
+            executable = tmp_path / "owned_buffer_sum"
+            exe_proc = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "inscription",
+                    "compile",
+                    str(FIXTURES / "owned_buffer_sum.ins"),
+                    "--emit",
+                    "executable",
+                    "-o",
+                    str(executable),
+                ],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(exe_proc.returncode, 0, exe_proc.stderr)
+            run = subprocess.run([str(executable)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False)
+            self.assertEqual(run.returncode, 7, run.stderr)
+
     def test_negative_diagnostics(self):
         cases = {
             "malformed top level": ("Please add two numbers\n", "expected phrase definition"),
@@ -4677,6 +4825,66 @@ main gives i32:
             "exported call in check": (
                 "export add x: i32 and y: i32 gives i32 as ins_add:\n  x plus y\n\ncheck add 1 and 2 is equal to 3\n",
                 "check expression must be compile-time evaluable",
+            ),
+            "owned buffer static zero length": (
+                "bad gives i32:\n  let cells be owned buffer of 0 i32 filled with 0\n  0\n",
+                "owned buffer length must be at least 1",
+            ),
+            "owned buffer length type mismatch": (
+                "bad n: i64 gives i32:\n  let cells be owned buffer of n i32 filled with 0\n  0\n",
+                "owned buffer length must have type i32, got i64",
+            ),
+            "owned buffer boolean length": (
+                "bad gives i32:\n  let cells be owned buffer of true i32 filled with 0\n  0\n",
+                "owned buffer length must have type i32, got i1",
+            ),
+            "owned buffer i1 element unsupported": (
+                "bad n: i32 gives i32:\n  let flags be owned buffer of n i1 filled with false\n  0\n",
+                "owned buffer element type must be numeric or enum, got i1",
+            ),
+            "owned buffer union element unsupported": (
+                "union MaybeI32:\n  none\n\nbad n: i32 gives i32:\n  let values be owned buffer of n MaybeI32 filled with MaybeI32.none\n  0\n",
+                "owned buffer element type may not be a union type in v0.29",
+            ),
+            "owned buffer fill type mismatch": (
+                "bad n: i32 gives i32:\n  let cells be owned buffer of n i32 filled with true\n  0\n",
+                "owned buffer cells fill value must have type i32, got i1",
+            ),
+            "owned buffer used as scalar": (
+                "bad gives i32:\n  let cells be owned buffer of 4 i32 filled with 0\n  cells\n",
+                "owned buffer cells cannot be used as a scalar value; use `cells at index`",
+            ),
+            "owned buffer rebind invalid": (
+                "bad gives i32:\n  let cells be owned buffer of 4 i32 filled with 0\n  cells becomes 1\n  0\n",
+                "cannot rebind owned buffer cells",
+            ),
+            "owned buffer copy invalid": (
+                "bad gives i32:\n  let cells be owned buffer of 4 i32 filled with 0\n  let copy be cells\n  0\n",
+                "owned buffer cells cannot be used as a value",
+            ),
+            "owned buffer passed to fixed buffer parameter": (
+                "sum buffer cells: buffer of 4 i32 gives i32:\n  0\n\nbad gives i32:\n  let cells be owned buffer of 4 i32 filled with 0\n  sum buffer cells\n",
+                "argument cells must have type buffer of 4 i32, got owned buffer of i32",
+            ),
+            "owned buffer declaration inside if": (
+                "bad flag: i1 gives i32:\n  if flag:\n    let cells be owned buffer of 4 i32 filled with 0\n  otherwise:\n    let ignored be 0\n  0\n",
+                "owned buffer declarations are only supported at phrase body scope in v0.29",
+            ),
+            "owned buffer declaration inside loop": (
+                "bad gives i32:\n  for i from 0 up to 4:\n    let cells be owned buffer of 4 i32 filled with 0\n  0\n",
+                "owned buffer declarations are only supported at phrase body scope in v0.29",
+            ),
+            "owned buffer byte string unsupported": (
+                "bad gives i32:\n  let bytes be owned buffer of bytes \"hello\"\n  0\n",
+                "owned buffer byte-string initialization is not supported in v0.29",
+            ),
+            "owned buffer static index out of bounds": (
+                "bad gives i32:\n  let cells be owned buffer of 4 i32 filled with 0\n  cells at 4\n",
+                "owned buffer index 4 is out of bounds for owned buffer cells of length 4",
+            ),
+            "layout write to non u8 owned buffer": (
+                "packed layout record Word:\n  value: u16\n\nbad gives i32:\n  let cells be owned buffer of 2 i32 filled with 0\n  let word be Word with value be 1\n  write word into cells at 0\n  0\n",
+                "write Word requires a u8 buffer or view, got owned buffer of i32",
             ),
         }
         for name, (source, contains) in cases.items():

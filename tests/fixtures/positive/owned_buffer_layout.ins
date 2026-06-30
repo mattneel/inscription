@@ -1,0 +1,12 @@
+packed layout record Word:
+  value: u16
+
+owned layout roundtrip gives i32:
+  let bytes be owned buffer of 2 u8 filled with 0
+  let word be Word with value be 42
+  write word into bytes at 0
+  let copy be read Word from bytes at 0
+  copy.value as i32
+
+main gives i32:
+  owned layout roundtrip

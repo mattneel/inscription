@@ -184,6 +184,12 @@ class ViewType:
 
 
 @dataclass(frozen=True)
+class OwnedBufferType:
+    element_type: "ValueType"
+    length: int | None = None
+
+
+@dataclass(frozen=True)
 class RecordType:
     name: str
 
@@ -199,7 +205,7 @@ class UnionType:
     name: str
 
 
-ValueType = TypeName | BufferType | ArrayType | ViewType | RecordType | EnumType | UnionType
+ValueType = TypeName | BufferType | ArrayType | ViewType | OwnedBufferType | RecordType | EnumType | UnionType
 ReturnType = TypeName | RecordType | ArrayType | ViewType | EnumType | UnionType | None
 
 
@@ -451,6 +457,15 @@ class StorageAliasBinding:
 
 
 @dataclass(frozen=True)
+class OwnedBufferBinding:
+    name: str
+    length: Expr
+    element_type: ValueType
+    fill: Expr
+    line: int
+
+
+@dataclass(frozen=True)
 class ViewBinding:
     name: str
     source_name: str
@@ -569,6 +584,7 @@ BodyStmt = (
     | BufferBinding
     | ArrayBinding
     | StorageAliasBinding
+    | OwnedBufferBinding
     | ViewBinding
     | AssignStmt
     | BufferStoreStmt

@@ -45,6 +45,7 @@ from .ast import (
     MatchStep,
     MatchStepArm,
     OffsetOfField,
+    OwnedBufferBinding,
     Parameter,
     Program,
     RecordConstructor,
@@ -1083,7 +1084,7 @@ class Parser:
         finally:
             self.lines = original_lines
 
-    def _parse_let(self, line: Line) -> SetStmt | BufferBinding | ArrayBinding | StorageAliasBinding | ViewBinding:
+    def _parse_let(self, line: Line) -> SetStmt | BufferBinding | ArrayBinding | OwnedBufferBinding | StorageAliasBinding | ViewBinding:
         inferred_byte_buffer_match = re.fullmatch(r'let ([a-z][a-z0-9_]*) be buffer of bytes (".*")', line.text)
         if inferred_byte_buffer_match:
             values = decode_byte_string_token(inferred_byte_buffer_match.group(2), line.number)
@@ -1105,6 +1106,20 @@ class Parser:
                 ArrayType(len(values), "u8"),
                 line.number,
                 values=(ByteString(values, line.number),),
+            )
+        if re.fullmatch(r'let [a-z][a-z0-9_]* be owned buffer of bytes ".*"', line.text):
+            raise InscriptionError("owned buffer byte-string initialization is not supported in v0.29", line.number)
+        owned_buffer_match = re.fullmatch(
+            rf"let ([a-z][a-z0-9_]*) be owned buffer of (.+) ({TYPE_REF_PATTERN}) filled with (.+)",
+            line.text,
+        )
+        if owned_buffer_match:
+            return OwnedBufferBinding(
+                self._name(owned_buffer_match.group(1), line.number),
+                self._parse_expression(owned_buffer_match.group(2), line.number),
+                self._return_type(owned_buffer_match.group(3), line.number),
+                self._parse_expression(owned_buffer_match.group(4), line.number),
+                line.number,
             )
         buffer_match = re.fullmatch(
             rf"let ([a-z][a-z0-9_]*) be buffer of ({BUFFER_LENGTH_PATTERN}) ({TYPE_REF_PATTERN}) (filled with|containing) (.+)",

@@ -1,0 +1,157 @@
+(* Inscription v0.29 source grammar adds local owned dynamic buffers on top of v0.28 byte literals. *)
+program                  ::= [ module_decl ] { top_level_item } ;
+top_level_item           ::= import_decl | type_alias_decl | constant_decl | check_stmt | record_decl | layout_record_decl | packed_layout_record_decl | enum_decl | union_decl | extern_phrase_decl | export_phrase_def | phrase_definition ;
+module_decl              ::= "module" module_name ;
+import_decl              ::= "import" module_name ;
+type_alias_decl          ::= "type" type_name "be" type_expression ;
+type_expression          ::= scalar_type | nominal_or_alias_type | buffer_type | array_type | view_type ;
+module_name              ::= module_part { "." module_part } ;
+constant_decl            ::= "constant" identifier ":" constant_type "be" expression
+                           | "constant" identifier ":" constant_type "be" match_expression ;
+check_stmt               ::= "check" expression ;
+require_stmt             ::= "require" expression ;
+record_decl              ::= "record" record_name ":" newline indent record_field { record_field } dedent ;
+layout_record_decl       ::= "layout" "record" record_name ":" newline indent layout_record_field { layout_record_field } dedent ;
+packed_layout_record_decl ::= "packed" "layout" "record" record_name ":" newline indent layout_record_field { layout_record_field } dedent ;
+enum_decl                ::= "enum" enum_name ":" integer_or_alias_type ":" newline indent enum_case { enum_case } dedent ;
+enum_case                ::= field_name "be" expression ;
+union_decl               ::= "union" union_name ":" newline indent union_variant { union_variant } dedent ;
+union_variant            ::= variant_name
+                           | variant_name union_payload_field { "and" union_payload_field } ;
+union_payload_field      ::= payload_name ":" union_payload_type ;
+union_payload_type       ::= scalar_type | enum_type | record_type | alias_type ;  (* semantically may be a value record or layout record; not a union *)
+record_field             ::= field_name ":" value_field_type ;
+layout_record_field      ::= field_name ":" layout_field_type ;
+extern_phrase_decl       ::= "extern" phrase_template "gives" ( scalar_type | alias_type ) "as" external_symbol
+                            | "extern" phrase_template "does" "as" external_symbol ;
+external_symbol          ::= external_identifier { "." external_identifier } ;
+export_phrase_def        ::= "export" phrase_template "gives" ( scalar_type | alias_type ) "as" external_symbol ":" gives_body
+                            | "export" phrase_template "does" "as" external_symbol ":" does_body ;
+phrase_definition        ::= gives_definition | does_definition ;
+gives_definition         ::= phrase_template "gives" return_type ":" gives_body ;
+does_definition          ::= phrase_template "does" ":" does_body ;
+return_type              ::= scalar_type | record_type | enum_type | union_type | alias_type | array_type ;  (* array returns parse for deterministic unsupported diagnostics *)
+phrase_template          ::= phrase_part { phrase_part } ;
+phrase_part              ::= word | hole ;
+hole                     ::= identifier ":" hole_type ;
+hole_type                ::= scalar_type | buffer_type | view_type | array_type | record_type | enum_type | union_type | alias_type ;  (* array parameters parse for deterministic unsupported diagnostics *)
+record_type              ::= [ module_name "." ] record_name ;
+enum_type                ::= [ module_name "." ] enum_name ;
+union_type               ::= [ module_name "." ] union_name ;
+alias_type               ::= [ module_name "." ] alias_name ;
+nominal_or_alias_type    ::= record_type | enum_type | union_type | alias_type ;
+integer_or_alias_type    ::= scalar_integer_type | alias_type ;
+constant_type            ::= scalar_type | enum_type | alias_type ;  (* union constants are unsupported in v0.29 *)
+value_field_type         ::= scalar_type | enum_type | record_type | alias_type ;  (* union record fields are unsupported in v0.29 *)
+layout_field_type        ::= scalar_integer_type | enum_type | alias_type ;
+scalar_type              ::= "i1" | scalar_integer_type | float_type ;
+float_type               ::= "f32" | "f64" ;
+scalar_integer_type      ::= "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" ;
+buffer_type              ::= "buffer" "of" buffer_length storage_element_type ;
+array_type               ::= "array" "of" buffer_length storage_element_type ;
+storage_element_type     ::= scalar_integer_type | float_type | enum_type | alias_type ;
+buffer_element_type      ::= storage_element_type ;
+view_type                ::= "view" "of" view_element_type ;
+view_element_type        ::= scalar_integer_type | float_type | enum_type | alias_type ;
+buffer_length            ::= integer | identifier | "(" expression ")" ;
+gives_body               ::= { body_item } value_block ;
+does_body                ::= body_item { body_item } ;
+body_item                ::= require_stmt | check_stmt | let_binding | buffer_binding | array_binding | owned_buffer_binding | storage_alias_binding | view_binding | assignment | field_assignment | storage_store | layout_write | phrase_call_step | while_block | for_block | for_each_block | if_block | match_step_block ;
+step                     ::= body_item ;
+let_binding              ::= "let" identifier optional_type_annotation "be" expression
+                           | "let" identifier optional_type_annotation "be" match_expression ;
+storage_alias_binding    ::= "let" identifier "be" alias_type "filled" "with" expression
+                           | "let" identifier "be" alias_type "containing" containing_list ;
+optional_type_annotation ::= | ":" ( scalar_type | record_type | enum_type | union_type | alias_type ) ;
+buffer_binding           ::= "let" identifier "be" "buffer" "of" buffer_length buffer_element_type "filled" "with" expression
+                            | "let" identifier "be" "buffer" "of" buffer_length buffer_element_type "containing" containing_list
+                            | "let" identifier "be" "buffer" "of" byte_string_literal ;
+owned_buffer_binding     ::= "let" identifier "be" "owned" "buffer" "of" expression storage_element_type "filled" "with" expression ;
+array_binding            ::= "let" identifier "be" "array" "of" buffer_length storage_element_type "filled" "with" expression
+                            | "let" identifier "be" "array" "of" buffer_length storage_element_type "containing" containing_list
+                            | "let" identifier "be" "array" "of" byte_string_literal ;
+expression_list          ::= expression { "," expression } ;
+containing_list          ::= containing_item { "," containing_item } ;
+containing_item          ::= expression | byte_string_literal ;
+view_binding             ::= "let" identifier "be" "view" "of" identifier "from" expression "for" expression ;
+assignment               ::= identifier "becomes" expression ;
+field_assignment         ::= identifier "." field_name "becomes" expression ;
+storage_store            ::= identifier "at" expression "becomes" expression ;
+layout_write             ::= "write" identifier "into" identifier "at" expression ;
+phrase_call_step         ::= phrase_call ;
+while_block              ::= "while" expression ":" newline indent step { step } dedent ;
+for_block                ::= "for" identifier "from" expression "up" "to" expression optional_by ":" newline indent step { step } dedent ;
+optional_by              ::= | "by" integer ;
+for_each_block           ::= "for" "each" "index" identifier "of" identifier ":" newline indent step { step } dedent ;
+if_block                 ::= "if" expression ":" newline indent step { step } dedent
+                             "otherwise" ":" newline indent step { step } dedent ;
+match_step_block         ::= "match" expression ":" newline indent match_step_arm { match_step_arm } match_step_otherwise dedent ;
+match_step_arm           ::= pattern ":" newline indent step { step } dedent ;
+match_step_otherwise     ::= "otherwise" ":" newline indent step { step } dedent ;
+value_block              ::= expression
+                           | match_expression
+                           | when_line { when_line } otherwise_line ;
+match_expression         ::= "match" expression ":" newline indent match_expression_arm { match_expression_arm } match_expression_otherwise dedent ;
+match_expression_arm     ::= pattern "gives" expression ;
+match_expression_otherwise ::= "otherwise" "gives" expression ;
+pattern                  ::= union_pattern | enum_case_expression | byte_literal | qualified_constant | identifier | integer | boolean ;
+union_pattern            ::= union_constructor_name [ "with" union_pattern_field { "and" union_pattern_field } ] ;
+union_pattern_field      ::= payload_name [ "as" identifier ] ;
+when_line                ::= expression "when" expression ;
+otherwise_line           ::= "otherwise" expression ;
+expression               ::= boolean_or ;
+boolean_or               ::= boolean_and { "or" boolean_and } ;
+boolean_and              ::= comparison { "and" comparison } ;
+comparison               ::= bitwise_or [ comparator bitwise_or ] ;
+comparator               ::= "is equal to" | "is not equal to" | "is less than" | "is less than or equal to" | "is greater than" | "is greater than or equal to" ;
+bitwise_or               ::= bitwise_xor { "bitwise or" bitwise_xor } ;
+bitwise_xor              ::= bitwise_and { "bitwise xor" bitwise_and } ;
+bitwise_and              ::= shift { "bitwise and" shift } ;
+shift                    ::= sum { ( "shifted left by" | "shifted right by" ) sum } ;
+sum                      ::= product { ( "plus" | "minus" ) product } ;
+product                  ::= unary { ( "times" | "divided by" | "remainder" ) unary } ;
+unary                    ::= "not" unary | "bitwise not" unary | cast ;
+cast                     ::= postfix { "as" ( scalar_type | enum_type | alias_type ) } ;
+postfix                  ::= primary { field_access_suffix | storage_load_suffix } ;
+field_access_suffix      ::= "." field_name ;
+storage_load_suffix      ::= "at" primary ;
+primary                  ::= integer | float_literal | byte_literal | "zero" | boolean | enum_case_expression | union_constructor | length_expression | size_expression | alignment_expression | offset_expression | layout_read | record_constructor | qualified_constant | identifier | phrase_call | qualified_phrase_call | "(" expression ")" ;
+enum_case_expression     ::= enum_type "." field_name ;
+union_constructor        ::= union_constructor_name
+                           | union_constructor_name "with" union_constructor_field { "and" union_constructor_field } ;
+union_constructor_field  ::= payload_name "be" expression ;
+union_constructor_name   ::= union_type "." variant_name ;
+record_constructor       ::= record_name "with" record_initializer { "and" record_initializer } ;
+record_initializer       ::= field_name "be" expression ;
+length_expression        ::= "length" "of" identifier
+                            | "length" "of" byte_string_literal ;
+size_expression          ::= "size" "of" record_name ;
+alignment_expression     ::= "alignment" "of" record_name ;
+offset_expression        ::= "offset" "of" field_name "in" record_name ;
+layout_read              ::= "read" record_name "from" identifier "at" expression ;
+boolean                  ::= "true" | "false" ;
+phrase_call              ::= ? a declared local phrase_template with holes filled by compatible scalar, enum, union, buffer, view, array, or record expressions/bindings ? ;
+qualified_phrase_call    ::= module_name "." phrase_call ;
+qualified_constant       ::= module_name "." identifier ;
+word                     ::= ? [a-z][a-z0-9_]* literal phrase word ? ;
+module_part              ::= ? [A-Za-z][A-Za-z0-9_]* module path component ? ;
+identifier               ::= ? [a-z][a-z0-9_]*, excluding reserved words ? ;
+external_identifier      ::= ? [A-Za-z_][A-Za-z0-9_]* external symbol component ? ;
+field_name               ::= ? [a-z][a-z0-9_]* field identifier ? ;
+payload_name             ::= field_name ;
+variant_name             ::= field_name ;
+record_name              ::= ? [A-Z][A-Za-z0-9_]* nominal record type name ? ;
+enum_name                ::= ? [A-Z][A-Za-z0-9_]* nominal enum type name ? ;
+union_name               ::= ? [A-Z][A-Za-z0-9_]* nominal union type name ? ;
+type_name                ::= ? [A-Z][A-Za-z0-9_]* type alias name ? ;
+alias_name               ::= type_name ;
+integer                  ::= ? base-10 decimal integer literal ? ;
+float_literal            ::= ? decimal floating literal with a decimal point or exponent, e.g. 1.0 or 1.5e-2 ? ;
+byte_literal             ::= "byte" string_literal ;
+byte_string_literal      ::= "bytes" string_literal ;
+string_literal           ::= ? double-quoted UTF-8 text with v0.28/v0.29 escapes \\, \", \n, \r, \t, \0, and \xNN ? ;
+newline                  ::= ? line break ? ;
+indent                   ::= ? greater indentation than the control-flow header ? ;
+dedent                   ::= ? indentation returning to the enclosing block ? ;
+
+(* v0.29: owned buffer bindings create phrase-scope heap-backed mutable memrefs with dynamic i32 length and numeric-or-enum elements. They are local storage only: no owned buffer parameters, returns, type aliases, nested declarations, byte-string constructor, ownership transfer, or C ABI is introduced. byte "..." and bytes "..." retain the v0.28 rules. *)

@@ -44,6 +44,7 @@ from .ast import (
     MatchStep,
     MatchStepArm,
     OffsetOfField,
+    OwnedBufferBinding,
     Parameter,
     Program,
     RecordConstructor,
@@ -390,6 +391,7 @@ def qualify_type(type_name: ValueType, module_name: str, record_names: set[str],
         return ArrayType(qualify_buffer_length(type_name.length, module_name, record_names, constant_names), qualify_type(type_name.element_type, module_name, record_names, constant_names))
     if isinstance(type_name, ViewType):
         return ViewType(qualify_type(type_name.element_type, module_name, record_names, constant_names), type_name.length)
+    # Owned buffer types are local semantic artifacts; they are not source-level alias targets.
     if isinstance(type_name, RecordType) and type_name.name in record_names:
         return RecordType(qname(module_name, type_name.name))
     return type_name
@@ -441,6 +443,14 @@ def qualify_stmt(stmt: Stmt, module_name: str, record_names: set[str], constant_
             stmt.initializer,
             fill,
             values,
+        )
+    if isinstance(stmt, OwnedBufferBinding):
+        return OwnedBufferBinding(
+            stmt.name,
+            qualify_expr(stmt.length, module_name, record_names, constant_names),
+            qualify_type(stmt.element_type, module_name, record_names, constant_names),
+            qualify_expr(stmt.fill, module_name, record_names, constant_names),
+            stmt.line,
         )
     if isinstance(stmt, ViewBinding):
         return ViewBinding(

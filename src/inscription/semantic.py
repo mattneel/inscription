@@ -45,6 +45,8 @@ from .ast import (
     MatchExpr,
     MatchStep,
     OffsetOfField,
+    OwnedBufferBinding,
+    OwnedBufferType,
     Parameter,
     Program,
     RecordConstructor,
@@ -103,7 +105,7 @@ INTEGER_RANGES: dict[TypeName, tuple[int, int]] = {
     "u32": (0, 2**32 - 1),
     "u64": (0, 2**64 - 1),
 }
-BindingKind = Literal["param", "let", "buffer", "array", "view", "index", "constant"]
+BindingKind = Literal["param", "let", "buffer", "owned_buffer", "array", "view", "index", "constant"]
 
 
 @dataclass(frozen=True)
@@ -208,6 +210,8 @@ def resolve_named_value_type(type_name: ValueType, stack: tuple[str, ...] = ()) 
         return ArrayType(type_name.length, resolve_named_value_type(type_name.element_type, stack))
     if isinstance(type_name, ViewType):
         return ViewType(resolve_named_value_type(type_name.element_type, stack), type_name.length)
+    if isinstance(type_name, OwnedBufferType):
+        return OwnedBufferType(resolve_named_value_type(type_name.element_type, stack), type_name.length)
     if isinstance(type_name, RecordType):
         alias = ACTIVE_ALIAS_DECLS.get(type_name.name)
         if alias is not None:
@@ -696,6 +700,8 @@ def format_type(type_name: ValueType) -> str:
         return f"array of {type_name.length} {format_type(type_name.element_type)}"
     if isinstance(type_name, ViewType):
         return f"view of {format_type(type_name.element_type)}"
+    if isinstance(type_name, OwnedBufferType):
+        return f"owned buffer of {format_type(type_name.element_type)}"
     if isinstance(type_name, RecordType):
         return type_name.name
     if isinstance(type_name, EnumType):
@@ -829,7 +835,10 @@ def _check_function(
                 require_type(actual, fn.return_type, stmt.line)
             returned = True
         else:
-            _check_body_stmt(stmt, bindings, functions, records, constants)
+            if isinstance(stmt, OwnedBufferBinding):
+                _declare_owned_buffer(stmt, bindings, functions, records, constants)
+            else:
+                _check_body_stmt(stmt, bindings, functions, records, constants)
     if not returned:
         raise InscriptionError(f"phrase '{fn.name}' must evaluate to a value", fn.line)
 
@@ -895,7 +904,10 @@ def _check_does_function(
     for stmt in fn.body:
         if isinstance(stmt, ReturnStmt):
             raise InscriptionError("does phrase body cannot end with a value expression", stmt.line)
-        _check_body_stmt(stmt, bindings, functions, records, constants)
+        if isinstance(stmt, OwnedBufferBinding):
+            _declare_owned_buffer(stmt, bindings, functions, records, constants)
+        else:
+            _check_body_stmt(stmt, bindings, functions, records, constants)
 
 
 def _check_parameter_type(
@@ -963,6 +975,13 @@ def _check_view_type(view_type: ViewType, line: int) -> None:
         raise InscriptionError(f"view element type must be an integer type, got {format_type(view_type.element_type)}", line)
 
 
+def _check_owned_buffer_element_type(element_type: ValueType, line: int) -> None:
+    if isinstance(element_type, UnionType):
+        raise InscriptionError("owned buffer element type may not be a union type in v0.29", line)
+    if not is_numeric_type(element_type) and not isinstance(element_type, EnumType):
+        raise InscriptionError(f"owned buffer element type must be numeric or enum, got {format_type(element_type)}", line)
+
+
 def _check_body_stmt(
     stmt: BodyStmt,
     bindings: dict[str, Binding],
@@ -988,6 +1007,8 @@ def _check_body_stmt(
     if isinstance(stmt, StorageAliasBinding):
         _declare_storage_alias(stmt, bindings, functions, records, constants)
         return
+    if isinstance(stmt, OwnedBufferBinding):
+        raise InscriptionError("owned buffer declarations are only supported at phrase body scope in v0.29", stmt.line)
     if isinstance(stmt, ViewBinding):
         _declare_view(stmt, bindings, functions, records, constants)
         return
@@ -1032,6 +1053,8 @@ def _check_no_shadow(name: str, line: int, bindings: dict[str, Binding], *, kind
         raise InscriptionError(f"{kind} binding '{name}' cannot shadow phrase hole", line)
     if existing.kind == "buffer":
         raise InscriptionError(f"{kind} binding '{name}' cannot shadow buffer binding", line)
+    if existing.kind == "owned_buffer":
+        raise InscriptionError(f"{kind} binding '{name}' cannot shadow owned buffer binding", line)
     if existing.kind == "array":
         raise InscriptionError(f"{kind} binding '{name}' cannot shadow array binding", line)
     if existing.kind == "view":
@@ -1062,6 +1085,10 @@ def _declare_let(
             )
         bindings[stmt.name] = Binding(resolved_declared_type, "let", stmt.line)
         return
+    if isinstance(stmt.expr, Variable):
+        source_type = _env_types(bindings).get(stmt.expr.name)
+        if isinstance(source_type, OwnedBufferType):
+            raise InscriptionError(f"owned buffer {stmt.expr.name} cannot be used as a value", stmt.line)
     type_name = infer_expr_type(stmt.expr, _env_types(bindings), functions, records, constants=constants)
     bindings[stmt.name] = Binding(type_name, "let", stmt.line)
 
@@ -1149,6 +1176,32 @@ def _declare_array(
     bindings[stmt.name] = Binding(array_type, "array", stmt.line, writable=False, root=stmt.name)
 
 
+def _declare_owned_buffer(
+    stmt: OwnedBufferBinding,
+    bindings: dict[str, Binding],
+    functions: dict[str, Function],
+    records: dict[str, RecordDecl],
+    constants: dict[str, ConstValue],
+) -> None:
+    _check_no_shadow(stmt.name, stmt.line, bindings, kind="owned buffer")
+    env = _env_types(bindings)
+    length_type = _infer_declared_type(stmt.length, "i32", env, functions, records, constants)
+    if length_type != "i32":
+        raise InscriptionError(f"owned buffer length must have type i32, got {format_type(length_type)}", stmt.line)
+    static_length = _static_integer_value(stmt.length, env, functions, records, constants)
+    if static_length is not None and static_length < 1:
+        raise InscriptionError("owned buffer length must be at least 1", getattr(stmt.length, "line", stmt.line))
+    element_type = resolve_value_type(stmt.element_type, stmt.line, records, constants, functions, env)
+    _check_owned_buffer_element_type(element_type, stmt.line)
+    actual = _infer_declared_type(stmt.fill, element_type, env, functions, records, constants)
+    if actual != element_type:
+        raise InscriptionError(
+            f"owned buffer {stmt.name} fill value must have type {format_type(element_type)}, got {format_type(actual)}",
+            stmt.line,
+        )
+    bindings[stmt.name] = Binding(OwnedBufferType(element_type, static_length), "owned_buffer", stmt.line, root=stmt.name)
+
+
 def _declare_storage_alias(
     stmt: StorageAliasBinding,
     bindings: dict[str, Binding],
@@ -1192,7 +1245,7 @@ def _declare_view(
     source = bindings.get(stmt.source_name)
     if source is None:
         raise InscriptionError(f"unknown binding {stmt.source_name}", stmt.line)
-    if not isinstance(source.type_name, BufferType | ArrayType | ViewType):
+    if not isinstance(source.type_name, BufferType | ArrayType | ViewType | OwnedBufferType):
         raise InscriptionError(
             f"view source {stmt.source_name} must be a buffer or view, got {format_type(source.type_name)}",
             stmt.line,
@@ -1246,6 +1299,8 @@ def _check_assignment(
         raise InscriptionError(f"cannot rebind array {stmt.name}", stmt.line)
     if isinstance(binding.type_name, ViewType):
         raise InscriptionError(f"cannot rebind view {stmt.name}", stmt.line)
+    if isinstance(binding.type_name, OwnedBufferType):
+        raise InscriptionError(f"cannot rebind owned buffer {stmt.name}", stmt.line)
     if not binding.writable:
         if binding.kind == "constant":
             raise InscriptionError(f"cannot rebind constant {stmt.name}", stmt.line)
@@ -1312,7 +1367,7 @@ def _check_layout_write(
     buffer_binding = _require_indexable_binding(stmt.buffer_name, stmt.line, bindings)
     buffer_type = buffer_binding.type_name
     if buffer_type.element_type != "u8":
-        noun = "u8 buffer or view" if isinstance(buffer_type, ViewType) else "u8 buffer"
+        noun = "u8 buffer or view" if isinstance(buffer_type, ViewType | OwnedBufferType) else "u8 buffer"
         raise InscriptionError(
             f"write {record_type.name} requires a {noun}, got {format_type(buffer_type)}", stmt.line
         )
@@ -1408,7 +1463,7 @@ def _check_for_each(
     binding = bindings.get(stmt.buffer_name)
     if binding is None:
         raise InscriptionError(f"unknown binding {stmt.buffer_name}", stmt.line)
-    if not isinstance(binding.type_name, BufferType | ArrayType | ViewType):
+    if not isinstance(binding.type_name, BufferType | ArrayType | ViewType | OwnedBufferType):
         raise InscriptionError(f"for each index requires a buffer, got {format_type(binding.type_name)}", stmt.line)
     if not stmt.body:
         raise InscriptionError("for loop body must contain at least one step", stmt.line)
@@ -1522,11 +1577,13 @@ def _check_call_arguments(
                     raise InscriptionError(f"view {name} cannot be passed to multiple view parameters in one call", call.line)
                 if isinstance(actual_type, ArrayType):
                     raise InscriptionError(f"array {name} cannot be passed to multiple view parameters in one call", call.line)
+                if isinstance(actual_type, OwnedBufferType):
+                    raise InscriptionError(f"owned buffer {name} cannot be passed to multiple view parameters in one call", call.line)
                 raise InscriptionError(f"buffer {name} cannot be passed to multiple buffer parameters in one call", call.line)
             seen_roots[root] = name
             full_binding = bindings[name]
             if effectful and not full_binding.writable:
-                noun = "view" if isinstance(actual_type, ViewType) else "array" if isinstance(actual_type, ArrayType) else "buffer"
+                noun = "view" if isinstance(actual_type, ViewType) else "array" if isinstance(actual_type, ArrayType) else "owned buffer" if isinstance(actual_type, OwnedBufferType) else "buffer"
                 raise InscriptionError(f"cannot pass read-only {noun} {name} to effectful phrase `{target.display_name}`", call.line)
             continue
         if isinstance(expected, RecordType):
@@ -1608,6 +1665,8 @@ def _require_buffer_argument(
     if not isinstance(actual, BufferType):
         if isinstance(actual, ArrayType):
             raise InscriptionError(f"argument {name} must have type {format_type(expected)}, got {format_type(actual)}", line)
+        if isinstance(actual, OwnedBufferType):
+            raise InscriptionError(f"argument {name} must have type {format_type(expected)}, got {format_type(actual)}", line)
         raise InscriptionError(f"argument {name} must be {format_type(expected)}, got {format_type(actual)}", line)
     if actual != expected:
         raise InscriptionError(
@@ -1622,7 +1681,7 @@ def _require_view_argument(
     env: dict[str, ValueType],
     line: int,
     records: dict[str, RecordDecl],
-) -> tuple[str, BufferType | ArrayType | ViewType]:
+) -> tuple[str, BufferType | ArrayType | ViewType | OwnedBufferType]:
     name = _argument_name(arg)
     actual = env.get(name) if isinstance(arg, Variable) else None
     if actual is None:
@@ -1645,6 +1704,12 @@ def _require_view_argument(
             )
         return name, actual
     if isinstance(actual, ViewType):
+        if actual.element_type != expected.element_type:
+            raise InscriptionError(
+                f"argument {name} must have type {format_type(expected)}, got {format_type(actual)}", line
+            )
+        return name, actual
+    if isinstance(actual, OwnedBufferType):
         if actual.element_type != expected.element_type:
             raise InscriptionError(
                 f"argument {name} must have type {format_type(expected)}, got {format_type(actual)}", line
@@ -1687,7 +1752,7 @@ def _infer_call_scalar_argument_type(
 ) -> ValueType:
     if isinstance(arg, Variable):
         actual = env.get(arg.name)
-        if isinstance(actual, BufferType | ArrayType | ViewType | RecordType | UnionType):
+        if isinstance(actual, BufferType | ArrayType | ViewType | OwnedBufferType | RecordType | UnionType):
             return actual
     return _infer_declared_type(arg, expected, env, functions, records)
 
@@ -1763,6 +1828,10 @@ def resolve_value_type(
         type_name = ViewType(resolve_value_type(type_name.element_type, line, records, constants, functions, env), type_name.length)
         _check_view_type(type_name, line)
         return type_name
+    if isinstance(type_name, OwnedBufferType):
+        element_type = resolve_value_type(type_name.element_type, line, records, constants, functions, env)
+        _check_owned_buffer_element_type(element_type, line)
+        return OwnedBufferType(element_type, type_name.length)
     return type_name
 
 
@@ -1866,7 +1935,7 @@ def evaluate_const_expr(
     expected: ValueType | None = None,
 ) -> ConstValue:
     type_name = infer_expr_type(expr, env, functions, records, expected=expected, constants=constants)
-    if isinstance(type_name, RecordType | BufferType | ArrayType | ViewType | UnionType):
+    if isinstance(type_name, RecordType | BufferType | ArrayType | ViewType | OwnedBufferType | UnionType):
         noun = "union" if isinstance(type_name, UnionType) else "record"
         raise CompileTimeEvaluationError(f"{noun} value is not compile-time evaluable", getattr(expr, "line", None))
 
@@ -1916,7 +1985,7 @@ def evaluate_const_expr(
         binding_type = env.get(expr.name)
         if binding_type is None:
             raise InscriptionError(f"unknown binding {expr.name}", expr.line)
-        if not isinstance(binding_type, BufferType | ArrayType | ViewType):
+        if not isinstance(binding_type, BufferType | ArrayType | ViewType | OwnedBufferType):
             raise InscriptionError(f"length of {expr.name} requires a buffer, got {format_type(binding_type)}", expr.line)
         if not isinstance(binding_type.length, int):
             raise CompileTimeEvaluationError(f"length of {expr.name} is not compile-time evaluable", expr.line)
@@ -2241,6 +2310,8 @@ def infer_expr_type(
             raise InscriptionError(f"array {expr.name} cannot be used as a scalar value; use `{expr.name} at index`", expr.line)
         if isinstance(actual, ViewType):
             raise InscriptionError(f"view {expr.name} cannot be used as a scalar value; use `{expr.name} at index`", expr.line)
+        if isinstance(actual, OwnedBufferType):
+            raise InscriptionError(f"owned buffer {expr.name} cannot be used as a scalar value; use `{expr.name} at index`", expr.line)
         if isinstance(actual, RecordType):
             if expected is None or expected == actual:
                 return actual
@@ -2265,7 +2336,7 @@ def infer_expr_type(
         binding_type = env.get(expr.name)
         if binding_type is None:
             raise InscriptionError(f"unknown binding {expr.name}", expr.line)
-        if not isinstance(binding_type, BufferType | ArrayType | ViewType):
+        if not isinstance(binding_type, BufferType | ArrayType | ViewType | OwnedBufferType):
             raise InscriptionError(f"length of {expr.name} requires a buffer, got {format_type(binding_type)}", expr.line)
         if isinstance(binding_type, BufferType | ArrayType) and not isinstance(binding_type.length, int):
             raise InscriptionError("buffer length must be compile-time evaluable", expr.line)
@@ -2933,7 +3004,7 @@ def _require_indexable_binding(name: str, line: int, bindings: dict[str, Binding
     binding = bindings.get(name)
     if binding is None:
         raise InscriptionError(f"unknown binding {name}", line)
-    if not isinstance(binding.type_name, BufferType | ArrayType | ViewType):
+    if not isinstance(binding.type_name, BufferType | ArrayType | ViewType | OwnedBufferType):
         raise InscriptionError(f"{name} is not a buffer", line)
     return binding
 
@@ -2947,11 +3018,11 @@ def _require_buffer_type(name: str, line: int, env: dict[str, ValueType]) -> Buf
     return binding_type
 
 
-def _require_indexable_type(name: str, line: int, env: dict[str, ValueType]) -> BufferType | ArrayType | ViewType:
+def _require_indexable_type(name: str, line: int, env: dict[str, ValueType]) -> BufferType | ArrayType | ViewType | OwnedBufferType:
     binding_type = env.get(name)
     if binding_type is None:
         raise InscriptionError(f"unknown binding {name}", line)
-    if not isinstance(binding_type, BufferType | ArrayType | ViewType):
+    if not isinstance(binding_type, BufferType | ArrayType | ViewType | OwnedBufferType):
         raise InscriptionError(f"{name} is not a buffer", line)
     return binding_type
 
@@ -3132,6 +3203,8 @@ def infer_layout_read_type(
             noun = "u8 buffer or view"
         elif isinstance(buffer_type, ArrayType):
             noun = "u8 buffer, view, or array"
+        elif isinstance(buffer_type, OwnedBufferType):
+            noun = "u8 buffer or view"
         else:
             noun = "u8 buffer"
         raise InscriptionError(f"read {expr.type_name} requires a {noun}, got {format_type(buffer_type)}", expr.line)
@@ -3199,7 +3272,7 @@ def _check_array_index(
 
 def _check_storage_index(
     name: str,
-    storage_type: BufferType | ArrayType | ViewType,
+    storage_type: BufferType | ArrayType | ViewType | OwnedBufferType,
     index: Expr,
     env: dict[str, ValueType],
     functions: dict[str, Function],
@@ -3211,6 +3284,20 @@ def _check_storage_index(
         return
     if isinstance(storage_type, ArrayType):
         _check_array_index(name, storage_type, index, env, functions, records, constants)
+        return
+    if isinstance(storage_type, OwnedBufferType):
+        constants = constants or {}
+        static_index = _static_integer_value(index, env, functions, records, constants)
+        if static_index is not None and storage_type.length is not None and not 0 <= static_index < storage_type.length:
+            raise InscriptionError(
+                f"owned buffer index {static_index} is out of bounds for owned buffer {name} of length {storage_type.length}",
+                getattr(index, "line", None),
+            )
+        index_type = infer_expr_type(index, env, functions, records)
+        if not is_integer_type(index_type):
+            raise InscriptionError(
+                f"buffer index must be an integer type, got {format_type(index_type)}", getattr(index, "line", None)
+            )
         return
     constants = constants or {}
     static_index = _static_integer_value(index, env, functions, records, constants)
@@ -3226,7 +3313,7 @@ def _check_storage_index(
         )
 
 
-def _static_storage_length(type_name: BufferType | ArrayType | ViewType) -> int | None:
+def _static_storage_length(type_name: BufferType | ArrayType | ViewType | OwnedBufferType) -> int | None:
     return type_name.length if isinstance(type_name.length, int) else None
 
 
@@ -3236,7 +3323,7 @@ def _check_layout_index(
     type_name: str,
     buffer_name: str,
     record_size: int,
-    buffer_type: BufferType | ArrayType | ViewType,
+    buffer_type: BufferType | ArrayType | ViewType | OwnedBufferType,
     index: Expr,
     env: dict[str, ValueType],
     functions: dict[str, Function],
