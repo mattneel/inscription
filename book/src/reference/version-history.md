@@ -15,3 +15,4 @@ Recent milestones:
 - v0.34: explicit `then` parent-continuation clauses for nested punctuation control flow.
 - v0.35: mdBook documentation site and GitHub Pages workflow.
 - v0.36: explicit `move` and consuming owned-buffer parameters.
+- v0.37: owned temporary moves with `move (call)` and consuming pipelines.

@@ -2333,6 +2333,22 @@ def parse_expression_tokens(tokens: list[str], line: int, phrases: tuple[PhraseT
     return expr
 
 
+def _is_wrapped_by_single_parenthesized_group(tokens: list[str]) -> bool:
+    if len(tokens) < 2 or tokens[0] != "(" or tokens[-1] != ")":
+        return False
+    depth = 0
+    for index, token in enumerate(tokens):
+        if token == "(":
+            depth += 1
+        elif token == ")":
+            depth -= 1
+            if depth == 0 and index != len(tokens) - 1:
+                return False
+        if depth < 0:
+            return False
+    return depth == 0
+
+
 def parse_comparison(text: str, line: int, phrases: tuple[PhraseTemplate, ...] = ()) -> Comparison:
     expr = parse_expression(text, line, phrases)
     if not isinstance(expr, Comparison):
@@ -2846,6 +2862,13 @@ class ExpressionParser:
         if arg_tokens and arg_tokens[0] == "move":
             if len(arg_tokens) == 1:
                 raise InscriptionError("move must name an owned buffer binding", self.line)
+            if arg_tokens[1] == "(":
+                if not _is_wrapped_by_single_parenthesized_group(arg_tokens[1:]):
+                    raise InscriptionError("move expected an owned-buffer-returning phrase call", self.line)
+                source = parse_expression_tokens(arg_tokens[2:-1], self.line, self.phrases)
+                return MoveArg(source, self.line)
+            if len(arg_tokens) > 2:
+                raise InscriptionError("owned buffer phrase call in move argument must be parenthesized", self.line)
             source = parse_expression_tokens(arg_tokens[1:], self.line, self.phrases)
             return MoveArg(source, self.line)
         return parse_expression_tokens(arg_tokens, self.line, self.phrases)

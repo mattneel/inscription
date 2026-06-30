@@ -1771,11 +1771,20 @@ def _check_call_arguments(
 ) -> None:
     _check_call_arity(call, target)
     seen_roots: dict[str, str] = {}
+    moved_roots: dict[str, str] = {}
     env = _env_types(bindings)
     for arg, param in zip(call.args, target.params, strict=True):
         expected = resolve_value_type(param.type_name, call.line, records, constants, functions, {})
         if isinstance(expected, OwnedBufferType):
-            _require_owned_move_argument(arg, expected, param.name, bindings, functions, records, constants, call.line, scope_depth)
+            moved = _require_owned_move_argument(arg, expected, param.name, bindings, functions, records, constants, call.line, scope_depth)
+            if moved is not None:
+                moved_name, moved_root = moved
+                previous = seen_roots.get(moved_root)
+                if previous is not None:
+                    if previous == moved_name:
+                        raise InscriptionError(f"owned buffer {moved_name} cannot be moved and borrowed in the same call", call.line)
+                    raise InscriptionError(f"owned buffer {moved_name} cannot be moved while a same-root view is passed in the same call", call.line)
+                moved_roots[moved_root] = moved_name
             continue
         if isinstance(arg, MoveArg):
             raise InscriptionError("move may only be used as an argument to an owned buffer parameter", arg.line)
@@ -1793,6 +1802,11 @@ def _check_call_arguments(
             _reject_unbound_owned_buffer_result(arg, functions)
             name, actual_type = _require_view_argument(arg, expected, env, getattr(arg, "line", call.line), records)
             root = bindings[name].root or name
+            moved_name = moved_roots.get(root)
+            if moved_name is not None:
+                if name == moved_name:
+                    raise InscriptionError(f"owned buffer {moved_name} cannot be moved and borrowed in the same call", call.line)
+                raise InscriptionError(f"owned buffer {moved_name} cannot be moved while a same-root view is passed in the same call", call.line)
             previous = seen_roots.get(root)
             if previous is not None:
                 if previous != name:
@@ -1809,6 +1823,8 @@ def _check_call_arguments(
                 raise InscriptionError(f"buffer {name} cannot be passed to multiple buffer parameters in one call", call.line)
             seen_roots[root] = name
             full_binding = bindings[name]
+            if full_binding.moved:
+                raise InscriptionError(f"owned buffer {name} was moved and cannot be used", getattr(arg, "line", call.line))
             if effectful and not full_binding.writable:
                 noun = "view" if isinstance(actual_type, ViewType) else "array" if isinstance(actual_type, ArrayType) else "owned buffer" if isinstance(actual_type, OwnedBufferType) else "buffer"
                 raise InscriptionError(f"cannot pass read-only {noun} {name} to effectful phrase `{target.display_name}`", call.line)
@@ -1876,13 +1892,48 @@ def _move_source_name(source: Expr) -> str | None:
     return source.name if isinstance(source, Variable) else None
 
 
-def _owned_returning_call_message(source: Expr, functions: dict[str, Function]) -> str | None:
+def _owned_move_temp_type(
+    source: Expr,
+    functions: dict[str, Function],
+    records: dict[str, RecordDecl],
+    constants: dict[str, ConstValue],
+    bindings: dict[str, Binding],
+    *,
+    scope_depth: int,
+) -> OwnedBufferType:
     if not isinstance(source, Call):
-        return None
+        raise InscriptionError("move expected an owned-buffer-returning phrase call", getattr(source, "line", 0))
+    _check_expr_ownership(source, bindings, functions, records, constants, scope_depth=scope_depth)
     target = _lookup_phrase(source.name, source.line, functions)
-    if isinstance(target.return_type, OwnedBufferType):
-        return f"owned buffer result from `{target.display_name}` must be bound before it can be moved"
-    return None
+    if not isinstance(target.return_type, OwnedBufferType):
+        if target.return_type is None:
+            raise InscriptionError("move expected an owned-buffer-returning phrase call", source.line)
+        raise InscriptionError(
+            f"move expected an owned-buffer-returning phrase call, got {format_type(target.return_type)}",
+            source.line,
+        )
+    return target.return_type
+
+
+def _owned_move_temp_type_from_env(
+    source: Expr,
+    env: dict[str, ValueType],
+    functions: dict[str, Function],
+    records: dict[str, RecordDecl],
+    constants: dict[str, ConstValue],
+) -> OwnedBufferType:
+    if not isinstance(source, Call):
+        raise InscriptionError("move expected an owned-buffer-returning phrase call", getattr(source, "line", 0))
+    target = _lookup_phrase(source.name, source.line, functions)
+    _check_call_argument_types(source, target, env, functions, records, constants)
+    if not isinstance(target.return_type, OwnedBufferType):
+        if target.return_type is None:
+            raise InscriptionError("move expected an owned-buffer-returning phrase call", source.line)
+        raise InscriptionError(
+            f"move expected an owned-buffer-returning phrase call, got {format_type(target.return_type)}",
+            source.line,
+        )
+    return target.return_type
 
 
 def _require_owned_move_argument(
@@ -1895,7 +1946,7 @@ def _require_owned_move_argument(
     constants: dict[str, ConstValue],
     call_line: int,
     scope_depth: int,
-) -> None:
+) -> tuple[str, str] | None:
     if not isinstance(arg, MoveArg):
         if isinstance(arg, Variable):
             actual_binding = bindings.get(arg.name)
@@ -1909,12 +1960,18 @@ def _require_owned_move_argument(
             getattr(arg, "line", call_line),
         )
 
-    direct_message = _owned_returning_call_message(arg.source, functions)
-    if direct_message is not None:
-        raise InscriptionError(direct_message, arg.line)
+    if isinstance(arg.source, Call):
+        actual = _owned_move_temp_type(arg.source, functions, records, constants, bindings, scope_depth=scope_depth)
+        if actual.element_type != expected.element_type:
+            raise InscriptionError(
+                f"argument for owned buffer parameter must have type {format_type(expected)}, got {format_type(actual)}",
+                arg.line,
+            )
+        return None
+
     name = _move_source_name(arg.source)
     if name is None:
-        raise InscriptionError("move requires an owned buffer", arg.line)
+        raise InscriptionError("move expected an owned-buffer-returning phrase call", arg.line)
     binding = bindings.get(name)
     if binding is None:
         raise InscriptionError(f"unknown binding {name}", arg.line)
@@ -1930,6 +1987,7 @@ def _require_owned_move_argument(
             arg.line,
         )
     bindings[name] = replace(binding, moved=True)
+    return name, binding.root or name
 
 
 def _require_owned_move_argument_type(
@@ -1950,12 +2008,17 @@ def _require_owned_move_argument_type(
             f"argument {_argument_name(arg)} must have type {format_type(expected)}, got {format_type(actual)}",
             getattr(arg, "line", call_line),
         )
-    direct_message = _owned_returning_call_message(arg.source, functions)
-    if direct_message is not None:
-        raise InscriptionError(direct_message, arg.line)
+    if isinstance(arg.source, Call):
+        actual = _owned_move_temp_type_from_env(arg.source, env, functions, records, constants)
+        if actual.element_type != expected.element_type:
+            raise InscriptionError(
+                f"argument for owned buffer parameter must have type {format_type(expected)}, got {format_type(actual)}",
+                arg.line,
+            )
+        return
     name = _move_source_name(arg.source)
     if name is None:
-        raise InscriptionError("move requires an owned buffer", arg.line)
+        raise InscriptionError("move expected an owned-buffer-returning phrase call", arg.line)
     actual = env.get(name)
     if actual is None:
         raise InscriptionError(f"unknown binding {name}", arg.line)

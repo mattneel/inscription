@@ -4224,7 +4224,7 @@ Give result plus seen.
             "Give length of cells.\n\n"
             "To bad, giving i32.\n"
             "Give consume cells move make cells 4.\n",
-            "owned buffer result from `make cells _` must be bound before it can be moved",
+            "owned buffer phrase call in move argument must be parenthesized",
         )
 
     def test_v036_owned_buffer_parameter_artifacts_and_runtime_checks(self):
@@ -4297,6 +4297,107 @@ Give result plus seen.
                         "inscription",
                         "compile",
                         str(FIXTURES / "owned_buffer_param_consume.ins"),
+                        "--emit",
+                        "static-library",
+                        "-o",
+                        str(archive),
+                    ],
+                    cwd=ROOT,
+                    env=env,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    check=False,
+                )
+                self.assertEqual(archive_proc.returncode, 0, archive_proc.stderr)
+                self.assertGreater(archive.stat().st_size, 0)
+
+    def test_v037_owned_temporary_moves(self):
+        consume = compile_source(self.fixture("owned_temp_move_consume.ins"))
+        self.assertIn("func.call @make_cells", consume)
+        self.assertIn("func.call @consume_cells", consume)
+        self.assertNotIn("memref.dealloc %1#0", consume)
+
+        pipeline = compile_source(self.fixture("owned_temp_move_pipeline.ins"))
+        self.assertIn("func.call @make_cells", pipeline)
+        self.assertIn("func.call @fill_cells", pipeline)
+        self.assertIn("func.call @sum_and_drop_cells", pipeline)
+
+        let_initializer = compile_source(self.fixture("owned_temp_move_let.ins"))
+        self.assertIn("func.call @sum_and_drop_cells", let_initializer)
+
+        does = compile_source(self.fixture("owned_temp_move_does.ins"))
+        self.assertIn("func.call @fill_and_drop", does)
+
+        returning_consumer = compile_source(self.fixture("owned_temp_move_returning_consumer.ins"))
+        self.assertIn("func.call @fill_cells", returning_consumer)
+        self.assertRegex(returning_consumer, r"memref\.dealloc %\d+#0 : memref<\?xi32>")
+
+    def test_v037_owned_temporary_move_artifacts_and_runtime_checks(self):
+        try:
+            resolve_toolchain()
+        except ToolchainError:
+            return
+
+        env = {**os.environ, "PYTHONPATH": str(SRC)}
+        checked = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "inscription",
+                "run",
+                str(FIXTURES / "checked_owned_temp_move.ins"),
+                "--runtime-checks",
+            ],
+            cwd=ROOT,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(checked.returncode, 3, checked.stderr)
+        self.assertEqual(checked.stdout, "")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            llvm_ir = tmp_path / "owned_temp_move_consume.ll"
+            llvm_proc = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "inscription",
+                    "compile",
+                    str(FIXTURES / "owned_temp_move_consume.ins"),
+                    "--emit",
+                    "llvm-ir",
+                    "--verify",
+                    "-o",
+                    str(llvm_ir),
+                ],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(llvm_proc.returncode, 0, llvm_proc.stderr)
+            self.assertIn("define i32 @main", llvm_ir.read_text())
+
+            try:
+                resolve_toolchain(require_static_library=True)
+            except ToolchainError:
+                pass
+            else:
+                archive = tmp_path / "libowned_temp_move_consume.a"
+                archive_proc = subprocess.run(
+                    [
+                        sys.executable,
+                        "-m",
+                        "inscription",
+                        "compile",
+                        str(FIXTURES / "owned_temp_move_consume.ins"),
                         "--emit",
                         "static-library",
                         "-o",
@@ -5638,7 +5739,35 @@ Give result plus seen.
             ),
             "move direct owned return call invalid": (
                 "To make cells count: i32, giving owned buffer of i32.\nLet cells be owned buffer of count i32 filled with 1.\nGive cells.\n\nTo consume cells cells: owned buffer of i32, giving i32.\nGive length of cells.\n\nTo bad, giving i32.\nGive consume cells move make cells 4.\n",
-                "owned buffer result from `make cells _` must be bound before it can be moved",
+                "owned buffer phrase call in move argument must be parenthesized",
+            ),
+            "move temp to view parameter invalid": (
+                "To sum view cells: view of i32, giving i32.\nGive length of cells.\n\nTo make cells count: i32, giving owned buffer of i32.\nLet cells be owned buffer of count i32 filled with 1.\nGive cells.\n\nTo bad, giving i32.\nGive sum view move (make cells 4).\n",
+                "move may only be used as an argument to an owned buffer parameter",
+            ),
+            "move temp scalar call invalid": (
+                "To make number, giving i32.\nGive 1.\n\nTo consume cells cells: owned buffer of i32, giving i32.\nGive length of cells.\n\nTo bad, giving i32.\nGive consume cells move (make number).\n",
+                "move expected an owned-buffer-returning phrase call, got i32",
+            ),
+            "move temp element mismatch invalid": (
+                "To make bytes count: i32, giving owned buffer of u8.\nLet bytes be owned buffer of count u8 filled with 0.\nGive bytes.\n\nTo consume cells cells: owned buffer of i32, giving i32.\nGive length of cells.\n\nTo bad, giving i32.\nGive consume cells move (make bytes 4).\n",
+                "argument for owned buffer parameter must have type owned buffer of i32, got owned buffer of u8",
+            ),
+            "move temp arbitrary expression invalid": (
+                "To consume cells cells: owned buffer of i32, giving i32.\nGive length of cells.\n\nTo bad, giving i32.\nGive consume cells move (1 plus 2).\n",
+                "move expected an owned-buffer-returning phrase call",
+            ),
+            "move and borrow same owned binding invalid": (
+                "To consume with view cells: owned buffer of i32 and borrowed: view of i32, giving i32.\nGive length of cells plus length of borrowed.\n\nTo bad, giving i32.\nLet cells be owned buffer of 4 i32 filled with 1.\nGive consume with view move cells and cells.\n",
+                "owned buffer cells cannot be moved and borrowed in the same call",
+            ),
+            "move and same root view invalid": (
+                "To consume with view cells: owned buffer of i32 and borrowed: view of i32, giving i32.\nGive length of cells plus length of borrowed.\n\nTo bad, giving i32.\nLet cells be owned buffer of 4 i32 filled with 1.\nLet window be view of cells from 0 for 4.\nGive consume with view move cells and window.\n",
+                "owned buffer cells cannot be moved while a same-root view is passed in the same call",
+            ),
+            "move temp used as final return invalid": (
+                "To make cells count: i32, giving owned buffer of i32.\nLet cells be owned buffer of count i32 filled with 1.\nGive cells.\n\nTo bad, giving owned buffer of i32.\nGive move (make cells 4).\n",
+                "move may only be used as an argument to an owned buffer parameter",
             ),
             "owned buffer parameter i1 element unsupported": (
                 "To bad cells: owned buffer of i1, giving i32.\nGive 0.\n",

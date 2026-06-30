@@ -66,6 +66,42 @@ Let changed be fill cells move cells with 7.
 Give sum and drop cells move changed.
 ```
 
+v0.37 also supports owned temporary moves. A phrase call returning `owned buffer of TYPE` can be moved directly into a consuming parameter by writing `move (call)`.
+
+```inscription,check
+To make cells count: i32, giving owned buffer of i32.
+Let cells be owned buffer of count i32 filled with 1.
+Give cells.
+
+To consume cells cells: owned buffer of i32, giving i32.
+Give length of cells.
+
+To main, giving i32.
+Give consume cells move (make cells 7).
+```
+
+The parentheses are required so the temporary ownership transfer is explicit. Direct temporaries are consumed immediately: they cannot be borrowed as views, used as scalar values, or moved from arbitrary expressions. Bind the returned buffer first when you need to inspect, borrow, or reuse it.
+
+Consuming pipelines can nest these moves:
+
+```inscription,check
+To make cells count: i32, giving owned buffer of i32.
+Let cells be owned buffer of count i32 filled with 0.
+Give cells.
+
+To fill cells cells: owned buffer of i32 with value: i32, giving owned buffer of i32.
+For each index i of cells: cells at i becomes value.
+Give cells.
+
+To sum and drop cells cells: owned buffer of i32, giving i32.
+Let total be 0.
+For each index i of cells: total becomes total plus cells at i.
+Give total.
+
+To main, giving i32.
+Give sum and drop cells move (fill cells move (make cells 4) with 7).
+```
+
 ## Borrowing is still non-consuming
 
 Passing an owned buffer to a `view of TYPE` parameter borrows the storage and does not require `move`.
@@ -85,4 +121,4 @@ Give total plus cells at 0.
 
 ## Current restrictions
 
-Owned buffers cannot be copied, rebound, stored in records or unions, exposed through extern/export ABI, or moved from fixed buffers, arrays, or views. Direct temporary moves are not supported: bind an owned-buffer-returning call first, then move the binding. v0.36 also rejects moving an outer-scope owned buffer from inside branches, loops, or match arms; move a binding declared in the same lexical block instead.
+Owned buffers cannot be copied, rebound, stored in records or unions, exposed through extern/export ABI, or moved from fixed buffers, arrays, or views. Direct temporary moves are allowed only as `move (owned-buffer-returning call)` actuals to consuming parameters. v0.36 and later also reject moving an outer-scope owned buffer from inside branches, loops, or match arms; move a binding declared in the same lexical block instead.

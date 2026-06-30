@@ -40,3 +40,19 @@ To main, giving i32.
 Let cells be owned buffer of 4 i32 filled with 3.
 Give sum and drop cells move cells.
 ```
+
+If a helper returns an owned buffer that is consumed immediately, move the parenthesized call directly instead of creating a temporary binding:
+
+```inscription,check
+To make cells count: i32, giving owned buffer of i32.
+Let cells be owned buffer of count i32 filled with 3.
+Give cells.
+
+To sum and drop cells cells: owned buffer of i32, giving i32.
+Let total be 0.
+For each index i of cells: total becomes total plus cells at i.
+Give total.
+
+To main, giving i32.
+Give sum and drop cells move (make cells 4).
+```

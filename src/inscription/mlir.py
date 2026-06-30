@@ -1625,12 +1625,15 @@ class MlirEmitter:
         for arg, param in zip(call.args, target.params, strict=True):
             if isinstance(param.type_name, OwnedBufferType):
                 assert isinstance(arg, MoveArg)
-                assert isinstance(arg.source, Variable)
-                storage = env[arg.source.name]
-                assert isinstance(storage, OwnedBufferStorage)
+                if isinstance(arg.source, Variable):
+                    storage = env[arg.source.name]
+                    assert isinstance(storage, OwnedBufferStorage)
+                    self.mark_owned_buffer_moved(storage)
+                else:
+                    assert isinstance(arg.source, Call)
+                    storage = self.emit_owned_buffer_call(arg.source, env, lines, indent, remember=False)
                 args.append(CallArg(storage.name, dynamic_memref_type(storage.element_type)))
                 args.append(CallArg(storage.length.name, mlir_type(storage.length.type_name)))
-                self.mark_owned_buffer_moved(storage)
             elif isinstance(param.type_name, BufferType):
                 assert isinstance(arg, Variable)
                 buffer = self.require_buffer(env[arg.name])

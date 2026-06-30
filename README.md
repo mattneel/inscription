@@ -11,7 +11,7 @@ The full language guide now lives in **[The Inscription Book](book/src/title-pag
 
 ## Status
 
-This repository currently implements **Inscription v0.36: explicit `move` and consuming owned-buffer parameters**. v0.36 lets normal phrases take ownership of owned dynamic buffers through `move name` actuals while preserving lexical cleanup, owned-buffer returns, and primitive-only extern/export ABI restrictions. The mdBook documentation site remains the primary language guide.
+This repository currently implements **Inscription v0.37: owned temporary moves and consuming pipelines**. v0.37 lets normal phrases take ownership of owned dynamic buffers through `move name` and directly consume owned-buffer-returning calls with `move (call)`, while preserving lexical cleanup and primitive-only extern/export ABI restrictions. The mdBook documentation site remains the primary language guide.
 
 The current language includes:
 
@@ -22,7 +22,7 @@ The current language includes:
 - phrases, extern declarations, and scalar exported phrases
 - records, layout records, nominal enums, and tagged unions
 - buffers, arrays, borrowed views, byte literals, and byte-string storage initialization
-- owned dynamic buffers with lexical cleanup, owned-buffer returns, and explicit consuming `move` calls
+- owned dynamic buffers with lexical cleanup, owned-buffer returns, explicit consuming `move` calls, and owned temporary moves
 - MLIR, LLVM IR, object, executable, static-library, interface JSON, and C header emission
 
 See the book for the tutorial, language guide, tooling guide, examples, and reference links.
@@ -111,14 +111,27 @@ Give consume cells move cells.
 
 After `move cells`, the caller binding is consumed and the callee owns cleanup unless it returns or moves the buffer onward. Borrowing through `view of TYPE` remains non-consuming and does not use `move`.
 
+Owned-buffer-returning phrase calls can also be moved directly into consuming parameters when parenthesized:
+
+```inscription
+To make cells count: i32, giving owned buffer of i32.
+Let cells be owned buffer of count i32 filled with 1.
+Give cells.
+
+To main, giving i32.
+Give consume cells move (make cells 7).
+```
+
+Bind the returned buffer first when you need to inspect, borrow, or reuse it; direct temporaries are consumed immediately and cannot be used as scalar values or view arguments.
+
 ## Documentation map
 
 - [`book/src/SUMMARY.md`](book/src/SUMMARY.md): table of contents for The Inscription Book
 - [`book/tools/check_book_examples.py`](book/tools/check_book_examples.py): deterministic book example checker
 - [`book/tools/inscription_mdbook_preprocessor.py`](book/tools/inscription_mdbook_preprocessor.py): mdBook preprocessor that reuses Inscription's own highlighter
 - [`docs/github-pages.md`](docs/github-pages.md): GitHub Pages setup notes
-- [`docs/inscription-v0.36-spec.md`](docs/inscription-v0.36-spec.md): current language sprint spec
-- [`grammar/inscription-v0.36.ebnf`](grammar/inscription-v0.36.ebnf): current grammar mirror
+- [`docs/inscription-v0.37-spec.md`](docs/inscription-v0.37-spec.md): current language sprint spec
+- [`grammar/inscription-v0.37.ebnf`](grammar/inscription-v0.37.ebnf): current grammar mirror
 
 ## Testing
 
