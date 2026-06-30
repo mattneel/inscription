@@ -9,12 +9,42 @@ from .diagnostics import InscriptionError
 from .runner import (
     EMIT_MODES,
     LOWERING_PASSES,
+    OPTIMIZATION_PRESETS,
     ToolchainError,
     build_artifacts,
     resolve_toolchain,
     run_file,
     selected_artifact,
 )
+
+
+def _add_optimization_args(command: argparse.ArgumentParser) -> None:
+    command.add_argument("--opt-level", help="optimization preset: none, basic, or aggressive")
+    command.add_argument("-O0", dest="opt_aliases", action="append_const", const="none", help="alias for --opt-level none")
+    command.add_argument("-O1", dest="opt_aliases", action="append_const", const="basic", help="alias for --opt-level basic")
+    command.add_argument("-O2", dest="opt_aliases", action="append_const", const="aggressive", help="alias for --opt-level aggressive")
+
+
+def _resolve_opt_level(args: argparse.Namespace) -> str:
+    levels: list[str] = []
+    if getattr(args, "opt_level", None) is not None:
+        if args.opt_level not in OPTIMIZATION_PRESETS:
+            raise InscriptionError(f"invalid optimization level {args.opt_level}")
+        levels.append(args.opt_level)
+    levels.extend(getattr(args, "opt_aliases", None) or [])
+    if not levels:
+        return "none"
+    first = levels[0]
+    for level in levels[1:]:
+        if level != first:
+            raise InscriptionError(f"conflicting optimization levels: {first} and {level}")
+    return first
+
+
+def _format_preset(passes: tuple[str, ...]) -> str:
+    if not passes:
+        return "<none>"
+    return ", ".join(pass_name.removeprefix("--") for pass_name in passes)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -25,16 +55,26 @@ def main(argv: list[str] | None = None) -> int:
     compile_p.add_argument("source", type=Path)
     compile_p.add_argument("-o", "--output", type=Path)
     compile_p.add_argument("--emit", default="mlir", help="artifact to emit: mlir, lowered-mlir, llvm-ir, or object")
-    compile_p.add_argument("--save-temps", type=Path, help="directory for saved source MLIR, lowered MLIR, LLVM IR, and object intermediates")
+    compile_p.add_argument(
+        "--save-temps",
+        type=Path,
+        help="directory for saved source MLIR, optimized MLIR when enabled, lowered MLIR, LLVM IR, and object intermediates",
+    )
     compile_p.add_argument("--verify", action="store_true", help="verify emitted artifacts with the LLVM/MLIR 22 toolchain")
     compile_p.add_argument("--module-root", type=Path, help="root directory for resolving imported modules")
     compile_p.add_argument("--runtime-checks", action="store_true", help="emit runtime assertions for dynamic storage bounds")
+    _add_optimization_args(compile_p)
 
     run_p = sub.add_parser("run", help="compile and execute through LLVM 22 lli")
     run_p.add_argument("source", type=Path)
     run_p.add_argument("--module-root", type=Path, help="root directory for resolving imported modules")
     run_p.add_argument("--runtime-checks", action="store_true", help="emit runtime assertions for dynamic storage bounds")
-    run_p.add_argument("--save-temps", type=Path, help="directory for saved source MLIR, lowered MLIR, and LLVM IR intermediates")
+    run_p.add_argument(
+        "--save-temps",
+        type=Path,
+        help="directory for saved source MLIR, optimized MLIR when enabled, lowered MLIR, and LLVM IR intermediates",
+    )
+    _add_optimization_args(run_p)
 
     highlight_p = sub.add_parser("highlight", help="syntax-highlight an Inscription source file")
     highlight_p.add_argument("source", type=Path)
@@ -44,7 +84,7 @@ def main(argv: list[str] | None = None) -> int:
     highlight_p.add_argument("--full", action="store_true", help="emit a complete HTML document")
 
     tools_p = sub.add_parser("check-tools", help="verify LLVM 22 toolchain discovery")
-    tools_p.add_argument("--show-pipeline", action="store_true")
+    tools_p.add_argument("--show-pipeline", action="store_true", help="show optimization presets and the MLIR lowering pipeline")
     tools_p.add_argument("--require-object", action="store_true", help="require LLVM 22 llc for object emission")
 
     args = parser.parse_args(argv)
@@ -54,6 +94,7 @@ def main(argv: list[str] | None = None) -> int:
                 raise InscriptionError(f"invalid emit mode {args.emit}")
             if args.emit == "object" and args.output is None:
                 raise InscriptionError("object emission requires -o OUTPUT")
+            opt_level = _resolve_opt_level(args)
             mlir = compile_file(args.source, module_root=args.module_root, runtime_checks=args.runtime_checks)
             artifacts = build_artifacts(
                 mlir,
@@ -61,6 +102,7 @@ def main(argv: list[str] | None = None) -> int:
                 verify=args.verify,
                 save_temps=args.save_temps,
                 stem=args.source.stem,
+                opt_level=opt_level,
             )
             output = selected_artifact(artifacts, args.emit)
             if isinstance(output, bytes):
@@ -77,6 +119,7 @@ def main(argv: list[str] | None = None) -> int:
                 module_root=args.module_root,
                 runtime_checks=args.runtime_checks,
                 save_temps=args.save_temps,
+                opt_level=_resolve_opt_level(args),
             )
             return result.exit_status
         if args.command == "highlight":
@@ -109,6 +152,9 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 print(f"llc={toolchain.llc}")
             if args.show_pipeline:
+                print("optimization presets:")
+                for name, passes in OPTIMIZATION_PRESETS.items():
+                    print(f"  {name}: {_format_preset(passes)}")
                 print("mlir-opt input.mlir " + " ".join(LOWERING_PASSES) + " -o lowered.mlir")
                 print("mlir-translate --mlir-to-llvmir lowered.mlir -o output.ll")
                 print("lli output.ll")

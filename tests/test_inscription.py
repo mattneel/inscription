@@ -16,7 +16,7 @@ sys.path.insert(0, str(SRC))
 
 from inscription.compiler import compile_file, compile_source
 from inscription.diagnostics import InscriptionError
-from inscription.runner import LOWERING_PASSES, ToolchainError, resolve_toolchain, run_file, run_source, verify_mlir
+from inscription.runner import LOWERING_PASSES, OPTIMIZATION_PRESETS, ToolchainError, resolve_toolchain, run_file, run_source, verify_mlir
 
 FIXTURES = ROOT / "tests" / "fixtures" / "positive"
 GOLDENS = ROOT / "tests" / "goldens"
@@ -347,6 +347,268 @@ class CompilerTests(unittest.TestCase):
             module_ir = module_ll.read_text()
             self.assertIn("define i32 @ins_square", module_ir)
             self.assertIn("call i32 @ins_square", module_ir)
+
+    def test_v017_optimization_presets_affect_downstream_artifacts_only(self):
+        try:
+            toolchain = resolve_toolchain()
+        except ToolchainError as exc:
+            self.skipTest(str(exc))
+
+        env = {**os.environ, "PYTHONPATH": str(SRC)}
+        source = FIXTURES / "phrase_max.ins"
+        expected_mlir = (GOLDENS / "04_main_calls_max.mlir").read_text()
+
+        raw_with_o2 = subprocess.run(
+            [sys.executable, "-m", "inscription", "compile", str(source), "--emit", "mlir", "-O2", "--verify"],
+            cwd=ROOT,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(raw_with_o2.returncode, 0, raw_with_o2.stderr)
+        self.assertEqual(raw_with_o2.stdout, expected_mlir)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            lowered = tmp_path / "phrase_max.o1.lowered.mlir"
+            o2_ll = tmp_path / "phrase_max.o2.ll"
+            module_ll = tmp_path / "module.o2.ll"
+            object_path = tmp_path / "export_scalar_gives.o2.o"
+
+            basic_lowered = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "inscription",
+                    "compile",
+                    str(source),
+                    "--emit",
+                    "lowered-mlir",
+                    "-O1",
+                    "--verify",
+                    "-o",
+                    str(lowered),
+                ],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(basic_lowered.returncode, 0, basic_lowered.stderr)
+            self.assertGreater(lowered.stat().st_size, 0)
+
+            aggressive_llvm = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "inscription",
+                    "compile",
+                    str(source),
+                    "--emit",
+                    "llvm-ir",
+                    "-O2",
+                    "--verify",
+                    "-o",
+                    str(o2_ll),
+                ],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(aggressive_llvm.returncode, 0, aggressive_llvm.stderr)
+            self.assertIn("define i32 @main", o2_ll.read_text())
+
+            optimized_module = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "inscription",
+                    "compile",
+                    str(FIXTURES / "export_module_phrase" / "main.ins"),
+                    "--emit",
+                    "llvm-ir",
+                    "-O2",
+                    "--verify",
+                    "-o",
+                    str(module_ll),
+                ],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(optimized_module.returncode, 0, optimized_module.stderr)
+            self.assertIn("define i32 @ins_square", module_ll.read_text())
+
+            if toolchain.llc is not None:
+                optimized_object = subprocess.run(
+                    [
+                        sys.executable,
+                        "-m",
+                        "inscription",
+                        "compile",
+                        str(FIXTURES / "export_scalar_gives.ins"),
+                        "--emit",
+                        "object",
+                        "-O2",
+                        "--verify",
+                        "-o",
+                        str(object_path),
+                    ],
+                    cwd=ROOT,
+                    env=env,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    check=False,
+                )
+                self.assertEqual(optimized_object.returncode, 0, optimized_object.stderr)
+                self.assertGreater(object_path.stat().st_size, 0)
+
+    def test_v017_optimized_run_save_temps_and_diagnostics(self):
+        try:
+            resolve_toolchain()
+        except ToolchainError as exc:
+            self.skipTest(str(exc))
+
+        env = {**os.environ, "PYTHONPATH": str(SRC)}
+        run_cases = [
+            ("optimization_arithmetic.ins", ["-O2"], 42),
+            ("optimization_loop.ins", ["-O2"], 10),
+            ("checked_dynamic_buffer_index.ins", ["--runtime-checks", "-O1"], 3),
+        ]
+        for fixture, options, expected in run_cases:
+            with self.subTest(fixture=fixture):
+                proc = subprocess.run(
+                    [sys.executable, "-m", "inscription", "run", str(FIXTURES / fixture), *options],
+                    cwd=ROOT,
+                    env=env,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    check=False,
+                )
+                self.assertEqual(proc.returncode, expected, proc.stderr)
+                self.assertEqual(proc.stdout, "")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            opt_temps = tmp_path / "opt-temps"
+            none_temps = tmp_path / "none-temps"
+
+            optimized_temps = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "inscription",
+                    "compile",
+                    str(FIXTURES / "phrase_max.ins"),
+                    "--emit",
+                    "llvm-ir",
+                    "-O1",
+                    "--save-temps",
+                    str(opt_temps),
+                    "-o",
+                    str(tmp_path / "o1.ll"),
+                ],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(optimized_temps.returncode, 0, optimized_temps.stderr)
+            self.assertTrue((opt_temps / "phrase_max.mlir").exists())
+            self.assertTrue((opt_temps / "phrase_max.optimized.mlir").exists())
+            self.assertTrue((opt_temps / "phrase_max.lowered.mlir").exists())
+            self.assertTrue((opt_temps / "phrase_max.ll").exists())
+
+            unoptimized_temps = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "inscription",
+                    "compile",
+                    str(FIXTURES / "phrase_max.ins"),
+                    "--emit",
+                    "llvm-ir",
+                    "--save-temps",
+                    str(none_temps),
+                    "-o",
+                    str(tmp_path / "none.ll"),
+                ],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(unoptimized_temps.returncode, 0, unoptimized_temps.stderr)
+            self.assertTrue((none_temps / "phrase_max.mlir").exists())
+            self.assertFalse((none_temps / "phrase_max.optimized.mlir").exists())
+            self.assertTrue((none_temps / "phrase_max.lowered.mlir").exists())
+            self.assertTrue((none_temps / "phrase_max.ll").exists())
+
+        conflict = subprocess.run(
+            [sys.executable, "-m", "inscription", "compile", str(FIXTURES / "phrase_max.ins"), "--opt-level", "basic", "-O2"],
+            cwd=ROOT,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(conflict.returncode, 2)
+        self.assertIn("conflicting optimization levels: basic and aggressive", conflict.stderr)
+
+        duplicate_alias_conflict = subprocess.run(
+            [sys.executable, "-m", "inscription", "compile", str(FIXTURES / "phrase_max.ins"), "-O1", "-O2"],
+            cwd=ROOT,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(duplicate_alias_conflict.returncode, 2)
+        self.assertIn("conflicting optimization levels: basic and aggressive", duplicate_alias_conflict.stderr)
+
+        invalid = subprocess.run(
+            [sys.executable, "-m", "inscription", "compile", str(FIXTURES / "phrase_max.ins"), "--opt-level", "fast"],
+            cwd=ROOT,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(invalid.returncode, 2)
+        self.assertIn("invalid optimization level fast", invalid.stderr)
+
+        pipeline = subprocess.run(
+            [sys.executable, "-m", "inscription", "check-tools", "--show-pipeline"],
+            cwd=ROOT,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(pipeline.returncode, 0, pipeline.stderr)
+        self.assertIn("optimization presets:", pipeline.stdout)
+        self.assertIn("basic: canonicalize, cse", pipeline.stdout)
+        self.assertIn("aggressive: canonicalize, cse, sccp", pipeline.stdout)
 
     @unittest.skipUnless(importlib.util.find_spec("pygments"), "Pygments is not installed")
     def test_cli_highlight_outputs_terminal_ansi(self):
@@ -956,6 +1218,24 @@ main gives i32:
                 "--convert-func-to-llvm",
                 "--reconcile-unrealized-casts",
             ],
+        )
+        self.assertEqual(
+            OPTIMIZATION_PRESETS,
+            {
+                "none": (),
+                "basic": ("--canonicalize", "--cse"),
+                "aggressive": (
+                    "--canonicalize",
+                    "--cse",
+                    "--sccp",
+                    "--canonicalize",
+                    "--cse",
+                    "--control-flow-sink",
+                    "--loop-invariant-code-motion",
+                    "--canonicalize",
+                    "--cse",
+                ),
+            },
         )
         verify_mlir(compile_source(self.fixture("add.ins")), toolchain)
 

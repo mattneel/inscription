@@ -24,6 +24,24 @@ LOWERING_PASSES = [
 ]
 
 EMIT_MODES = {"mlir", "lowered-mlir", "llvm-ir", "object"}
+OPTIMIZATION_PRESETS = {
+    "none": (),
+    "basic": (
+        "--canonicalize",
+        "--cse",
+    ),
+    "aggressive": (
+        "--canonicalize",
+        "--cse",
+        "--sccp",
+        "--canonicalize",
+        "--cse",
+        "--control-flow-sink",
+        "--loop-invariant-code-motion",
+        "--canonicalize",
+        "--cse",
+    ),
+}
 
 
 class ToolchainError(RuntimeError):
@@ -42,6 +60,7 @@ class Toolchain:
 @dataclass(frozen=True)
 class ArtifactResult:
     mlir: str
+    optimized_mlir: str | None = None
     lowered_mlir: str | None = None
     llvm_ir: str | None = None
     object_bytes: bytes | None = None
@@ -127,6 +146,25 @@ def lower_mlir(mlir: str, toolchain: Toolchain | None = None) -> str:
         return lowered_mlir.read_text()
 
 
+def optimize_source_mlir(mlir: str, opt_level: str, toolchain: Toolchain | None = None) -> str:
+    if opt_level not in OPTIMIZATION_PRESETS:
+        raise InscriptionError(f"invalid optimization level {opt_level}")
+    passes = OPTIMIZATION_PRESETS[opt_level]
+    if not passes:
+        return mlir
+    toolchain = toolchain or resolve_toolchain()
+    with tempfile.TemporaryDirectory(prefix="inscription-optimize-") as tmp:
+        tmp_path = Path(tmp)
+        input_mlir = tmp_path / "input.mlir"
+        optimized_mlir = tmp_path / "optimized.mlir"
+        input_mlir.write_text(mlir)
+        _run_checked(
+            [str(toolchain.mlir_opt), str(input_mlir), *passes, "-o", str(optimized_mlir)],
+            f"source MLIR optimization failed during {opt_level} preset",
+        )
+        return optimized_mlir.read_text()
+
+
 def translate_to_llvm_ir(lowered_mlir: str, toolchain: Toolchain | None = None) -> str:
     toolchain = toolchain or resolve_toolchain()
     with tempfile.TemporaryDirectory(prefix="inscription-translate-") as tmp:
@@ -165,26 +203,39 @@ def build_artifacts(
     save_temps: Path | None = None,
     stem: str = "input",
     toolchain: Toolchain | None = None,
+    opt_level: str = "none",
 ) -> ArtifactResult:
     if emit not in EMIT_MODES:
         raise InscriptionError(f"invalid emit mode {emit}")
-    needs_toolchain = emit != "mlir" or verify
+    if opt_level not in OPTIMIZATION_PRESETS:
+        raise InscriptionError(f"invalid optimization level {opt_level}")
+    needs_optimized = opt_level != "none" and (emit != "mlir" or verify or save_temps is not None)
+    needs_toolchain = emit != "mlir" or verify or needs_optimized
     if emit == "object":
         toolchain = toolchain or resolve_toolchain(require_object=True)
     elif needs_toolchain:
         toolchain = toolchain or resolve_toolchain()
 
+    optimized: str | None = None
     lowered: str | None = None
     llvm_ir: str | None = None
     object_bytes: bytes | None = None
+    lowering_input = mlir
 
     if verify:
         assert toolchain is not None
         verify_mlir(mlir, toolchain)
 
+    if needs_optimized:
+        assert toolchain is not None
+        optimized = optimize_source_mlir(mlir, opt_level, toolchain)
+        lowering_input = optimized
+        if verify:
+            verify_mlir(optimized, toolchain)
+
     if emit != "mlir" or verify:
         assert toolchain is not None
-        lowered = lower_mlir(mlir, toolchain)
+        lowered = lower_mlir(lowering_input, toolchain)
         if verify and emit in {"lowered-mlir", "llvm-ir", "object"}:
             verify_mlir(lowered, toolchain)
 
@@ -198,7 +249,7 @@ def build_artifacts(
         assert toolchain is not None
         object_bytes = compile_object(llvm_ir, toolchain)
 
-    result = ArtifactResult(mlir, lowered, llvm_ir, object_bytes)
+    result = ArtifactResult(mlir, optimized, lowered, llvm_ir, object_bytes)
     if save_temps is not None:
         _save_artifacts(result, save_temps, stem)
     return result
@@ -222,6 +273,8 @@ def selected_artifact(result: ArtifactResult, emit: str) -> str | bytes:
 def _save_artifacts(result: ArtifactResult, directory: Path, stem: str) -> None:
     directory.mkdir(parents=True, exist_ok=True)
     (directory / f"{stem}.mlir").write_text(result.mlir)
+    if result.optimized_mlir is not None:
+        (directory / f"{stem}.optimized.mlir").write_text(result.optimized_mlir)
     if result.lowered_mlir is not None:
         (directory / f"{stem}.lowered.mlir").write_text(result.lowered_mlir)
     if result.llvm_ir is not None:
@@ -238,13 +291,22 @@ def run_source(
     module_root: Path | None = None,
     runtime_checks: bool = False,
     save_temps: Path | None = None,
+    opt_level: str = "none",
 ) -> RunResult:
     program = load_program(source, source_path=source_path, module_root=module_root)
     validate_runnable_main(program)
     toolchain = toolchain or resolve_toolchain()
     mlir = emit_mlir(program, runtime_checks=runtime_checks)
     stem = source_path.stem if source_path is not None else "input"
-    artifacts = build_artifacts(mlir, emit="llvm-ir", verify=True, save_temps=save_temps, stem=stem, toolchain=toolchain)
+    artifacts = build_artifacts(
+        mlir,
+        emit="llvm-ir",
+        verify=True,
+        save_temps=save_temps,
+        stem=stem,
+        toolchain=toolchain,
+        opt_level=opt_level,
+    )
     assert artifacts.lowered_mlir is not None
     assert artifacts.llvm_ir is not None
     with tempfile.TemporaryDirectory(prefix="inscription-run-") as tmp:
@@ -262,6 +324,7 @@ def run_file(
     module_root: Path | None = None,
     runtime_checks: bool = False,
     save_temps: Path | None = None,
+    opt_level: str = "none",
 ) -> RunResult:
     source_path = source_path.resolve()
     return run_source(
@@ -271,6 +334,7 @@ def run_file(
         module_root=module_root,
         runtime_checks=runtime_checks,
         save_temps=save_temps,
+        opt_level=opt_level,
     )
 
 

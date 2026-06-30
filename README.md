@@ -6,7 +6,7 @@ The language is readable, but it is **not** natural-language interpretation: eve
 
 ## Status
 
-This repository currently implements **Inscription v0.16**:
+This repository currently implements **Inscription v0.17**:
 
 - source-visible scalar types: `i1`, signed integers `i8`/`i16`/`i32`/`i64`, and unsigned integers `u8`/`u16`/`u32`/`u64`
 - phrase-shaped function definitions and phrase-shaped calls
@@ -14,6 +14,7 @@ This repository currently implements **Inscription v0.16**:
 - scalar-only exported phrase definitions such as `export add x: i32 and y: i32 gives i32 as ins_add:`
 - deterministic artifact emission with `compile --emit mlir|lowered-mlir|llvm-ir|object`
 - saved compiler intermediates with `compile/run --save-temps DIR`
+- deterministic optimization presets with `--opt-level none|basic|aggressive` and `-O0`/`-O1`/`-O2`
 - value blocks with `expression when condition` and `otherwise expression`
 - implicit returns: the block value is the phrase result
 - local scalar bindings with `let name be expression` and `let name: type be expression`
@@ -55,11 +56,11 @@ This repository currently implements **Inscription v0.16**:
 - deterministic parsing and semantic checks
 - exact MLIR golden conformance tests in [`tests/goldens`](tests/goldens)
 - MLIR emission using `func`, `arith`, `scf.if`, `scf.for`, `scf.while`, flattened scalar SSA and flattened scalar function results for records, local `memref.alloca`/`memref.load`/`memref.store` for buffers, private `func.func` declarations for scalar extern phrases, public stable-symbol definitions for exported phrases, and `cf.assert` when runtime assertions are emitted
-- tooling output for frontend source MLIR, lowered MLIR, LLVM IR, and optional single-object output through LLVM 22 `llc`
+- tooling output for frontend source MLIR, optimized source MLIR, lowered MLIR, LLVM IR, and optional single-object output through LLVM 22 `llc`
 - LLVM 22 lowering and execution through `mlir-opt`, `mlir-translate`, and `lli`
-- no source-level I/O, heap allocation, pointers, dynamic-size buffers, buffer/view return values, buffer/view aliasing beyond conservative same-root rejection, slices, LLVM/C ABI structs, C ABI annotations, linker flags, extern/exported buffer/view/record parameters, extern/exported record returns, executable output, static/shared libraries, C headers, floats, strings, statement-level `return`, `break`, `continue`, macros, import aliases, wildcard imports, generics, global storage, exceptions, result/error values, source strings, source-level runtime assertion messages, overloading, type coercions, or natural-language inference
+- no source-level I/O, heap allocation, pointers, dynamic-size buffers, buffer/view return values, buffer/view aliasing beyond conservative same-root rejection, slices, LLVM/C ABI structs, C ABI annotations, arbitrary pass pipelines, LLVM `opt`, LTO, linker flags, extern/exported buffer/view/record parameters, extern/exported record returns, executable output, static/shared libraries, C headers, floats, strings, statement-level `return`, `break`, `continue`, macros, import aliases, wildcard imports, generics, global storage, exceptions, result/error values, source strings, source-level runtime assertion messages, overloading, type coercions, or natural-language inference
 
-See [`docs/inscription-v0.16-spec.md`](docs/inscription-v0.16-spec.md) and [`grammar/inscription-v0.16.ebnf`](grammar/inscription-v0.16.ebnf) for the exact current language and tooling contract. The immutable previous contracts remain in [`docs/`](docs) and [`grammar/`](grammar), including the v0.15 exported-phrase contract.
+See [`docs/inscription-v0.17-spec.md`](docs/inscription-v0.17-spec.md) and [`grammar/inscription-v0.17.ebnf`](grammar/inscription-v0.17.ebnf) for the exact current language and tooling contract. The immutable previous contracts remain in [`docs/`](docs) and [`grammar/`](grammar), including the v0.16 artifact-emission contract.
 
 ## Requirements
 
@@ -77,7 +78,15 @@ export MLIR_TOOLCHAIN=/usr/lib/llvm-22/bin
 PYTHONPATH=src python -m inscription check-tools --show-pipeline
 ```
 
-The lowering pipeline is:
+The deterministic optimization presets reported by `check-tools --show-pipeline` are:
+
+```text
+none: <none>
+basic: canonicalize, cse
+aggressive: canonicalize, cse, sccp, canonicalize, cse, control-flow-sink, loop-invariant-code-motion, canonicalize, cse
+```
+
+The default optimization level is `none`. Optimizations run on source MLIR before the lowering pipeline. The lowering pipeline is:
 
 ```sh
 mlir-opt input.mlir \
@@ -151,15 +160,15 @@ echo $?
 ## CLI
 
 ```sh
-python -m inscription compile SOURCE [-o OUTPUT] [--emit mlir|lowered-mlir|llvm-ir|object] [--save-temps DIR] [--verify] [--module-root ROOT] [--runtime-checks]
+python -m inscription compile SOURCE [-o OUTPUT] [--emit mlir|lowered-mlir|llvm-ir|object] [--opt-level none|basic|aggressive] [-O0|-O1|-O2] [--save-temps DIR] [--verify] [--module-root ROOT] [--runtime-checks]
 python -m inscription highlight SOURCE [-o OUTPUT] [--format terminal|html] [--style STYLE] [--full]
-python -m inscription run SOURCE [--module-root ROOT] [--runtime-checks] [--save-temps DIR]
+python -m inscription run SOURCE [--module-root ROOT] [--runtime-checks] [--save-temps DIR] [--opt-level none|basic|aggressive] [-O0|-O1|-O2]
 python -m inscription check-tools [--show-pipeline] [--require-object]
 ```
 
 Commands return `2` for compiler, diagnostic, toolchain, or filesystem errors. Imports resolve relative to the root source file directory by default; pass `--module-root ROOT` to resolve module paths from another directory.
 
-`compile --emit mlir` emits the frontend source MLIR and is the default exact-golden artifact. `--emit lowered-mlir` emits MLIR after the configured lowering pipeline. `--emit llvm-ir` emits LLVM IR from `mlir-translate`. `--emit object -o file.o` emits a single native object with LLVM 22 `llc`; it does not link or resolve extern symbols. `--save-temps DIR` writes deterministic `<stem>.mlir`, `<stem>.lowered.mlir`, `<stem>.ll`, and, for object emission, `<stem>.o` intermediates. `run --save-temps DIR` saves the stages used before execution through `lli`.
+`compile --emit mlir` emits the frontend source MLIR and is the default exact-golden artifact. `--emit mlir` remains raw frontend output even with `-O1` or `-O2`. `--emit lowered-mlir` emits MLIR after the configured lowering pipeline. `--emit llvm-ir` emits LLVM IR from `mlir-translate`. `--emit object -o file.o` emits a single native object with LLVM 22 `llc`; it does not link or resolve extern symbols. `--opt-level none|basic|aggressive` chooses deterministic MLIR optimization passes before lowering; `-O0`, `-O1`, and `-O2` are aliases for `none`, `basic`, and `aggressive`. Optimization affects lowered MLIR, LLVM IR, object emission, and `run`, but not source MLIR output. `--save-temps DIR` writes deterministic `<stem>.mlir`, `<stem>.lowered.mlir`, `<stem>.ll`, and, for object emission, `<stem>.o` intermediates; with `basic` or `aggressive` it also writes `<stem>.optimized.mlir`. `run --save-temps DIR` saves the stages used before execution through `lli`.
 
 `highlight` uses Pygments with a built-in Inscription lexer. The default output is ANSI-colored terminal text. Use `--format html --full -o file.html` to emit a complete HTML document.
 
@@ -449,12 +458,17 @@ left is greater than right
 left is greater than or equal to right
 ```
 
-Important v0.16 rules:
+Important v0.17 rules:
 
-- `compile --emit mlir` is the default and preserves exact source MLIR output
+- `--opt-level none` is the default and preserves v0.16 compile/run behavior
+- `-O0`, `-O1`, and `-O2` are aliases for `none`, `basic`, and `aggressive`; conflicting optimization flags are rejected
+- `compile --emit mlir` is the default and preserves exact raw source MLIR output even when optimization is requested
+- optimization presets affect lowered MLIR, LLVM IR, object emission, and `run` only
+- `basic` runs `canonicalize, cse`; `aggressive` runs `canonicalize, cse, sccp, canonicalize, cse, control-flow-sink, loop-invariant-code-motion, canonicalize, cse`
 - `compile --emit lowered-mlir` and `compile --emit llvm-ir` expose deterministic downstream textual artifacts
 - `compile --emit object -o file.o` requires optional LLVM 22 `llc`, emits one object file, and does not link
-- `compile/run --save-temps DIR` saves produced compiler intermediates under deterministic filenames
+- `compile/run --save-temps DIR` saves produced compiler intermediates under deterministic filenames, including `<stem>.optimized.mlir` for non-`none` optimization
+- v0.17 does not expose arbitrary pass pipelines, LLVM `opt`, LTO, linker flags, target triples, optimization remarks, inlining, or symbol DCE by default
 - function names are generated from the leading literal words in a phrase definition
 - extern phrase declarations have no body and emit external `func.func private` declarations
 - exported phrase definitions have bodies and emit public definitions with the symbol named after `as`
@@ -537,7 +551,7 @@ Run the full test suite:
 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python -m unittest discover -s tests -v
 ```
 
-The suite includes exact source-MLIR golden conformance files under [`tests/goldens`](tests/goldens). Each `*.ins` source must compile byte-for-byte to its sibling `*.mlir`. v0.16 artifact tests also exercise lowered MLIR, LLVM IR, object emission when `llc` is available, and saved intermediates without making lowered tool output byte-for-byte golden-stable.
+The suite includes exact source-MLIR golden conformance files under [`tests/goldens`](tests/goldens). Each `*.ins` source must compile byte-for-byte to its sibling `*.mlir`. v0.16/v0.17 artifact tests also exercise lowered MLIR, LLVM IR, object emission when `llc` is available, saved intermediates, optimization presets, and optimized runs without making lowered or optimized tool output byte-for-byte golden-stable.
 
 With LLVM/MLIR 22 available, verify the toolchain and fixture exit codes:
 
@@ -600,6 +614,8 @@ PYTHONPATH=src python -m inscription run tests/fixtures/positive/export_scalar_d
 PYTHONPATH=src python -m inscription run tests/fixtures/positive/export_calls_extern.ins             # exits 4
 PYTHONPATH=src python -m inscription run tests/fixtures/positive/export_uses_record_local.ins        # exits 42
 PYTHONPATH=src python -m inscription run tests/fixtures/positive/export_uses_buffer_local.ins        # exits 20
+PYTHONPATH=src python -m inscription run tests/fixtures/positive/optimization_arithmetic.ins -O2     # exits 42
+PYTHONPATH=src python -m inscription run tests/fixtures/positive/optimization_loop.ins -O2           # exits 10
 ```
 
 ## Repository layout
@@ -621,7 +637,9 @@ docs/inscription-v0.11-spec.md v0.11 language and toolchain specification
 docs/inscription-v0.12-spec.md v0.12 language and toolchain specification
 docs/inscription-v0.13-spec.md v0.13 language and toolchain specification
 docs/inscription-v0.14-spec.md v0.14 language and toolchain specification
-docs/inscription-v0.16-spec.md current v0.16 language and toolchain specification
+docs/inscription-v0.15-spec.md v0.15 language and toolchain specification
+docs/inscription-v0.16-spec.md v0.16 language and toolchain specification
+docs/inscription-v0.17-spec.md current v0.17 language and toolchain specification
 grammar/inscription-v0.ebnf   original v0 grammar
 grammar/inscription-v0.1.ebnf v0.1 grammar
 grammar/inscription-v0.2.ebnf v0.2 grammar
@@ -637,7 +655,9 @@ grammar/inscription-v0.11.ebnf v0.11 grammar
 grammar/inscription-v0.12.ebnf v0.12 grammar
 grammar/inscription-v0.13.ebnf v0.13 grammar
 grammar/inscription-v0.14.ebnf v0.14 grammar
-grammar/inscription-v0.16.ebnf current v0.16 grammar
+grammar/inscription-v0.15.ebnf v0.15 grammar
+grammar/inscription-v0.16.ebnf v0.16 grammar
+grammar/inscription-v0.17.ebnf current v0.17 grammar
 tests/goldens/                exact MLIR conformance goldens
 tests/                        unit tests and executable fixtures
 ```
