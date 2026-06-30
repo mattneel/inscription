@@ -1,0 +1,12 @@
+union Door:
+  open
+  closed
+
+code for door door: Door gives i32:
+  match door:
+    Door.open gives 1
+    Door.closed gives 2
+    otherwise gives 9
+
+main gives i32:
+  code for door Door.closed

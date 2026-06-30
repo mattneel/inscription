@@ -53,6 +53,10 @@ from .ast import (
     SizeOfType,
     TypeName,
     Unary,
+    UnionConstructor,
+    UnionDecl,
+    UnionPattern,
+    UnionType,
     ValueType,
     Variable,
     ViewBinding,
@@ -120,7 +124,26 @@ class EnumInfo:
     line: int
 
 
+@dataclass(frozen=True)
+class UnionVariantInfo:
+    name: str
+    tag: int
+    payload_name: str | None
+    payload_type: ValueType | None
+    line: int
+
+
+@dataclass(frozen=True)
+class UnionInfo:
+    name: str
+    variants: dict[str, UnionVariantInfo]
+    variant_order: tuple[str, ...]
+    line: int
+    tag_type: TypeName = "i32"
+
+
 ACTIVE_ENUMS: dict[str, EnumInfo] = {}
+ACTIVE_UNIONS: dict[str, UnionInfo] = {}
 
 
 def enum_type_for_name(name: str) -> EnumType | None:
@@ -130,12 +153,29 @@ def enum_type_for_name(name: str) -> EnumType | None:
     return EnumType(info.name, info.underlying_type)
 
 
+def union_type_for_name(name: str) -> UnionType | None:
+    info = ACTIVE_UNIONS.get(name)
+    if info is None:
+        return None
+    return UnionType(info.name)
+
+
 def is_enum_type(type_name: ValueType | None) -> bool:
     return isinstance(type_name, EnumType)
 
 
+def is_union_type(type_name: ValueType | None) -> bool:
+    return isinstance(type_name, UnionType)
+
+
 def storage_type(type_name: ValueType) -> ValueType:
     return type_name.underlying_type if isinstance(type_name, EnumType) else type_name
+
+
+def primitive_storage_type(type_name: ValueType) -> ValueType:
+    if isinstance(type_name, EnumType):
+        return type_name.underlying_type
+    return type_name
 
 
 
@@ -150,6 +190,9 @@ def resolve_named_value_type(type_name: ValueType) -> ValueType:
         enum_type = enum_type_for_name(type_name.name)
         if enum_type is not None:
             return enum_type
+        union_type = union_type_for_name(type_name.name)
+        if union_type is not None:
+            return union_type
     return type_name
 
 class CompileTimeEvaluationError(Exception):
@@ -160,7 +203,9 @@ class CompileTimeEvaluationError(Exception):
 
 def analyze(program: Program) -> None:
     enum_table(program)
+    unions = union_table(program)
     records = record_table(program)
+    validate_union_payloads(unions, records)
     functions = function_table(program)
     constants = constant_table(program, records, functions)
     functions = resolve_function_table(functions, records, constants)
@@ -226,6 +271,71 @@ def enum_table(program: Program) -> dict[str, EnumInfo]:
     return enums
 
 
+def union_table(program: Program) -> dict[str, UnionInfo]:
+    global ACTIVE_UNIONS
+    ACTIVE_UNIONS = {}
+    record_names = {record.name for record in program.records}
+    enum_names = {enum.name for enum in program.enums}
+    constant_names = {constant.name for constant in program.constants}
+    union_names: set[str] = set()
+    for union in program.unions:
+        if union.name in SCALAR_TYPES:
+            raise InscriptionError(f"union {union.name} conflicts with scalar type {union.name}", union.line)
+        if union.name in union_names:
+            raise InscriptionError(f"union {union.name} is already defined", union.line)
+        if union.name in enum_names:
+            raise InscriptionError(f"union {union.name} conflicts with enum {union.name}", union.line)
+        if union.name in record_names:
+            raise InscriptionError(f"union {union.name} conflicts with record {union.name}", union.line)
+        if union.name in constant_names:
+            raise InscriptionError(f"union {union.name} conflicts with constant {union.name}", union.line)
+        if not union.variants:
+            raise InscriptionError(f"union {union.name} must declare at least one variant", union.line)
+        union_names.add(union.name)
+
+    # Predeclare names so payload resolution can reject direct union payloads.
+    ACTIVE_UNIONS = {name: UnionInfo(name, {}, (), 0) for name in union_names}
+    unions: dict[str, UnionInfo] = {}
+    for union in program.unions:
+        variants: dict[str, UnionVariantInfo] = {}
+        order: list[str] = []
+        for tag, variant in enumerate(union.variants):
+            if variant.name in variants:
+                raise InscriptionError(f"union {union.name} has duplicate variant {variant.name}", variant.line)
+            payload_type = None if variant.payload_type is None else resolve_named_value_type(variant.payload_type)
+            if isinstance(payload_type, BufferType):
+                raise InscriptionError("union payloads may not be buffer types in v0.25", variant.line)
+            if isinstance(payload_type, ArrayType):
+                raise InscriptionError("union payloads may not be array types in v0.25", variant.line)
+            if isinstance(payload_type, ViewType):
+                raise InscriptionError("union payloads may not be view types in v0.25", variant.line)
+            if isinstance(payload_type, UnionType):
+                raise InscriptionError("union payloads may not be union types in v0.25", variant.line)
+            variants[variant.name] = UnionVariantInfo(variant.name, tag, variant.payload_name, payload_type, variant.line)
+            order.append(variant.name)
+        unions[union.name] = UnionInfo(union.name, variants, tuple(order), union.line)
+    ACTIVE_UNIONS = unions
+    return unions
+
+
+def validate_union_payloads(unions: dict[str, UnionInfo], records: dict[str, RecordDecl]) -> None:
+    for union in unions.values():
+        for variant_name in union.variant_order:
+            variant = union.variants[variant_name]
+            payload_type = variant.payload_type
+            if payload_type is None:
+                continue
+            if isinstance(payload_type, RecordType):
+                if payload_type.name not in records:
+                    raise InscriptionError(f"unknown type {payload_type.name}", variant.line)
+                continue
+            if isinstance(payload_type, EnumType):
+                continue
+            if isinstance(payload_type, str) and payload_type in SCALAR_TYPES:
+                continue
+            raise InscriptionError(f"union payload type {format_type(payload_type)} is not supported in v0.25", variant.line)
+
+
 def _primitive_constants_before_enum(program: Program, enum_line: int) -> dict[str, ConstValue]:
     """Evaluate earlier primitive scalar constants for enum case expressions.
 
@@ -272,10 +382,14 @@ def record_table(program: Program) -> dict[str, RecordDecl]:
             seen_fields.add(field.name)
             field_type = resolve_named_value_type(field.type_name)
             if record.layout_kind == "value":
+                if isinstance(field_type, UnionType):
+                    raise InscriptionError("record fields may not be union types in v0.25", field.line)
                 if not (isinstance(field_type, str) and field_type in SCALAR_TYPES) and not isinstance(field_type, EnumType):
                     raise InscriptionError(
                         f"record fields must be scalar types, got {format_type(field_type)}", field.line
                     )
+            elif isinstance(field_type, UnionType):
+                raise InscriptionError("layout record fields may not be union types in v0.25", field.line)
             elif not ((isinstance(field_type, str) and field_type in INTEGER_TYPES) or isinstance(field_type, EnumType)):
                 raise InscriptionError(
                     f"layout record fields must be integer types, got {format_type(field_type)}", field.line
@@ -358,7 +472,11 @@ def constant_table(
             raise InscriptionError(f"constant {const.name} conflicts with record {const.name}", const.line)
         if const.name in ACTIVE_ENUMS:
             raise InscriptionError(f"constant {const.name} conflicts with enum {const.name}", const.line)
+        if const.name in ACTIVE_UNIONS:
+            raise InscriptionError(f"constant {const.name} conflicts with union {const.name}", const.line)
         resolved_type = resolve_value_type(const.type_name, const.line, records, constants, functions, {})
+        if isinstance(resolved_type, UnionType):
+            raise InscriptionError("union constants are not supported in v0.25", const.line)
         if not (isinstance(resolved_type, str) and resolved_type in SCALAR_TYPES) and not isinstance(resolved_type, EnumType):
             raise InscriptionError(f"constant {const.name} must have a scalar type", const.line)
         env = _constant_env_types(constants)
@@ -432,6 +550,8 @@ def format_type(type_name: ValueType) -> str:
     if isinstance(type_name, RecordType):
         return type_name.name
     if isinstance(type_name, EnumType):
+        return type_name.name
+    if isinstance(type_name, UnionType):
         return type_name.name
     return type_name
 
@@ -522,6 +642,11 @@ def _check_function(
     if isinstance(fn.return_type, RecordType):
         if fn.return_type.name not in records:
             raise InscriptionError(f"unknown type {fn.return_type.name}", fn.line)
+    if isinstance(fn.return_type, UnionType):
+        if fn.return_type.name not in ACTIVE_UNIONS:
+            raise InscriptionError(f"unknown type {fn.return_type.name}", fn.line)
+    if isinstance(fn.return_type, BufferType):
+        raise InscriptionError("buffer return types are not supported", fn.line)
     if isinstance(fn.return_type, ViewType):
         raise InscriptionError("view return types are not supported", fn.line)
     if isinstance(fn.return_type, ArrayType):
@@ -561,7 +686,8 @@ def _check_function(
 
 
 def _primitive_abi_type_message(prefix: str, type_name: ValueType) -> str:
-    wording = "primitive scalar types" if isinstance(resolve_named_value_type(type_name), EnumType) else "scalar types"
+    resolved = resolve_named_value_type(type_name)
+    wording = "primitive scalar types" if isinstance(resolved, EnumType | UnionType) else "scalar types"
     return f"{prefix} must be {wording}, got {format_type(type_name)}"
 
 
@@ -647,6 +773,10 @@ def _check_parameter_type(
         return
     if isinstance(type_name, EnumType):
         return
+    if isinstance(type_name, UnionType):
+        if type_name.name not in ACTIVE_UNIONS:
+            raise InscriptionError(f"unknown type {type_name.name}", line)
+        return
     if type_name not in SCALAR_TYPES:
         raise InscriptionError("supported scalar types are i1, i8, i16, i32, i64, u8, u16, u32, u64, f32, and f64", line)
 
@@ -662,6 +792,8 @@ def _check_buffer_type(
     resolved = resolve_buffer_type(buffer_type, line, records, constants, functions, env)
     if resolved.length < 1:
         raise InscriptionError("buffer length must be at least 1", line)
+    if isinstance(resolved.element_type, UnionType):
+        raise InscriptionError("buffer element type may not be a union type in v0.25", line)
     if not is_numeric_type(resolved.element_type) and not isinstance(resolved.element_type, EnumType):
         raise InscriptionError(f"buffer element type must be an integer type, got {format_type(resolved.element_type)}", line)
 
@@ -669,11 +801,15 @@ def _check_buffer_type(
 def _check_array_type(array_type: ArrayType, line: int) -> None:
     if array_type.length < 1:
         raise InscriptionError("buffer length must be at least 1", line)
+    if isinstance(array_type.element_type, UnionType):
+        raise InscriptionError("array element type may not be a union type in v0.25", line)
     if not is_numeric_type(array_type.element_type) and not isinstance(array_type.element_type, EnumType):
         raise InscriptionError(f"array element type must be numeric, got {format_type(array_type.element_type)}", line)
 
 
 def _check_view_type(view_type: ViewType, line: int) -> None:
+    if isinstance(view_type.element_type, UnionType):
+        raise InscriptionError("view element type may not be a union type in v0.25", line)
     if not is_numeric_type(view_type.element_type) and not isinstance(view_type.element_type, EnumType):
         raise InscriptionError(f"view element type must be an integer type, got {format_type(view_type.element_type)}", line)
 
@@ -1122,7 +1258,7 @@ def _check_match_step(
     for arm in stmt.arms:
         if not arm.body:
             raise InscriptionError("match arm must contain at least one step", arm.line)
-        arm_scope = dict(bindings)
+        arm_scope = _bindings_with_match_payload(arm.pattern, scrutinee_type, bindings, constants)
         for body_stmt in arm.body:
             _check_body_stmt(body_stmt, arm_scope, functions, records, constants)
 
@@ -1344,7 +1480,7 @@ def _infer_call_scalar_argument_type(
 ) -> ValueType:
     if isinstance(arg, Variable):
         actual = env.get(arg.name)
-        if isinstance(actual, BufferType | ArrayType | ViewType | RecordType):
+        if isinstance(actual, BufferType | ArrayType | ViewType | RecordType | UnionType):
             return actual
     return _infer_declared_type(arg, expected, env, functions, records)
 
@@ -1367,6 +1503,8 @@ def _infer_declared_type(
         return infer_expr_type(expr, env, functions, records, expected=expected, constants=constants)
     except InscriptionError as expected_error:
         if isinstance(expr, Variable) and "record " in str(expected_error) and "cannot be used as a scalar value" in str(expected_error):
+            raise
+        if isinstance(expr, Variable) and "union " in str(expected_error) and "cannot be used as a scalar value" in str(expected_error):
             raise
         if _should_preserve_expected_error(expected_error):
             raise
@@ -1521,8 +1659,9 @@ def evaluate_const_expr(
     expected: ValueType | None = None,
 ) -> ConstValue:
     type_name = infer_expr_type(expr, env, functions, records, expected=expected, constants=constants)
-    if isinstance(type_name, RecordType | BufferType | ArrayType | ViewType):
-        raise CompileTimeEvaluationError("record value is not compile-time evaluable", getattr(expr, "line", None))
+    if isinstance(type_name, RecordType | BufferType | ArrayType | ViewType | UnionType):
+        noun = "union" if isinstance(type_name, UnionType) else "record"
+        raise CompileTimeEvaluationError(f"{noun} value is not compile-time evaluable", getattr(expr, "line", None))
 
     if isinstance(expr, Integer):
         if is_float_type(type_name) and expr.is_word_zero:
@@ -1538,6 +1677,8 @@ def evaluate_const_expr(
     if isinstance(expr, EnumCase):
         info = ACTIVE_ENUMS.get(expr.type_name)
         if info is None:
+            if expr.type_name in ACTIVE_UNIONS:
+                raise CompileTimeEvaluationError("union value is not compile-time evaluable", expr.line)
             raise InscriptionError(f"unknown type {expr.type_name}", expr.line)
         if expr.case_name not in info.cases:
             raise InscriptionError(f"enum {expr.type_name} has no case {expr.case_name}", expr.line)
@@ -1545,6 +1686,8 @@ def evaluate_const_expr(
         if expected is not None and enum_type != expected:
             require_type(enum_type, expected, expr.line)
         return ConstValue(enum_type, info.cases[expr.case_name])
+    if isinstance(expr, UnionConstructor):
+        raise CompileTimeEvaluationError("union value is not compile-time evaluable", expr.line)
     if isinstance(expr, Variable):
         if expr.name in constants:
             value = constants[expr.name]
@@ -1626,6 +1769,8 @@ def evaluate_const_expr(
         scrutinee = evaluate_const_expr(expr.scrutinee, env, functions, records, constants, expected=scrutinee_type)
         result_type = type_name
         for arm in expr.arms:
+            if isinstance(arm.pattern, UnionPattern):
+                raise CompileTimeEvaluationError("union value is not compile-time evaluable", arm.line)
             pattern = evaluate_const_expr(arm.pattern, env, functions, records, constants, expected=scrutinee_type)
             if _const_values_equal(scrutinee, pattern):
                 return evaluate_const_expr(arm.expr, env, functions, records, constants, expected=result_type)
@@ -1836,10 +1981,24 @@ def infer_expr_type(
     if isinstance(expr, EnumCase):
         info = ACTIVE_ENUMS.get(expr.type_name)
         if info is None:
-            raise InscriptionError(f"unknown type {expr.type_name}", expr.line)
+            union = ACTIVE_UNIONS.get(expr.type_name)
+            if union is None:
+                raise InscriptionError(f"unknown type {expr.type_name}", expr.line)
+            variant = _union_variant(union, expr.case_name, expr.line)
+            if variant.payload_name is not None:
+                raise InscriptionError(f"variant {union.name}.{variant.name} requires payload {variant.payload_name}", expr.line)
+            actual = UnionType(union.name)
+            if expected is not None:
+                require_type(actual, expected, expr.line)
+            return actual
         if expr.case_name not in info.cases:
             raise InscriptionError(f"enum {expr.type_name} has no case {expr.case_name}", expr.line)
         actual = EnumType(info.name, info.underlying_type)
+        if expected is not None:
+            require_type(actual, expected, expr.line)
+        return actual
+    if isinstance(expr, UnionConstructor):
+        actual = infer_union_constructor_type(expr, env, functions, records)
         if expected is not None:
             require_type(actual, expected, expr.line)
         return actual
@@ -1858,6 +2017,10 @@ def infer_expr_type(
                 f"record {expr.name} cannot be used as a scalar value; use a field such as {expr.name}.{_first_record_field(actual, records)}",
                 expr.line,
             )
+        if isinstance(actual, UnionType):
+            if expected is None or expected == actual:
+                return actual
+            raise InscriptionError(f"union {expr.name} cannot be used as a scalar value; use match", expr.line)
         if expected is not None:
             require_type(actual, expected, expr.line)
         return actual
@@ -1904,6 +2067,8 @@ def infer_expr_type(
             if expected is not None:
                 require_type(actual, expected, expr.line)
             return actual
+        if isinstance(env.get(expr.name), UnionType):
+            raise InscriptionError("union payloads are accessed through match arms", expr.line)
         record_type = _require_record_type(expr.name, expr.line, env)
         field_type = _require_record_field(record_type, expr.field, expr.line, records)
         if expected is not None:
@@ -1980,14 +2145,21 @@ def infer_match_expression_type(
     _check_match_patterns(tuple(arm.pattern for arm in expr.arms), scrutinee_type, env, functions, records, constants)
 
     result_type = expected if expected is not None else (
-        infer_expr_type(expr.arms[0].expr, env, functions, records, constants=constants)
+        infer_expr_type(
+            expr.arms[0].expr,
+            _env_with_match_payload(expr.arms[0].pattern, scrutinee_type, env, constants),
+            functions,
+            records,
+            constants=constants,
+        )
         if expr.arms
         else infer_expr_type(expr.otherwise, env, functions, records, constants=constants)
     )
     if isinstance(result_type, BufferType | ArrayType | ViewType):
         raise InscriptionError(f"match expression cannot return {format_type(result_type)}", expr.line)
     for arm in expr.arms:
-        actual = _infer_declared_type(arm.expr, result_type, env, functions, records, constants)
+        arm_env = _env_with_match_payload(arm.pattern, scrutinee_type, env, constants)
+        actual = _infer_declared_type(arm.expr, result_type, arm_env, functions, records, constants)
         if actual != result_type:
             raise InscriptionError(
                 f"match expression arms must have matching types, got {format_type(result_type)} and {format_type(actual)}",
@@ -2016,13 +2188,13 @@ def infer_match_scrutinee_type(
 
 
 def _require_match_scrutinee_type(type_name: ValueType, line: int) -> None:
-    if type_name == "i1" or is_integer_type(type_name) or isinstance(type_name, EnumType):
+    if type_name == "i1" or is_integer_type(type_name) or isinstance(type_name, EnumType | UnionType):
         return
     raise InscriptionError(f"match scrutinee must be i1, integer, or enum, got {format_type(type_name)}", line)
 
 
 def _check_match_patterns(
-    patterns: tuple[Expr, ...],
+    patterns: tuple[Expr | UnionPattern, ...],
     scrutinee_type: ValueType,
     env: dict[str, ValueType],
     functions: dict[str, Function],
@@ -2037,6 +2209,15 @@ def _check_match_patterns(
                 f"match pattern must have type {format_type(scrutinee_type)}, got {format_type(pattern_type)}",
                 getattr(pattern, "line", None),
             )
+        if isinstance(scrutinee_type, UnionType):
+            union = _union_info(scrutinee_type.name, getattr(pattern, "line", 0) or 0)
+            variant = _match_union_variant(pattern, union)
+            key = (union.name, variant.tag)
+            label = f"{union.name}.{variant.name}"
+            if key in seen:
+                raise InscriptionError(f"match has duplicate pattern {label}", getattr(pattern, "line", None))
+            seen[key] = label
+            continue
         try:
             value = evaluate_const_expr(pattern, env, functions, records, constants, expected=scrutinee_type)
         except CompileTimeEvaluationError as exc:
@@ -2049,13 +2230,33 @@ def _check_match_patterns(
 
 
 def _infer_match_pattern_type(
-    pattern: Expr,
+    pattern: Expr | UnionPattern,
     scrutinee_type: ValueType,
     env: dict[str, ValueType],
     functions: dict[str, Function],
     records: dict[str, RecordDecl],
     constants: dict[str, ConstValue],
 ) -> ValueType:
+    if isinstance(pattern, UnionPattern):
+        union = _union_info(pattern.type_name, pattern.line)
+        variant = _union_variant(union, pattern.variant_name, pattern.line)
+        if variant.payload_name is None:
+            if pattern.payload_name is not None:
+                raise InscriptionError(f"variant {union.name}.{variant.name} has no payload", pattern.line)
+        elif pattern.payload_name is None:
+            raise InscriptionError(f"variant {union.name}.{variant.name} pattern requires payload {variant.payload_name}", pattern.line)
+        elif pattern.payload_name != variant.payload_name:
+            raise InscriptionError(
+                f"variant {union.name}.{variant.name} payload is {variant.payload_name}, got {pattern.payload_name}",
+                pattern.line,
+            )
+        return UnionType(union.name)
+    if isinstance(scrutinee_type, UnionType) and isinstance(pattern, EnumCase):
+        union = _union_info(pattern.type_name, pattern.line)
+        variant = _union_variant(union, pattern.case_name, pattern.line)
+        if variant.payload_name is not None:
+            raise InscriptionError(f"variant {union.name}.{variant.name} pattern requires payload {variant.payload_name}", pattern.line)
+        return UnionType(union.name)
     if isinstance(pattern, Integer):
         expected: ValueType | None
         if isinstance(scrutinee_type, EnumType):
@@ -2074,6 +2275,63 @@ def _infer_match_pattern_type(
         if qualified_constant in constants and pattern.name not in env:
             return constants[qualified_constant].type_name
     return infer_expr_type(pattern, env, functions, records, constants=constants)
+
+
+def _match_union_variant(pattern: Expr | UnionPattern, union: UnionInfo) -> UnionVariantInfo:
+    if isinstance(pattern, UnionPattern):
+        if pattern.type_name != union.name:
+            other = _union_info(pattern.type_name, pattern.line)
+            return _union_variant(other, pattern.variant_name, pattern.line)
+        return _union_variant(union, pattern.variant_name, pattern.line)
+    if isinstance(pattern, EnumCase):
+        if pattern.type_name != union.name:
+            other = _union_info(pattern.type_name, pattern.line)
+            return _union_variant(other, pattern.case_name, pattern.line)
+        return _union_variant(union, pattern.case_name, pattern.line)
+    raise InscriptionError("match pattern must have a union variant", getattr(pattern, "line", None))
+
+
+def _env_with_match_payload(
+    pattern: Expr | UnionPattern,
+    scrutinee_type: ValueType,
+    env: dict[str, ValueType],
+    constants: dict[str, ConstValue],
+) -> dict[str, ValueType]:
+    if not isinstance(scrutinee_type, UnionType) or not isinstance(pattern, UnionPattern):
+        return env
+    union = _union_info(scrutinee_type.name, pattern.line)
+    variant = _union_variant(union, pattern.variant_name, pattern.line)
+    if variant.payload_name is None or pattern.payload_name is None:
+        return env
+    if pattern.payload_name in env:
+        raise InscriptionError(f"binding {pattern.payload_name} already exists", pattern.line)
+    if pattern.payload_name in constants:
+        raise InscriptionError(f"binding {pattern.payload_name} conflicts with constant {pattern.payload_name}", pattern.line)
+    assert variant.payload_type is not None
+    scoped = dict(env)
+    scoped[pattern.payload_name] = variant.payload_type
+    return scoped
+
+
+def _bindings_with_match_payload(
+    pattern: Expr | UnionPattern,
+    scrutinee_type: ValueType,
+    bindings: dict[str, Binding],
+    constants: dict[str, ConstValue],
+) -> dict[str, Binding]:
+    if not isinstance(scrutinee_type, UnionType) or not isinstance(pattern, UnionPattern):
+        return dict(bindings)
+    union = _union_info(scrutinee_type.name, pattern.line)
+    variant = _union_variant(union, pattern.variant_name, pattern.line)
+    scoped = dict(bindings)
+    if variant.payload_name is None or pattern.payload_name is None:
+        return scoped
+    if pattern.payload_name in constants:
+        raise InscriptionError(f"binding {pattern.payload_name} conflicts with constant {pattern.payload_name}", pattern.line)
+    _check_no_shadow(pattern.payload_name, pattern.line, scoped, kind="payload")
+    assert variant.payload_type is not None
+    scoped[pattern.payload_name] = Binding(variant.payload_type, "let", pattern.line)
+    return scoped
 
 
 def _match_pattern_key(value: ConstValue) -> tuple[str, int | bool]:
@@ -2135,6 +2393,9 @@ def infer_cast_type(
     target_type = resolve_named_value_type(expr.target_type)
     if isinstance(target_type, RecordType):
         raise InscriptionError(f"cannot cast to {format_type(target_type)}", expr.line)
+    if isinstance(target_type, UnionType):
+        source_type = infer_expr_type(expr.expr, env, functions, records)
+        raise InscriptionError(f"cannot cast {format_type(source_type)} to {format_type(target_type)}", expr.line)
 
     if isinstance(target_type, EnumType):
         if isinstance(expr.expr, Integer):
@@ -2160,6 +2421,8 @@ def infer_cast_type(
         )
 
     source_type = infer_expr_type(expr.expr, env, functions, records)
+    if isinstance(source_type, UnionType):
+        raise InscriptionError(f"cannot cast {format_type(source_type)} to {format_type(target_type)}", expr.line)
     if isinstance(source_type, EnumType):
         if not isinstance(target_type, str) or target_type == "i1" or is_float_type(target_type):
             raise InscriptionError(f"cannot cast {format_type(source_type)} to {format_type(target_type)}", expr.line)
@@ -2449,6 +2712,8 @@ def _require_record_type(name: str, line: int, env: dict[str, ValueType]) -> Rec
     binding_type = env.get(name)
     if binding_type is None:
         raise InscriptionError(f"unknown binding {name}", line)
+    if isinstance(binding_type, UnionType):
+        raise InscriptionError("union payloads are accessed through match arms", line)
     if not isinstance(binding_type, RecordType):
         raise InscriptionError(f"{name} is not a record", line)
     return binding_type
@@ -2518,6 +2783,49 @@ def infer_record_constructor_type(
                 initializer.line,
             )
     return record_type
+
+
+def _union_info(type_name: str, line: int) -> UnionInfo:
+    info = ACTIVE_UNIONS.get(type_name)
+    if info is None:
+        raise InscriptionError(f"unknown type {type_name}", line)
+    return info
+
+
+def _union_variant(union: UnionInfo, variant_name: str, line: int) -> UnionVariantInfo:
+    variant = union.variants.get(variant_name)
+    if variant is None:
+        raise InscriptionError(f"union {union.name} has no variant {variant_name}", line)
+    return variant
+
+
+def infer_union_constructor_type(
+    expr: UnionConstructor,
+    env: dict[str, ValueType],
+    functions: dict[str, Function],
+    records: dict[str, RecordDecl],
+) -> UnionType:
+    union = _union_info(expr.type_name, expr.line)
+    variant = _union_variant(union, expr.variant_name, expr.line)
+    if variant.payload_name is None:
+        if expr.payload_name is not None or expr.payload_expr is not None:
+            raise InscriptionError(f"variant {union.name}.{variant.name} has no payload", expr.line)
+        return UnionType(union.name)
+    if expr.payload_name is None or expr.payload_expr is None:
+        raise InscriptionError(f"variant {union.name}.{variant.name} requires payload {variant.payload_name}", expr.line)
+    if expr.payload_name != variant.payload_name:
+        raise InscriptionError(
+            f"variant {union.name}.{variant.name} payload is {variant.payload_name}, got {expr.payload_name}",
+            expr.line,
+        )
+    assert variant.payload_type is not None
+    actual = _infer_declared_type(expr.payload_expr, variant.payload_type, env, functions, records)
+    if actual != variant.payload_type:
+        raise InscriptionError(
+            f"variant {union.name}.{variant.name} payload {variant.payload_name} must have type {format_type(variant.payload_type)}, got {format_type(actual)}",
+            expr.line,
+        )
+    return UnionType(union.name)
 
 
 def infer_layout_read_type(

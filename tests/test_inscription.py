@@ -2174,6 +2174,7 @@ class CompilerTests(unittest.TestCase):
                 "highlight floats x: f32 and y: f64 gives f64:\n  y plus (x as f64) plus 1.5e2\n",
                 "highlight arrays gives i32:\n  let numbers be array of 2 i32 containing 1, 2\n  length of numbers\n",
                 "enum HighlightMode: u8:\n  idle be 0\n  active be 1\n\nhighlight enum mode: HighlightMode gives i32:\n  Mode.active as i32\n",
+                "union HighlightMaybe:\n  none\n  some value: i32\n\nhighlight union gives i32:\n  match HighlightMaybe.some with value be 1:\n    HighlightMaybe.some with value gives value\n    otherwise gives 0\n",
             ]
         )
         html = highlight_source(source, output_format="html")
@@ -2859,6 +2860,177 @@ main gives i32:
                     "inscription",
                     "compile",
                     str(FIXTURES / "match_enum_expression.ins"),
+                    "--emit",
+                    "executable",
+                    "-o",
+                    str(executable),
+                ],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(exe_proc.returncode, 0, exe_proc.stderr)
+            run = subprocess.run([str(executable)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False)
+            self.assertEqual(run.returncode, 7, run.stderr)
+
+    def test_v025_unions_lower_to_flattened_tag_and_payload_slots(self):
+        basic = compile_source(self.fixture("union_basic.ins"))
+        self.assertIn("func.func @value_or_zero(%maybe_tag: i32, %maybe_some_value: i32) -> i32", basic)
+        self.assertIn("arith.cmpi eq", basic)
+        self.assertIn("scf.if", basic)
+
+        payload_free = compile_source(self.fixture("union_payload_match.ins"))
+        self.assertIn("func.func @code_for_door(%door_tag: i32) -> i32", payload_free)
+        self.assertIn("arith.constant 1 : i32", payload_free)
+
+        union_return = compile_source(self.fixture("union_return.ins"))
+        self.assertIn("func.func @make_maybe(%flag: i1) -> (i32, i32)", union_return)
+        self.assertIn("func.call @make_maybe", union_return)
+
+        rebinding = compile_source(self.fixture("union_rebinding.ins"))
+        self.assertIn("MaybeI32", self.fixture("union_rebinding.ins"))
+        self.assertIn("arith.constant 5 : i32", rebinding)
+
+        record_payload = compile_source(self.fixture("union_record_payload.ins"))
+        self.assertIn("scf.if", record_payload)
+        self.assertIn("arith.addi", record_payload)
+
+        step_match = compile_source(self.fixture("union_match_steps.ins"))
+        self.assertIn("scf.if", step_match)
+        self.assertIn("arith.extui", step_match)
+
+        guarded_return = compile_source(self.fixture("union_guarded_return.ins"))
+        self.assertIn("func.func @choose_maybe(%flag: i1) -> (i32, i32)", guarded_return)
+        self.assertIn("scf.if", guarded_return)
+
+        require_match = compile_source(self.fixture("union_require.ins"))
+        self.assertIn("cf.assert", compile_source(self.fixture("union_require.ins"), runtime_checks=True))
+        self.assertIn("scf.if", require_match)
+
+    def test_v025_module_unions_interface_json_and_artifacts(self):
+        fixture = FIXTURES / "union_module" / "main.ins"
+        mlir = compile_file(fixture, module_root=fixture.parent)
+        self.assertIn("func.func @Maybe__value_or_zero(%maybe_tag: i32, %maybe_some_value: i32) -> i32", mlir)
+        self.assertIn("func.call @Maybe__value_or_zero", mlir)
+        try:
+            result = run_file(fixture, module_root=fixture.parent)
+        except ToolchainError:
+            result = None
+        if result is not None:
+            self.assertEqual(result.exit_status, 7)
+
+        env = {**os.environ, "PYTHONPATH": str(SRC)}
+        union_json = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "inscription",
+                "compile",
+                str(FIXTURES / "union_basic.ins"),
+                "--emit",
+                "interface-json",
+            ],
+            cwd=ROOT,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(union_json.returncode, 0, union_json.stderr)
+        payload = json.loads(union_json.stdout)
+        maybe = payload["modules"][0]["unions"][0]
+        self.assertEqual(maybe["name"], "MaybeI32")
+        self.assertEqual(maybe["kind"], "union")
+        self.assertEqual(maybe["tag_type"], "i32")
+        self.assertEqual(maybe["variants"][0], {"name": "none", "tag": 0, "payload": None})
+        self.assertEqual(
+            maybe["variants"][1],
+            {"name": "some", "tag": 1, "payload": {"name": "value", "type": "i32"}},
+        )
+
+        module_json = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "inscription",
+                "compile",
+                str(fixture),
+                "--emit",
+                "interface-json",
+            ],
+            cwd=ROOT,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(module_json.returncode, 0, module_json.stderr)
+        module_payload = json.loads(module_json.stdout)
+        maybe_module = next(module for module in module_payload["modules"] if module["name"] == "Maybe")
+        self.assertEqual(maybe_module["unions"][0]["name"], "MaybeI32")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            union_main = Path(tmp) / "union_main.ins"
+            union_main.write_text("union MaybeI32:\n  none\n\nmain gives MaybeI32:\n  MaybeI32.none\n")
+            run_union_main = subprocess.run(
+                [sys.executable, "-m", "inscription", "run", str(union_main)],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(run_union_main.returncode, 2)
+            self.assertIn("program main must return an integer scalar, got MaybeI32", run_union_main.stderr)
+
+        try:
+            resolve_toolchain()
+        except ToolchainError:
+            return
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            llvm_path = tmp_path / "union_basic.ll"
+            llvm_proc = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "inscription",
+                    "compile",
+                    str(FIXTURES / "union_basic.ins"),
+                    "--emit",
+                    "llvm-ir",
+                    "--verify",
+                    "-o",
+                    str(llvm_path),
+                ],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(llvm_proc.returncode, 0, llvm_proc.stderr)
+            self.assertIn("define i32 @main", llvm_path.read_text())
+
+            try:
+                resolve_toolchain(require_executable=True)
+            except ToolchainError:
+                return
+            executable = tmp_path / "union_basic"
+            exe_proc = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "inscription",
+                    "compile",
+                    str(FIXTURES / "union_basic.ins"),
                     "--emit",
                     "executable",
                     "-o",
@@ -3673,6 +3845,98 @@ main gives i32:
             "match over buffer unsupported": (
                 "bad gives i32:\n  let cells be buffer of 1 i32 filled with 0\n  match cells:\n    otherwise gives 0\n",
                 "match scrutinee must be i1, integer, or enum, got buffer of 1 i32",
+            ),
+            "duplicate union name": (
+                "union MaybeI32:\n  none\n\nunion MaybeI32:\n  some value: i32\n",
+                "union MaybeI32 is already defined",
+            ),
+            "union collides with enum": (
+                "enum MaybeI32: u8:\n  none be 0\n\nunion MaybeI32:\n  none\n",
+                "union MaybeI32 conflicts with enum MaybeI32",
+            ),
+            "empty union": (
+                "union Empty:\n",
+                "union Empty must declare at least one variant",
+            ),
+            "duplicate union variant name": (
+                "union MaybeI32:\n  none\n  none\n",
+                "union MaybeI32 has duplicate variant none",
+            ),
+            "union multi payload unsupported": (
+                "union Bad:\n  many left: i32 and right: i32\n",
+                "union variants support at most one payload in v0.25",
+            ),
+            "union payload buffer unsupported": (
+                "union Bad:\n  data bytes: buffer of 4 u8\n",
+                "union payloads may not be buffer types in v0.25",
+            ),
+            "union payload union unsupported": (
+                "union MaybeI32:\n  none\n\nunion Bad:\n  nested value: MaybeI32\n",
+                "union payloads may not be union types in v0.25",
+            ),
+            "unknown union variant constructor": (
+                "union MaybeI32:\n  none\n\nbad gives i32:\n  let maybe be MaybeI32.some with value be 1\n  0\n",
+                "union MaybeI32 has no variant some",
+            ),
+            "union constructor missing payload": (
+                "union MaybeI32:\n  some value: i32\n\nbad gives i32:\n  let maybe be MaybeI32.some\n  0\n",
+                "variant MaybeI32.some requires payload value",
+            ),
+            "union constructor extra payload": (
+                "union MaybeI32:\n  none\n\nbad gives i32:\n  let maybe be MaybeI32.none with value be 1\n  0\n",
+                "variant MaybeI32.none has no payload",
+            ),
+            "union constructor wrong payload name": (
+                "union MaybeI32:\n  some value: i32\n\nbad gives i32:\n  let maybe be MaybeI32.some with other be 1\n  0\n",
+                "variant MaybeI32.some payload is value, got other",
+            ),
+            "union constructor payload type mismatch": (
+                "union MaybeI32:\n  some value: i32\n\nbad gives i32:\n  let maybe be MaybeI32.some with value be true\n  0\n",
+                "variant MaybeI32.some payload value must have type i32, got i1",
+            ),
+            "union used as scalar": (
+                "union MaybeI32:\n  none\n\nbad gives i32:\n  let maybe be MaybeI32.none\n  maybe\n",
+                "union maybe cannot be used as a scalar value; use match",
+            ),
+            "union field access invalid": (
+                "union MaybeI32:\n  some value: i32\n\nbad gives i32:\n  let maybe be MaybeI32.some with value be 1\n  maybe.value\n",
+                "union payloads are accessed through match arms",
+            ),
+            "union match payload missing": (
+                "union MaybeI32:\n  some value: i32\n\nbad maybe: MaybeI32 gives i32:\n  match maybe:\n    MaybeI32.some gives 1\n    otherwise gives 0\n",
+                "variant MaybeI32.some pattern requires payload value",
+            ),
+            "union match payload on payload-free variant": (
+                "union MaybeI32:\n  none\n\nbad maybe: MaybeI32 gives i32:\n  match maybe:\n    MaybeI32.none with value gives value\n    otherwise gives 0\n",
+                "variant MaybeI32.none has no payload",
+            ),
+            "union match duplicate variant": (
+                "union MaybeI32:\n  none\n\nbad maybe: MaybeI32 gives i32:\n  match maybe:\n    MaybeI32.none gives 1\n    MaybeI32.none gives 2\n    otherwise gives 0\n",
+                "match has duplicate pattern MaybeI32.none",
+            ),
+            "union match pattern type mismatch": (
+                "union A:\n  none\n\nunion B:\n  none\n\nbad a: A gives i32:\n  match a:\n    B.none gives 1\n    otherwise gives 0\n",
+                "match pattern must have type A, got B",
+            ),
+            "union constants unsupported": (
+                "union MaybeI32:\n  none\n\nconstant none: MaybeI32 be MaybeI32.none\n",
+                "union constants are not supported in v0.25",
+            ),
+            "union record field unsupported": (
+                "union MaybeI32:\n  none\n\nrecord Bad:\n  maybe: MaybeI32\n",
+                "record fields may not be union types in v0.25",
+            ),
+            "array of union unsupported": (
+                "union MaybeI32:\n  none\n\nbad gives i32:\n  let values be array of 1 MaybeI32 containing MaybeI32.none\n  0\n",
+                "array element type may not be a union type in v0.25",
+            ),
+            "export union unsupported": (
+                "union MaybeI32:\n  none\n\nexport exported maybe maybe: MaybeI32 gives i32 as ins_maybe:\n  0\n",
+                "exported phrase parameters must be primitive scalar types, got MaybeI32",
+            ),
+            "extern union unsupported": (
+                "union MaybeI32:\n  none\n\nextern host maybe maybe: MaybeI32 does as host_maybe\n",
+                "extern phrase parameters must be primitive scalar types, got MaybeI32",
             ),
             "extern with body": (
                 "extern population count of x: i32 gives i32 as llvm.ctpop.i32:\n  x\n",

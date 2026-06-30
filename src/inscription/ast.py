@@ -34,6 +34,7 @@ class ImportDecl:
 class Program:
     records: tuple["RecordDecl", ...]
     enums: tuple["EnumDecl", ...]
+    unions: tuple["UnionDecl", ...]
     constants: tuple["ConstantDecl", ...]
     checks: tuple["CheckStmt", ...]
     functions: tuple["Function", ...]
@@ -77,6 +78,21 @@ class EnumDecl:
     name: str
     underlying_type: TypeName
     cases: tuple[EnumCaseDecl, ...]
+    line: int
+
+
+@dataclass(frozen=True)
+class UnionVariantDecl:
+    name: str
+    payload_name: str | None
+    payload_type: "ValueType | None"
+    line: int
+
+
+@dataclass(frozen=True)
+class UnionDecl:
+    name: str
+    variants: tuple[UnionVariantDecl, ...]
     line: int
 
 
@@ -152,8 +168,13 @@ class EnumType:
     underlying_type: TypeName
 
 
-ValueType = TypeName | BufferType | ArrayType | ViewType | RecordType | EnumType
-ReturnType = TypeName | RecordType | ArrayType | ViewType | EnumType | None
+@dataclass(frozen=True)
+class UnionType:
+    name: str
+
+
+ValueType = TypeName | BufferType | ArrayType | ViewType | RecordType | EnumType | UnionType
+ReturnType = TypeName | RecordType | ArrayType | ViewType | EnumType | UnionType | None
 
 
 @dataclass(frozen=True)
@@ -208,6 +229,26 @@ class EnumCase:
     type_name: str
     case_name: str
     line: int
+
+
+@dataclass(frozen=True)
+class UnionConstructor:
+    type_name: str
+    variant_name: str
+    payload_name: str | None
+    payload_expr: "Expr | None"
+    line: int
+
+
+@dataclass(frozen=True)
+class UnionPattern:
+    type_name: str
+    variant_name: str
+    payload_name: str | None
+    line: int
+
+
+Pattern = "Expr | UnionPattern"
 
 
 @dataclass(frozen=True)
@@ -285,7 +326,7 @@ class WhenExpr:
 
 @dataclass(frozen=True)
 class MatchExprArm:
-    pattern: "Expr"
+    pattern: "Pattern"
     expr: "Expr"
     line: int
 
@@ -310,6 +351,7 @@ Expr = (
     | OffsetOfField
     | FieldAccess
     | EnumCase
+    | UnionConstructor
     | RecordConstructor
     | LayoutRead
     | Unary
@@ -443,7 +485,7 @@ class IfStmt:
 
 @dataclass(frozen=True)
 class MatchStepArm:
-    pattern: Expr
+    pattern: Pattern
     body: tuple["BodyStmt", ...]
     line: int
 

@@ -47,6 +47,9 @@ from .ast import (
     Stmt,
     TypeName,
     Unary,
+    UnionConstructor,
+    UnionPattern,
+    UnionType,
     Variable,
     ViewBinding,
     ViewType,
@@ -78,6 +81,8 @@ from .semantic import (
     resolve_function_table,
     storage_type,
     type_width,
+    union_table,
+    validate_union_payloads,
 )
 
 
@@ -124,6 +129,12 @@ class RecordStorage:
 
 
 @dataclass(frozen=True)
+class UnionStorage:
+    union_type: UnionType
+    slots: dict[str, Value]
+
+
+@dataclass(frozen=True)
 class CarrySlot:
     name: str
     field: str | None
@@ -142,7 +153,7 @@ class CallArg:
     mlir_type: str
 
 
-EnvValue = Value | BufferStorage | ArrayStorage | ViewStorage | RecordStorage
+EnvValue = Value | BufferStorage | ArrayStorage | ViewStorage | RecordStorage | UnionStorage
 ConstantKey = tuple[str, int | bool | float, ValueType]
 
 
@@ -153,8 +164,8 @@ def mlir_value_type(type_name: ValueType) -> str:
         return memref_type(type_name)
     if isinstance(type_name, ViewType):
         return dynamic_memref_type(type_name.element_type)
-    if isinstance(type_name, RecordType):
-        raise AssertionError("record type must be flattened before MLIR type emission")  # pragma: no cover
+    if isinstance(type_name, RecordType | UnionType):
+        raise AssertionError("aggregate type must be flattened before MLIR type emission")  # pragma: no cover
     return mlir_type(type_name)
 
 
@@ -165,8 +176,8 @@ def mlir_env_value_type(value: "EnvValue") -> str:
         return memref_type(value.array_type)
     if isinstance(value, ViewStorage):
         return dynamic_memref_type(value.element_type)
-    if isinstance(value, RecordStorage):
-        raise AssertionError("record value must be flattened before MLIR type emission")  # pragma: no cover
+    if isinstance(value, RecordStorage | UnionStorage):
+        raise AssertionError("aggregate value must be flattened before MLIR type emission")  # pragma: no cover
     return mlir_type(value.type_name)
 
 
@@ -183,7 +194,9 @@ def emit_mlir(program: Program, *, runtime_checks: bool = False) -> str:
 class MlirEmitter:
     def __init__(self, program: Program, *, runtime_checks: bool = False):
         self.enums = enum_table(program)
+        self.unions = union_table(program)
         self.records = record_table(program)
+        validate_union_payloads(self.unions, self.records)
         raw_functions = function_table(program)
         self.top_constants = constant_table(program, self.records, raw_functions)
         self.functions = resolve_function_table(raw_functions, self.records, self.top_constants)
@@ -192,6 +205,7 @@ class MlirEmitter:
         self.constants: dict[ConstantKey, Value] = {}
         self.binding_order: list[str] = []
         self.record_order: list[str] = []
+        self.union_order: list[str] = []
         self.while_counter = 0
         self.while_depth = 0
         self.for_counter = 0
@@ -235,9 +249,10 @@ class MlirEmitter:
         self.binding_order = [
             param.name
             for param in fn.params
-            if not isinstance(param.type_name, BufferType | ArrayType | ViewType | RecordType)
+            if not isinstance(param.type_name, BufferType | ArrayType | ViewType | RecordType | UnionType)
         ]
         self.record_order = [param.name for param in fn.params if isinstance(param.type_name, RecordType)]
+        self.union_order = [param.name for param in fn.params if isinstance(param.type_name, UnionType)]
         self.while_counter = 0
         self.while_depth = 0
         self.for_counter = 0
@@ -260,6 +275,8 @@ class MlirEmitter:
                 )
             elif isinstance(param.type_name, RecordType):
                 env[param.name] = self.record_parameter_storage(param.name, param.type_name)
+            elif isinstance(param.type_name, UnionType):
+                env[param.name] = self.union_parameter_storage(param.name, param.type_name)
             else:
                 env[param.name] = Value(f"%{param.name}", param.type_name)
         if fn.return_type is None:
@@ -284,6 +301,10 @@ class MlirEmitter:
                 for field in self.record_fields(param.type_name):
                     args.append(f"%{param.name}_{field.name}: {mlir_type(field.type_name)}")
                 continue
+            if isinstance(param.type_name, UnionType):
+                for slot in self.union_slot_types(param.type_name):
+                    args.append(f"%{param.name}_{slot[0]}: {mlir_type(slot[1])}")
+                continue
             args.append(f"%{param.name}: {mlir_type(param.type_name)}")
         return args
 
@@ -302,6 +323,10 @@ class MlirEmitter:
                 for field in self.record_fields(param.type_name):
                     args.append(mlir_type(field.type_name))
                 continue
+            if isinstance(param.type_name, UnionType):
+                for _slot_name, slot_type in self.union_slot_types(param.type_name):
+                    args.append(mlir_type(slot_type))
+                continue
             args.append(mlir_type(param.type_name))
         return args
 
@@ -311,6 +336,15 @@ class MlirEmitter:
             {
                 field.name: Value(f"%{name}_{field.name}", field.type_name)
                 for field in self.record_fields(record_type)
+            },
+        )
+
+    def union_parameter_storage(self, name: str, union_type: UnionType) -> UnionStorage:
+        return UnionStorage(
+            union_type,
+            {
+                slot_name: Value(f"%{name}_{slot_name}", slot_type)
+                for slot_name, slot_type in self.union_slot_types(union_type)
             },
         )
 
@@ -330,7 +364,7 @@ class MlirEmitter:
         env: dict[str, EnvValue],
         lines: list[str],
         indent: str,
-        return_type: TypeName | RecordType,
+        return_type: TypeName | RecordType | UnionType,
     ) -> None:
         for stmt in statements:
             if isinstance(stmt, ReturnStmt):
@@ -338,6 +372,13 @@ class MlirEmitter:
                     record = self.emit_record_expr(stmt.expr, env, lines, indent, expected=return_type)
                     fields = self.record_fields(return_type)
                     values = [record.fields[field.name] for field in fields]
+                    lines.append(
+                        f"{indent}return {', '.join(value.name for value in values)} : "
+                        f"{', '.join(mlir_type(value.type_name) for value in values)}"
+                    )
+                elif isinstance(return_type, UnionType):
+                    union = self.emit_union_expr(stmt.expr, env, lines, indent, expected=return_type)
+                    values = self.union_values(union)
                     lines.append(
                         f"{indent}return {', '.join(value.name for value in values)} : "
                         f"{', '.join(mlir_type(value.type_name) for value in values)}"
@@ -362,6 +403,9 @@ class MlirEmitter:
             if isinstance(type_name, RecordType):
                 env[stmt.name] = self.emit_record_expr(stmt.expr, env, lines, indent, expected=type_name)
                 self.record_order.append(stmt.name)
+            elif isinstance(type_name, UnionType):
+                env[stmt.name] = self.emit_union_expr(stmt.expr, env, lines, indent, expected=type_name)
+                self.union_order.append(stmt.name)
             elif isinstance(type_name, ArrayType | ViewType):
                 raise AssertionError("view binding must use view syntax")  # pragma: no cover
             else:
@@ -381,6 +425,8 @@ class MlirEmitter:
             current_value = env[stmt.name]
             if isinstance(current_value, RecordStorage):
                 env[stmt.name] = self.emit_record_expr(stmt.expr, env, lines, indent, expected=current_value.record_type)
+            elif isinstance(current_value, UnionStorage):
+                env[stmt.name] = self.emit_union_expr(stmt.expr, env, lines, indent, expected=current_value.union_type)
             elif isinstance(current_value, ArrayStorage | ViewStorage):
                 raise AssertionError("storage rebinding should be rejected by semantic analysis")  # pragma: no cover
             else:
@@ -431,6 +477,8 @@ class MlirEmitter:
         )
         if isinstance(type_name, RecordType):
             raise AssertionError("record expression used where scalar value was expected")  # pragma: no cover
+        if isinstance(type_name, UnionType):
+            raise AssertionError("union expression used where scalar value was expected")  # pragma: no cover
         if isinstance(expr, Integer):
             if is_float_type(type_name) and expr.is_word_zero:
                 return self.emit_float(0.0, type_name, lines, indent)
@@ -440,7 +488,9 @@ class MlirEmitter:
         if isinstance(expr, Boolean):
             return self.emit_boolean(expr.value, lines, indent)
         if isinstance(expr, EnumCase):
-            info = self.enums[expr.type_name]
+            info = self.enums.get(expr.type_name)
+            if info is None:
+                raise AssertionError("union constructor used where scalar value was expected")  # pragma: no cover
             return self.emit_integer(info.cases[expr.case_name], type_name, lines, indent)
         if isinstance(expr, Variable):
             if expr.name in self.top_constants:
@@ -480,7 +530,7 @@ class MlirEmitter:
             target = self.functions[expr.name]
             args = self.emit_call_arguments(expr, target, env, lines, indent)
             assert target.return_type is not None
-            assert not isinstance(target.return_type, RecordType | ViewType)
+            assert not isinstance(target.return_type, RecordType | UnionType | ViewType)
             out = Value(self.fresh(), target.return_type)
             arg_values = ", ".join(arg.name for arg in args)
             arg_types = ", ".join(arg.mlir_type for arg in args)
@@ -1033,11 +1083,7 @@ class MlirEmitter:
         indent: str,
         record_type: RecordType,
     ) -> RecordStorage:
-        env_types = self.env_types(env)
-        scrutinee_type = infer_expr_type(
-            expr.scrutinee, env_types, self.functions, self.records, constants=self.top_constants
-        )
-        scrutinee = self.emit_expr(expr.scrutinee, env, lines, indent, expected=scrutinee_type)
+        scrutinee, scrutinee_type = self.emit_match_scrutinee(expr.scrutinee, env, lines, indent)
         return self.emit_record_match_arms(
             list(expr.arms), expr.otherwise, scrutinee, scrutinee_type, env, lines, indent, record_type
         )
@@ -1046,7 +1092,7 @@ class MlirEmitter:
         self,
         arms,
         otherwise: Expr,
-        scrutinee: Value,
+        scrutinee: Value | UnionStorage,
         scrutinee_type: ValueType,
         env: dict[str, EnvValue],
         lines: list[str],
@@ -1063,10 +1109,11 @@ class MlirEmitter:
         assignment = f"{result_base}:{len(fields)} = " if len(fields) > 1 else f"{result_base} = "
         lines.append(f"{indent}{assignment}scf.if {cond.name} -> ({self.type_list(result_types)}) {{")
         then_holder: dict[str, RecordStorage] = {}
+        then_env = self.env_with_union_pattern_payload(arm.pattern, scrutinee_type, scrutinee, dict(env))
         self.emit_with_local_constants(
             lambda: then_holder.setdefault(
                 "record",
-                self.emit_record_expr(arm.expr, dict(env), lines, indent + "  ", expected=record_type),
+                self.emit_record_expr(arm.expr, then_env, lines, indent + "  ", expected=record_type),
             )
         )
         then_record = then_holder["record"]
@@ -1095,6 +1142,236 @@ class MlirEmitter:
             {
                 field.name: Value(result_base if len(fields) == 1 else f"{result_base}#{index}", field.type_name)
                 for index, field in enumerate(fields)
+            },
+        )
+
+    def union_slot_types(self, union_type: UnionType) -> list[tuple[str, ValueType]]:
+        union = self.unions[union_type.name]
+        slots: list[tuple[str, ValueType]] = [("tag", union.tag_type)]
+        for variant_name in union.variant_order:
+            variant = union.variants[variant_name]
+            if variant.payload_type is None:
+                continue
+            assert variant.payload_name is not None
+            label = f"{variant.name}_{variant.payload_name}"
+            payload_type = variant.payload_type
+            if isinstance(payload_type, RecordType):
+                for field in self.record_fields(payload_type):
+                    slots.append((f"{label}_{field.name}", field.type_name))
+            else:
+                slots.append((label, payload_type))
+        return slots
+
+    def union_values(self, union: UnionStorage) -> list[Value]:
+        return [union.slots[name] for name, _type_name in self.union_slot_types(union.union_type)]
+
+    def zero_for_type(self, type_name: ValueType, lines: list[str], indent: str) -> Value:
+        if type_name == "i1":
+            return self.emit_boolean(False, lines, indent)
+        if is_float_type(type_name):
+            assert isinstance(type_name, str)
+            return self.emit_float(0.0, type_name, lines, indent)
+        return self.emit_integer(0, type_name, lines, indent)
+
+    def emit_union_expr(
+        self,
+        expr: Expr,
+        env: dict[str, EnvValue],
+        lines: list[str],
+        indent: str,
+        *,
+        expected: UnionType,
+    ) -> UnionStorage:
+        if isinstance(expr, Variable):
+            source = self.require_union(env[expr.name])
+            assert source.union_type == expected
+            return UnionStorage(expected, dict(source.slots))
+        if isinstance(expr, EnumCase):
+            return self.emit_union_constructor(
+                UnionConstructor(expr.type_name, expr.case_name, None, None, expr.line),
+                env,
+                lines,
+                indent,
+                expected=expected,
+            )
+        if isinstance(expr, UnionConstructor):
+            return self.emit_union_constructor(expr, env, lines, indent, expected=expected)
+        if isinstance(expr, Call):
+            target = self.functions[expr.name]
+            assert target.return_type == expected
+            args = self.emit_call_arguments(expr, target, env, lines, indent)
+            slot_types = self.union_slot_types(expected)
+            result_types = [slot_type for _slot_name, slot_type in slot_types]
+            result_base = self.fresh()
+            assignment = f"{result_base}:{len(slot_types)} = " if len(slot_types) > 1 else f"{result_base} = "
+            arg_values = ", ".join(arg.name for arg in args)
+            arg_types = ", ".join(arg.mlir_type for arg in args)
+            lines.append(
+                f"{indent}{assignment}func.call @{self.call_symbol(target)}({arg_values}) : ({arg_types}) -> "
+                f"{self.result_type_list(result_types)}"
+            )
+            return UnionStorage(
+                expected,
+                {
+                    slot_name: Value(result_base if len(slot_types) == 1 else f"{result_base}#{index}", slot_type)
+                    for index, (slot_name, slot_type) in enumerate(slot_types)
+                },
+            )
+        if isinstance(expr, WhenExpr):
+            return self.emit_union_when_expr(expr, env, lines, indent, expected)
+        if isinstance(expr, MatchExpr):
+            return self.emit_union_match_expr(expr, env, lines, indent, expected)
+        raise AssertionError("unsupported union expression")  # pragma: no cover
+
+    def emit_union_constructor(
+        self,
+        expr: UnionConstructor,
+        env: dict[str, EnvValue],
+        lines: list[str],
+        indent: str,
+        *,
+        expected: UnionType,
+    ) -> UnionStorage:
+        union = self.unions[expected.name]
+        variant = union.variants[expr.variant_name]
+        slots: dict[str, Value] = {}
+        for slot_name, slot_type in self.union_slot_types(expected):
+            slots[slot_name] = self.zero_for_type(slot_type, lines, indent)
+        slots["tag"] = self.emit_integer(variant.tag, union.tag_type, lines, indent)
+        if variant.payload_type is not None:
+            assert expr.payload_expr is not None
+            assert variant.payload_name is not None
+            label = f"{variant.name}_{variant.payload_name}"
+            payload_type = variant.payload_type
+            if isinstance(payload_type, RecordType):
+                record = self.emit_record_expr(expr.payload_expr, env, lines, indent, expected=payload_type)
+                for field in self.record_fields(payload_type):
+                    slots[f"{label}_{field.name}"] = record.fields[field.name]
+            else:
+                slots[label] = self.emit_expr(expr.payload_expr, env, lines, indent, expected=payload_type)
+        return UnionStorage(expected, slots)
+
+    def emit_union_when_expr(
+        self,
+        expr: WhenExpr,
+        env: dict[str, EnvValue],
+        lines: list[str],
+        indent: str,
+        union_type: UnionType,
+    ) -> UnionStorage:
+        return self.emit_union_when_cases(list(expr.cases), expr.otherwise, env, lines, indent, union_type)
+
+    def emit_union_when_cases(
+        self,
+        cases: list[WhenCase],
+        otherwise: Expr,
+        env: dict[str, EnvValue],
+        lines: list[str],
+        indent: str,
+        union_type: UnionType,
+    ) -> UnionStorage:
+        if not cases:
+            return self.emit_union_expr(otherwise, env, lines, indent, expected=union_type)
+        case = cases[0]
+        cond = self.emit_expr(case.condition, env, lines, indent, expected="i1")
+        slot_types = self.union_slot_types(union_type)
+        result_types = [slot_type for _slot_name, slot_type in slot_types]
+        result_base = self.fresh()
+        assignment = f"{result_base}:{len(slot_types)} = " if len(slot_types) > 1 else f"{result_base} = "
+        lines.append(f"{indent}{assignment}scf.if {cond.name} -> ({self.type_list(result_types)}) {{")
+        then_holder: dict[str, UnionStorage] = {}
+        self.emit_with_local_constants(
+            lambda: then_holder.setdefault(
+                "union",
+                self.emit_union_expr(case.expr, dict(env), lines, indent + "  ", expected=union_type),
+            )
+        )
+        then_union = then_holder["union"]
+        then_values = self.union_values(then_union)
+        lines.append(f"{indent}  scf.yield {', '.join(value.name for value in then_values)} : {self.type_list(result_types)}")
+        lines.append(f"{indent}}} else {{")
+        else_holder: dict[str, UnionStorage] = {}
+        self.emit_with_local_constants(
+            lambda: else_holder.setdefault(
+                "union",
+                self.emit_union_when_cases(cases[1:], otherwise, dict(env), lines, indent + "  ", union_type),
+            )
+        )
+        else_union = else_holder["union"]
+        else_values = self.union_values(else_union)
+        lines.append(f"{indent}  scf.yield {', '.join(value.name for value in else_values)} : {self.type_list(result_types)}")
+        lines.append(f"{indent}}}")
+        return UnionStorage(
+            union_type,
+            {
+                slot_name: Value(result_base if len(slot_types) == 1 else f"{result_base}#{index}", slot_type)
+                for index, (slot_name, slot_type) in enumerate(slot_types)
+            },
+        )
+
+    def emit_union_match_expr(
+        self,
+        expr: MatchExpr,
+        env: dict[str, EnvValue],
+        lines: list[str],
+        indent: str,
+        union_type: UnionType,
+    ) -> UnionStorage:
+        scrutinee, scrutinee_type = self.emit_match_scrutinee(expr.scrutinee, env, lines, indent)
+        return self.emit_union_match_arms(
+            list(expr.arms), expr.otherwise, scrutinee, scrutinee_type, env, lines, indent, union_type
+        )
+
+    def emit_union_match_arms(
+        self,
+        arms,
+        otherwise: Expr,
+        scrutinee: Value | UnionStorage,
+        scrutinee_type: ValueType,
+        env: dict[str, EnvValue],
+        lines: list[str],
+        indent: str,
+        union_type: UnionType,
+    ) -> UnionStorage:
+        if not arms:
+            return self.emit_union_expr(otherwise, env, lines, indent, expected=union_type)
+        arm = arms[0]
+        cond = self.emit_match_condition(scrutinee, scrutinee_type, arm.pattern, env, lines, indent)
+        slot_types = self.union_slot_types(union_type)
+        result_types = [slot_type for _slot_name, slot_type in slot_types]
+        result_base = self.fresh()
+        assignment = f"{result_base}:{len(slot_types)} = " if len(slot_types) > 1 else f"{result_base} = "
+        lines.append(f"{indent}{assignment}scf.if {cond.name} -> ({self.type_list(result_types)}) {{")
+        then_env = self.env_with_union_pattern_payload(arm.pattern, scrutinee_type, scrutinee, dict(env))
+        then_holder: dict[str, UnionStorage] = {}
+        self.emit_with_local_constants(
+            lambda: then_holder.setdefault(
+                "union",
+                self.emit_union_expr(arm.expr, then_env, lines, indent + "  ", expected=union_type),
+            )
+        )
+        then_union = then_holder["union"]
+        then_values = self.union_values(then_union)
+        lines.append(f"{indent}  scf.yield {', '.join(value.name for value in then_values)} : {self.type_list(result_types)}")
+        lines.append(f"{indent}}} else {{")
+        else_holder: dict[str, UnionStorage] = {}
+        self.emit_with_local_constants(
+            lambda: else_holder.setdefault(
+                "union",
+                self.emit_union_match_arms(
+                    arms[1:], otherwise, scrutinee, scrutinee_type, dict(env), lines, indent + "  ", union_type
+                ),
+            )
+        )
+        else_union = else_holder["union"]
+        else_values = self.union_values(else_union)
+        lines.append(f"{indent}  scf.yield {', '.join(value.name for value in else_values)} : {self.type_list(result_types)}")
+        lines.append(f"{indent}}}")
+        return UnionStorage(
+            union_type,
+            {
+                slot_name: Value(result_base if len(slot_types) == 1 else f"{result_base}#{index}", slot_type)
+                for index, (slot_name, slot_type) in enumerate(slot_types)
             },
         )
 
@@ -1139,6 +1416,10 @@ class MlirEmitter:
                 record = self.require_record(env[arg.name])
                 for field in self.record_fields(param.type_name):
                     value = record.fields[field.name]
+                    args.append(CallArg(value.name, mlir_type(value.type_name)))
+            elif isinstance(param.type_name, UnionType):
+                union = self.emit_union_expr(arg, env, lines, indent, expected=param.type_name)
+                for value in self.union_values(union):
                     args.append(CallArg(value.name, mlir_type(value.type_name)))
             else:
                 value = self.emit_expr(arg, env, lines, indent, expected=param.type_name)
@@ -1281,18 +1562,14 @@ class MlirEmitter:
         indent: str,
         type_name: ValueType,
     ) -> Value:
-        env_types = self.env_types(env)
-        scrutinee_type = infer_expr_type(
-            expr.scrutinee, env_types, self.functions, self.records, constants=self.top_constants
-        )
-        scrutinee = self.emit_expr(expr.scrutinee, env, lines, indent, expected=scrutinee_type)
+        scrutinee, scrutinee_type = self.emit_match_scrutinee(expr.scrutinee, env, lines, indent)
         return self.emit_match_expr_arms(list(expr.arms), expr.otherwise, scrutinee, scrutinee_type, env, lines, indent, type_name)
 
     def emit_match_expr_arms(
         self,
         arms,
         otherwise: Expr,
-        scrutinee: Value,
+        scrutinee: Value | UnionStorage,
         scrutinee_type: ValueType,
         env: dict[str, EnvValue],
         lines: list[str],
@@ -1310,7 +1587,13 @@ class MlirEmitter:
         self.emit_with_local_constants(
             lambda: then_holder.setdefault(
                 "value",
-                self.emit_expr(arm.expr, dict(env), lines, indent + "  ", expected=type_name),
+                self.emit_expr(
+                    arm.expr,
+                    self.env_with_union_pattern_payload(arm.pattern, scrutinee_type, scrutinee, dict(env)),
+                    lines,
+                    indent + "  ",
+                    expected=type_name,
+                ),
             )
         )
         lines.append(f"{indent}  scf.yield {then_holder['value'].name} : {mlir_result_type}")
@@ -1328,19 +1611,74 @@ class MlirEmitter:
 
     def emit_match_condition(
         self,
-        scrutinee: Value,
+        scrutinee: Value | UnionStorage,
         scrutinee_type: ValueType,
-        pattern: Expr,
+        pattern: Expr | UnionPattern,
         env: dict[str, EnvValue],
         lines: list[str],
         indent: str,
     ) -> Value:
+        if isinstance(scrutinee_type, UnionType):
+            assert isinstance(scrutinee, UnionStorage)
+            union = self.unions[scrutinee_type.name]
+            if isinstance(pattern, UnionPattern):
+                variant_name = pattern.variant_name
+            elif isinstance(pattern, EnumCase):
+                variant_name = pattern.case_name
+            else:  # pragma: no cover - semantic analysis rejects these patterns
+                raise AssertionError("invalid union match pattern")
+            variant = union.variants[variant_name]
+            pattern_value = self.emit_integer(variant.tag, union.tag_type, lines, indent)
+            out = Value(self.fresh(), "i1")
+            tag = scrutinee.slots["tag"]
+            lines.append(f"{indent}{out.name} = arith.cmpi eq, {tag.name}, {pattern_value.name} : {mlir_type(tag.type_name)}")
+            return out
+        assert isinstance(scrutinee, Value)
         pattern_value = self.emit_expr(pattern, env, lines, indent, expected=scrutinee_type)
         out = Value(self.fresh(), "i1")
         lines.append(
             f"{indent}{out.name} = arith.cmpi eq, {scrutinee.name}, {pattern_value.name} : {mlir_type(scrutinee_type)}"
         )
         return out
+
+    def emit_match_scrutinee(
+        self,
+        expr: Expr,
+        env: dict[str, EnvValue],
+        lines: list[str],
+        indent: str,
+    ) -> tuple[Value | UnionStorage, ValueType]:
+        env_types = self.env_types(env)
+        scrutinee_type = infer_expr_type(expr, env_types, self.functions, self.records, constants=self.top_constants)
+        if isinstance(scrutinee_type, UnionType):
+            return self.emit_union_expr(expr, env, lines, indent, expected=scrutinee_type), scrutinee_type
+        return self.emit_expr(expr, env, lines, indent, expected=scrutinee_type), scrutinee_type
+
+    def env_with_union_pattern_payload(
+        self,
+        pattern: Expr | UnionPattern,
+        scrutinee_type: ValueType,
+        scrutinee: Value | UnionStorage,
+        env: dict[str, EnvValue],
+    ) -> dict[str, EnvValue]:
+        if not isinstance(scrutinee_type, UnionType) or not isinstance(pattern, UnionPattern):
+            return env
+        assert isinstance(scrutinee, UnionStorage)
+        union = self.unions[scrutinee_type.name]
+        variant = union.variants[pattern.variant_name]
+        if variant.payload_type is None or pattern.payload_name is None:
+            return env
+        payload_type = variant.payload_type
+        label = f"{variant.name}_{variant.payload_name}"
+        if isinstance(payload_type, RecordType):
+            fields = {
+                field.name: scrutinee.slots[f"{label}_{field.name}"]
+                for field in self.record_fields(payload_type)
+            }
+            env[pattern.payload_name] = RecordStorage(payload_type, fields)
+        else:
+            env[pattern.payload_name] = scrutinee.slots[label]
+        return env
 
     def emit_comparison(self, condition: Comparison, env: dict[str, EnvValue], lines: list[str], indent: str) -> Value:
         env_types = self.env_types(env)
@@ -1366,7 +1704,8 @@ class MlirEmitter:
         arg_suffix = "" if self.while_depth == 0 else f"_loop{loop_id}"
         visible_binding_order = list(self.binding_order)
         visible_record_order = list(self.record_order)
-        carried_slots = self.assigned_binding_slots(stmt.body, visible_binding_order, visible_record_order, env)
+        visible_union_order = list(self.union_order)
+        carried_slots = self.assigned_binding_slots(stmt.body, visible_binding_order, visible_record_order, env, visible_union_order)
         carried_values = [self.slot_value(env, slot) for slot in carried_slots]
         carried_types = [value.type_name for value in carried_values]
         result_base = self.fresh() if carried_slots else None
@@ -1454,7 +1793,7 @@ class MlirEmitter:
         arg_suffix = "" if self.for_depth == 0 else f"_for{loop_id}"
         env_types = self.env_types(env)
         loop_type = infer_expr_type(stmt.start, env_types, self.functions, self.records, constants=self.top_constants)
-        assert not isinstance(loop_type, BufferType | ArrayType | RecordType)
+        assert not isinstance(loop_type, BufferType | ArrayType | RecordType | UnionType)
         start = self.emit_index(stmt.start, env, lines, indent)
         end = self.emit_index(stmt.end, env, lines, indent)
         step = self.emit_index_constant(stmt.step, lines, indent)
@@ -1462,7 +1801,8 @@ class MlirEmitter:
 
         visible_binding_order = list(self.binding_order)
         visible_record_order = list(self.record_order)
-        carried_slots = self.assigned_binding_slots(stmt.body, visible_binding_order, visible_record_order, env)
+        visible_union_order = list(self.union_order)
+        carried_slots = self.assigned_binding_slots(stmt.body, visible_binding_order, visible_record_order, env, visible_union_order)
         carried_values = [self.slot_value(env, slot) for slot in carried_slots]
         carried_types = [value.type_name for value in carried_values]
         result_base = self.fresh() if carried_slots else None
@@ -1519,7 +1859,8 @@ class MlirEmitter:
         arg_suffix = "" if self.for_depth == 0 else f"_for{loop_id}"
         visible_binding_order = list(self.binding_order)
         visible_record_order = list(self.record_order)
-        carried_slots = self.assigned_binding_slots(stmt.body, visible_binding_order, visible_record_order, env)
+        visible_union_order = list(self.union_order)
+        carried_slots = self.assigned_binding_slots(stmt.body, visible_binding_order, visible_record_order, env, visible_union_order)
         carried_values = [self.slot_value(env, slot) for slot in carried_slots]
         carried_types = [value.type_name for value in carried_values]
         result_base = self.fresh() if carried_slots else None
@@ -1583,7 +1924,8 @@ class MlirEmitter:
     def emit_if(self, stmt: IfStmt, env: dict[str, EnvValue], lines: list[str], indent: str) -> None:
         visible_binding_order = list(self.binding_order)
         visible_record_order = list(self.record_order)
-        result_slots = self.assigned_binding_slots((*stmt.then_body, *stmt.else_body), visible_binding_order, visible_record_order, env)
+        visible_union_order = list(self.union_order)
+        result_slots = self.assigned_binding_slots((*stmt.then_body, *stmt.else_body), visible_binding_order, visible_record_order, env, visible_union_order)
         result_values = [self.slot_value(env, slot) for slot in result_slots]
         result_types = [value.type_name for value in result_values]
 
@@ -1636,16 +1978,13 @@ class MlirEmitter:
     def emit_match_step(self, stmt: MatchStep, env: dict[str, EnvValue], lines: list[str], indent: str) -> None:
         visible_binding_order = list(self.binding_order)
         visible_record_order = list(self.record_order)
+        visible_union_order = list(self.union_order)
         all_bodies = tuple(body_stmt for arm in stmt.arms for body_stmt in arm.body) + tuple(stmt.otherwise_body)
-        result_slots = self.assigned_binding_slots(all_bodies, visible_binding_order, visible_record_order, env)
+        result_slots = self.assigned_binding_slots(all_bodies, visible_binding_order, visible_record_order, env, visible_union_order)
         result_values = [self.slot_value(env, slot) for slot in result_slots]
         result_types = [value.type_name for value in result_values]
 
-        env_types = self.env_types(env)
-        scrutinee_type = infer_expr_type(
-            stmt.scrutinee, env_types, self.functions, self.records, constants=self.top_constants
-        )
-        scrutinee = self.emit_expr(stmt.scrutinee, env, lines, indent, expected=scrutinee_type)
+        scrutinee, scrutinee_type = self.emit_match_scrutinee(stmt.scrutinee, env, lines, indent)
         result_base = self.fresh() if result_slots else None
         self.emit_match_step_arms(
             list(stmt.arms),
@@ -1664,7 +2003,7 @@ class MlirEmitter:
         self,
         arms,
         otherwise_body: tuple[BodyStmt, ...],
-        scrutinee: Value,
+        scrutinee: Value | UnionStorage,
         scrutinee_type: ValueType,
         env: dict[str, EnvValue],
         result_slots: list[CarrySlot],
@@ -1688,7 +2027,7 @@ class MlirEmitter:
         else:
             lines.append(f"{indent}scf.if {cond.name} {{")
 
-        then_env = dict(env)
+        then_env = self.env_with_union_pattern_payload(arm.pattern, scrutinee_type, scrutinee, dict(env))
         self.emit_with_local_constants(
             lambda: self.emit_with_binding_scope(
                 lambda: self.emit_if_branch(arm.body, then_env, result_slots, result_types, lines, indent)
@@ -1721,7 +2060,7 @@ class MlirEmitter:
         self,
         arms,
         otherwise_body: tuple[BodyStmt, ...],
-        scrutinee: Value,
+        scrutinee: Value | UnionStorage,
         scrutinee_type: ValueType,
         env: dict[str, EnvValue],
         result_slots: list[CarrySlot],
@@ -1762,11 +2101,13 @@ class MlirEmitter:
     def emit_with_binding_scope(self, emit: Callable[[], None]) -> None:
         saved_binding_order = list(self.binding_order)
         saved_record_order = list(self.record_order)
+        saved_union_order = list(self.union_order)
         try:
             emit()
         finally:
             self.binding_order = saved_binding_order
             self.record_order = saved_record_order
+            self.union_order = saved_union_order
 
     def assigned_binding_slots(
         self,
@@ -1774,11 +2115,14 @@ class MlirEmitter:
         visible_binding_order: list[str],
         visible_record_order: list[str],
         env: dict[str, EnvValue],
+        visible_union_order: list[str],
     ) -> list[CarrySlot]:
         visible_scalars = set(visible_binding_order)
         visible_records = set(visible_record_order)
+        visible_unions = set(visible_union_order)
         assigned_scalars: set[str] = set()
         assigned_record_fields: set[tuple[str, str]] = set()
+        assigned_unions: set[str] = set()
 
         def mark_record(name: str) -> None:
             if name not in visible_records:
@@ -1794,6 +2138,8 @@ class MlirEmitter:
                         assigned_scalars.add(statement.name)
                     elif statement.name in visible_records:
                         mark_record(statement.name)
+                    elif statement.name in visible_unions:
+                        assigned_unions.add(statement.name)
                 elif isinstance(statement, FieldAssignStmt):
                     if statement.name in visible_records:
                         assigned_record_fields.add((statement.name, statement.field))
@@ -1824,18 +2170,33 @@ class MlirEmitter:
                 if (name, field.name) in assigned_record_fields:
                     value = record.fields[field.name]
                     slots.append(CarrySlot(name, field.name, value.type_name))
+        for name in visible_union_order:
+            if name not in assigned_unions:
+                continue
+            union = self.require_union(env[name])
+            for slot_name, slot_type in self.union_slot_types(union.union_type):
+                slots.append(CarrySlot(name, slot_name, slot_type))
         return slots
 
     def slot_value(self, env: dict[str, EnvValue], slot: CarrySlot) -> Value:
         if slot.field is None:
             return self.require_scalar(env[slot.name])
-        return self.require_record(env[slot.name]).fields[slot.field]
+        value = env[slot.name]
+        if isinstance(value, UnionStorage):
+            return value.slots[slot.field]
+        return self.require_record(value).fields[slot.field]
 
     def set_slot_value(self, env: dict[str, EnvValue], slot: CarrySlot, value: Value) -> None:
         if slot.field is None:
             env[slot.name] = value
             return
-        record = self.require_record(env[slot.name])
+        current = env[slot.name]
+        if isinstance(current, UnionStorage):
+            slots = dict(current.slots)
+            slots[slot.field] = value
+            env[slot.name] = UnionStorage(current.union_type, slots)
+            return
+        record = self.require_record(current)
         fields = dict(record.fields)
         fields[slot.field] = value
         env[slot.name] = RecordStorage(record.record_type, fields)
@@ -1851,12 +2212,14 @@ class MlirEmitter:
                 result[name] = value.view_type
             elif isinstance(value, RecordStorage):
                 result[name] = value.record_type
+            elif isinstance(value, UnionStorage):
+                result[name] = value.union_type
             else:
                 result[name] = value.type_name
         return result
 
     def require_scalar(self, value: EnvValue) -> Value:
-        if isinstance(value, BufferStorage | ArrayStorage | ViewStorage | RecordStorage):
+        if isinstance(value, BufferStorage | ArrayStorage | ViewStorage | RecordStorage | UnionStorage):
             raise AssertionError("non-scalar used where scalar value was expected")  # pragma: no cover
         return value
 
@@ -1889,6 +2252,11 @@ class MlirEmitter:
             raise AssertionError("non-record used where record storage was expected")  # pragma: no cover
         return value
 
+    def require_union(self, value: EnvValue) -> UnionStorage:
+        if not isinstance(value, UnionStorage):
+            raise AssertionError("non-union used where union storage was expected")  # pragma: no cover
+        return value
+
     def record_fields(self, record_type: RecordType):
         return self.records[record_type.name].fields
 
@@ -1901,6 +2269,8 @@ class MlirEmitter:
             for field in self.record_fields(return_type):
                 result.append(field.type_name)
             return result
+        if isinstance(return_type, UnionType):
+            return [slot_type for _slot_name, slot_type in self.union_slot_types(return_type)]
         return [return_type]
 
     def return_type_list(self, return_type: ValueType | RecordType) -> str:

@@ -1,0 +1,15 @@
+union MaybeI32:
+  none
+  some value: i32
+
+choose maybe flag: i1 gives MaybeI32:
+  match flag:
+    true gives MaybeI32.some with value be 9
+    false gives MaybeI32.none
+    otherwise gives MaybeI32.none
+
+main gives i32:
+  let maybe be choose maybe true
+  match maybe:
+    MaybeI32.some with value gives value
+    otherwise gives 0

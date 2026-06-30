@@ -21,6 +21,9 @@ from .semantic import (
     EnumInfo,
     record_table,
     resolve_function_table,
+    UnionInfo,
+    union_table,
+    validate_union_payloads,
 )
 
 INTERFACE_JSON_FORMAT = "inscription-interface-v1"
@@ -41,6 +44,7 @@ C_IDENTIFIER_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 class InterfaceContext:
     compilation: LoadedCompilation
     enums: dict[str, EnumInfo]
+    unions: dict[str, UnionInfo]
     records: dict[str, RecordDecl]
     constants: dict[str, ConstValue]
     functions: dict[str, Function]
@@ -53,10 +57,12 @@ def load_interface_context(source_path: Path, *, module_root: Path | None = None
     analyze(compilation.program)
     raw_functions = function_table(compilation.program)
     enums = enum_table(compilation.program)
+    unions = union_table(compilation.program)
     records = record_table(compilation.program)
+    validate_union_payloads(unions, records)
     constants = constant_table(compilation.program, records, raw_functions)
     functions = resolve_function_table(raw_functions, records, constants)
-    return InterfaceContext(compilation, enums, records, constants, functions, compilation.module_root)
+    return InterfaceContext(compilation, enums, unions, records, constants, functions, compilation.module_root)
 
 
 def emit_interface_json(context: InterfaceContext) -> str:
@@ -133,6 +139,7 @@ def _module_json(
         "imports": [_import_json(import_decl.module, _root_dir(context)) for import_decl in program.imports],
         "constants": [_constant_json(const.name, name, context.constants[const.name], context) for const in program.constants],
         "enums": [_enum_json(context.enums[enum.name], name) for enum in program.enums],
+        "unions": [_union_json(context.unions[union.name], name) for union in program.unions],
         "records": [
             _record_json(context.records[record.name], name)
             for record in program.records
@@ -182,6 +189,25 @@ def _enum_json(enum: EnumInfo, module_name: str | None) -> dict[str, Any]:
         "kind": "enum",
         "underlying_type": enum.underlying_type,
         "cases": [{"name": case_name, "value": enum.cases[case_name]} for case_name in enum.case_order],
+    }
+
+
+def _union_json(union: UnionInfo, module_name: str | None) -> dict[str, Any]:
+    variants = []
+    for variant_name in union.variant_order:
+        variant = union.variants[variant_name]
+        payload = None
+        if variant.payload_name is not None and variant.payload_type is not None:
+            payload = {
+                "name": variant.payload_name,
+                "type": _format_interface_type(variant.payload_type, module_name),
+            }
+        variants.append({"name": variant.name, "tag": variant.tag, "payload": payload})
+    return {
+        "name": _display_name(union.name, module_name),
+        "kind": "union",
+        "tag_type": union.tag_type,
+        "variants": variants,
     }
 
 

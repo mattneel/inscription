@@ -54,6 +54,10 @@ from .ast import (
     SizeOfType,
     Stmt,
     Unary,
+    UnionConstructor,
+    UnionDecl,
+    UnionPattern,
+    UnionVariantDecl,
     ValueType,
     Variable,
     ViewBinding,
@@ -242,34 +246,39 @@ def prefix_template_for_import(template: PhraseTemplate, module_name: str) -> Ph
 def combine_programs(modules: list[LoadedModule], entry: Program) -> Program:
     records: list[RecordDecl] = []
     enums: list[EnumDecl] = []
+    unions: list[UnionDecl] = []
     constants: list[ConstantDecl] = []
     checks: list[CheckStmt] = []
     functions: list[Function] = []
     for module in modules:
         records.extend(module.program.records)
         enums.extend(module.program.enums)
+        unions.extend(module.program.unions)
         constants.extend(module.program.constants)
         checks.extend(module.program.checks)
         functions.extend(module.program.functions)
     records.extend(entry.records)
     enums.extend(entry.enums)
+    unions.extend(entry.unions)
     constants.extend(entry.constants)
     checks.extend(entry.checks)
     functions.extend(entry.functions)
-    return Program(tuple(records), tuple(enums), tuple(constants), tuple(checks), tuple(functions), entry.module_name, entry.imports)
+    return Program(tuple(records), tuple(enums), tuple(unions), tuple(constants), tuple(checks), tuple(functions), entry.module_name, entry.imports)
 
 
 def qualify_imported_program(program: Program, module_name: str) -> Program:
     record_names = {record.name for record in program.records}
     enum_names = {enum.name for enum in program.enums}
-    type_names = record_names | enum_names
+    union_names = {union.name for union in program.unions}
+    type_names = record_names | enum_names | union_names
     constant_names = {constant.name for constant in program.constants}
     records = tuple(qualify_record_decl(record, module_name, type_names) for record in program.records)
     enums = tuple(qualify_enum_decl(enum, module_name, type_names, constant_names) for enum in program.enums)
+    unions = tuple(qualify_union_decl(union, module_name, type_names, constant_names) for union in program.unions)
     constants = tuple(qualify_constant(constant, module_name, type_names, constant_names) for constant in program.constants)
     checks = tuple(qualify_stmt(check, module_name, type_names, constant_names) for check in program.checks)
     functions = tuple(qualify_function(function, module_name, type_names, constant_names) for function in program.functions)
-    return Program(records, enums, constants, checks, functions, program.module_name, program.imports)
+    return Program(records, enums, unions, constants, checks, functions, program.module_name, program.imports)
 
 
 def qname(module_name: str, name: str) -> str:
@@ -295,6 +304,22 @@ def qualify_enum_decl(enum: EnumDecl, module_name: str, type_names: set[str], co
         enum.underlying_type,
         tuple(type(case)(case.name, qualify_expr(case.value, module_name, type_names, constant_names), case.line) for case in enum.cases),
         enum.line,
+    )
+
+
+def qualify_union_decl(union: UnionDecl, module_name: str, type_names: set[str], constant_names: set[str]) -> UnionDecl:
+    return UnionDecl(
+        qname(module_name, union.name),
+        tuple(
+            UnionVariantDecl(
+                variant.name,
+                variant.payload_name,
+                None if variant.payload_type is None else qualify_type(variant.payload_type, module_name, type_names, constant_names),
+                variant.line,
+            )
+            for variant in union.variants
+        ),
+        union.line,
     )
 
 
@@ -419,7 +444,7 @@ def qualify_stmt(stmt: Stmt, module_name: str, record_names: set[str], constant_
             qualify_expr(stmt.scrutinee, module_name, record_names, constant_names),
             tuple(
                 MatchStepArm(
-                    qualify_expr(arm.pattern, module_name, record_names, constant_names),
+                    qualify_pattern(arm.pattern, module_name, record_names, constant_names),
                     tuple(qualify_stmt(s, module_name, record_names, constant_names) for s in arm.body),
                     arm.line,
                 )
@@ -431,6 +456,17 @@ def qualify_stmt(stmt: Stmt, module_name: str, record_names: set[str], constant_
     if isinstance(stmt, ReturnStmt):
         return ReturnStmt(qualify_expr(stmt.expr, module_name, record_names, constant_names), stmt.line)
     raise AssertionError(stmt)  # pragma: no cover
+
+
+def qualify_pattern(pattern, module_name: str, record_names: set[str], constant_names: set[str]):
+    if isinstance(pattern, UnionPattern):
+        return UnionPattern(
+            qname(module_name, pattern.type_name) if pattern.type_name in record_names else pattern.type_name,
+            pattern.variant_name,
+            pattern.payload_name,
+            pattern.line,
+        )
+    return qualify_expr(pattern, module_name, record_names, constant_names)
 
 
 def qualify_expr(expr: Expr, module_name: str, record_names: set[str], constant_names: set[str]) -> Expr:
@@ -457,6 +493,16 @@ def qualify_expr(expr: Expr, module_name: str, record_names: set[str], constant_
         if len(parts) == 1 and expr.type_name in record_names:
             return EnumCase(qname(module_name, expr.type_name), expr.case_name, expr.line)
         return expr
+    if isinstance(expr, UnionConstructor):
+        parts = expr.type_name.split(".")
+        type_name = qname(module_name, expr.type_name) if len(parts) == 1 and expr.type_name in record_names else expr.type_name
+        return UnionConstructor(
+            type_name,
+            expr.variant_name,
+            expr.payload_name,
+            None if expr.payload_expr is None else qualify_expr(expr.payload_expr, module_name, record_names, constant_names),
+            expr.line,
+        )
     if isinstance(expr, RecordConstructor):
         return RecordConstructor(
             qname(module_name, expr.type_name) if expr.type_name in record_names else expr.type_name,
@@ -486,7 +532,7 @@ def qualify_expr(expr: Expr, module_name: str, record_names: set[str], constant_
             qualify_expr(expr.scrutinee, module_name, record_names, constant_names),
             tuple(
                 MatchExprArm(
-                    qualify_expr(arm.pattern, module_name, record_names, constant_names),
+                    qualify_pattern(arm.pattern, module_name, record_names, constant_names),
                     qualify_expr(arm.expr, module_name, record_names, constant_names),
                     arm.line,
                 )

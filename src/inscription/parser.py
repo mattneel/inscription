@@ -56,6 +56,10 @@ from .ast import (
     SizeOfType,
     TypeName,
     Unary,
+    UnionConstructor,
+    UnionDecl,
+    UnionPattern,
+    UnionVariantDecl,
     ValueType,
     Variable,
     ViewBinding,
@@ -77,7 +81,7 @@ RESERVED = {
     "enum", "function", "gives", "greater", "f32", "f64", "i1", "i32", "i64", "if", "in", "index", "input", "into", "import",
     "i8", "i16", "is", "layout", "length", "less", "let", "match", "memref", "minus", "module", "no", "not", "or", "otherwise", "output", "packed", "parameters",
     "pointer", "plus", "print", "read", "remainder", "require", "return", "set", "shifted", "size", "takes", "than", "then", "times", "to",
-    "track", "true", "u8", "u16", "u32", "u64", "up", "record", "view", "when", "while", "with", "write", "xor", "zero",
+    "track", "true", "u8", "u16", "u32", "u64", "union", "up", "record", "view", "when", "while", "with", "write", "xor", "zero",
 }
 TYPE_NAMES: set[str] = {"i1", "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "f32", "f64"}
 COMPARATORS: tuple[tuple[tuple[str, ...], str], ...] = (
@@ -132,7 +136,7 @@ class PhraseTemplate:
     display_name: str
 
 
-ParsedTopLevel = RecordDecl | EnumDecl | ConstantDecl | CheckStmt | Function
+ParsedTopLevel = RecordDecl | EnumDecl | UnionDecl | ConstantDecl | CheckStmt | Function
 
 
 class Parser:
@@ -191,6 +195,7 @@ class Parser:
     def parse_program(self) -> Program:
         records: list[RecordDecl] = []
         enums: list[EnumDecl] = []
+        unions: list[UnionDecl] = []
         constants: list[ConstantDecl] = []
         checks: list[CheckStmt] = []
         functions: list[Function] = []
@@ -220,6 +225,10 @@ class Parser:
             if self._looks_like_enum_header(line):
                 enum, index = self._parse_enum_decl(index)
                 enums.append(enum)
+                continue
+            if self._looks_like_union_header(line):
+                union, index = self._parse_union_decl(index)
+                unions.append(union)
                 continue
             if line.text.startswith("constant "):
                 if line.is_header and re.fullmatch(rf"constant [a-z][a-z0-9_]*:\s*{TYPE_REF_PATTERN} be match .+", line.text):
@@ -272,7 +281,7 @@ class Parser:
             if line.text.startswith("require "):
                 raise InscriptionError("require may only appear inside phrase bodies", line.number)
             if not self._looks_like_phrase_header(line):
-                raise InscriptionError("expected phrase definition, record declaration, enum declaration, constant declaration, check, extern, export, module, or import", line.number)
+                raise InscriptionError("expected phrase definition, record declaration, enum declaration, union declaration, constant declaration, check, extern, export, module, or import", line.number)
             template, return_type = self._parse_phrase_header(line)
             body, index = self._parse_phrase_body(index + 1, template, line.number)
             functions.append(
@@ -290,7 +299,7 @@ class Parser:
             if imported.module in seen_imports:
                 raise InscriptionError(f"module {imported.module} is already imported", imported.line)
             seen_imports.add(imported.module)
-        return Program(tuple(records), tuple(enums), tuple(constants), tuple(checks), tuple(functions), module_name, tuple(imports))
+        return Program(tuple(records), tuple(enums), tuple(unions), tuple(constants), tuple(checks), tuple(functions), module_name, tuple(imports))
 
     def _looks_like_record_header(self, line: Line) -> bool:
         return (
@@ -302,12 +311,16 @@ class Parser:
     def _looks_like_enum_header(self, line: Line) -> bool:
         return line.is_header and re.fullmatch(r"enum [A-Za-z][A-Za-z0-9_]*:\s*[a-z][a-z0-9_]*", line.text) is not None
 
+    def _looks_like_union_header(self, line: Line) -> bool:
+        return line.is_header and re.fullmatch(r"union [A-Za-z][A-Za-z0-9_]*", line.text) is not None
+
     def _looks_like_top_level_item(self, line: Line) -> bool:
         return (
             self._looks_like_phrase_header(line)
             or self._looks_like_record_header(line)
             or self._looks_like_enum_header(line)
-            or (line.indent == 0 and (line.text.startswith("constant ") or line.text.startswith("check ") or line.text.startswith("extern ") or line.text.startswith("export ") or line.text.startswith("module ") or line.text.startswith("import ") or line.text.startswith("require ") or line.text.startswith("enum ")))
+            or self._looks_like_union_header(line)
+            or (line.indent == 0 and (line.text.startswith("constant ") or line.text.startswith("check ") or line.text.startswith("extern ") or line.text.startswith("export ") or line.text.startswith("module ") or line.text.startswith("import ") or line.text.startswith("require ") or line.text.startswith("enum ") or line.text.startswith("union ")))
         )
 
     def _parse_record_decl(self, index: int) -> tuple[RecordDecl, int]:
@@ -366,6 +379,51 @@ class Parser:
         if not cases:
             raise InscriptionError(f"enum {name} must declare at least one case", line.number)
         return EnumDecl(name, underlying_type, tuple(cases), line.number), case_index
+
+    def _parse_union_decl(self, index: int) -> tuple[UnionDecl, int]:
+        line = self.lines[index]
+        match = re.fullmatch(r"union ([A-Za-z][A-Za-z0-9_]*)", line.text)
+        if not line.is_header or match is None:
+            raise InscriptionError("malformed union declaration", line.number)
+        name = self._record_name(match.group(1), line.number)
+        variants: list[UnionVariantDecl] = []
+        variant_index = index + 1
+        while variant_index < len(self.lines):
+            current = self.lines[variant_index]
+            if current.indent <= line.indent:
+                break
+            if current.is_header:
+                raise InscriptionError("malformed union variant declaration", current.number)
+            if " and " in current.text and re.match(r"[a-z][a-z0-9_]* [a-z][a-z0-9_]*:", current.text):
+                raise InscriptionError("union variants support at most one payload in v0.25", current.number)
+            payload_match = re.fullmatch(rf"([a-z][a-z0-9_]*) ([a-z][a-z0-9_]*):\s*({TYPE_PATTERN})", current.text)
+            if payload_match is not None:
+                variants.append(
+                    UnionVariantDecl(
+                        self._field_name(payload_match.group(1), current.number),
+                        self._field_name(payload_match.group(2), current.number),
+                        self._value_type(payload_match.group(3), current.number),
+                        current.number,
+                    )
+                )
+                variant_index += 1
+                continue
+            no_payload_match = re.fullmatch(r"([a-z][a-z0-9_]*)", current.text)
+            if no_payload_match is not None:
+                variants.append(
+                    UnionVariantDecl(
+                        self._field_name(no_payload_match.group(1), current.number),
+                        None,
+                        None,
+                        current.number,
+                    )
+                )
+                variant_index += 1
+                continue
+            raise InscriptionError("malformed union variant declaration", current.number)
+        if not variants:
+            raise InscriptionError(f"union {name} must declare at least one variant", line.number)
+        return UnionDecl(name, tuple(variants), line.number), variant_index
 
     def _parse_constant_decl(self, line: Line) -> ConstantDecl:
         match = re.fullmatch(rf"constant ([A-Za-z][A-Za-z0-9_]*):\s*({TYPE_PATTERN}) be (.+)", line.text)
@@ -818,7 +876,7 @@ class Parser:
             pattern_text, expr_text = current.text.split(" gives ", 1)
             arms.append(
                 MatchExprArm(
-                    self._parse_expression(pattern_text.strip(), current.number),
+                    self._parse_pattern(pattern_text.strip(), current.number),
                     self._parse_expression(expr_text.strip(), current.number),
                     current.number,
                 )
@@ -859,7 +917,7 @@ class Parser:
             body, next_index = self._parse_step_block(current_index + 1, current.indent, "match arm")
             if not body:
                 raise InscriptionError("match arm must contain at least one step", current.number)
-            arms.append(MatchStepArm(self._parse_expression(current.text, current.number), tuple(body), current.number))
+            arms.append(MatchStepArm(self._parse_pattern(current.text, current.number), tuple(body), current.number))
             current_index = next_index
         if otherwise_body is None:
             raise InscriptionError("match block requires otherwise", header.number)
@@ -1127,6 +1185,12 @@ class Parser:
             self._parse_expression(match.group(3), line.number),
             line.number,
         )
+
+    def _parse_pattern(self, text: str, line: int):
+        match = re.fullmatch(r"((?:[A-Za-z][A-Za-z0-9_]*\.)*[A-Z][A-Za-z0-9_]*)\.([a-z][a-z0-9_]*)(?: with ([a-z][a-z0-9_]*))?", text.strip())
+        if match is not None and match.group(3) is not None:
+            return UnionPattern(match.group(1), self._field_name(match.group(2), line), self._field_name(match.group(3), line), line)
+        return self._parse_expression(text, line)
 
     def _parse_expression(self, text: str, line: int) -> Expr:
         return parse_expression(text, line, self.phrases)
@@ -1495,6 +1559,9 @@ class ExpressionParser:
         phrase_call = self.try_parse_phrase_call(stop)
         if phrase_call is not None:
             return phrase_call
+        union_constructor = self.try_parse_union_constructor(stop)
+        if union_constructor is not None:
+            return union_constructor
         enum_case = self.try_parse_enum_case()
         if enum_case is not None:
             return enum_case
@@ -1532,20 +1599,76 @@ class ExpressionParser:
         raise InscriptionError(f"unexpected token '{token}' in expression", self.line)
 
 
-    def try_parse_enum_case(self) -> EnumCase | None:
-        if self.at_end() or not RECORD_NAME_RE.fullmatch(self.tokens[self.pos]):
-            return None
+    def try_parse_union_constructor(self, stop: set[str]) -> UnionConstructor | None:
         saved = self.pos
-        parts = [self.pop()]
-        while self.pos + 1 < len(self.tokens) and self.tokens[self.pos] == "." and RECORD_NAME_RE.fullmatch(self.tokens[self.pos + 1]):
-            self.pop()
-            parts.append(self.pop())
-        if self.pos + 1 < len(self.tokens) and self.tokens[self.pos] == "." and NAME_RE.fullmatch(self.tokens[self.pos + 1]):
-            self.pop()
-            case_name = self.pop()
-            return EnumCase(".".join(parts), case_name, self.line)
-        self.pos = saved
-        return None
+        member = self.try_parse_qualified_type_member()
+        if member is None:
+            return None
+        type_name, variant_name = member
+        if self.peek() != "with":
+            self.pos = saved
+            return None
+        self.pop()
+        if self.at_end():
+            raise InscriptionError("union constructor payload is missing", self.line)
+        payload_name = self.pop()
+        if not NAME_RE.fullmatch(payload_name):
+            raise InscriptionError(f"invalid payload name '{payload_name}'", self.line)
+        if self.at_end() or self.pop() != "be":
+            raise InscriptionError("union constructor payload must use 'be'", self.line)
+        payload_tokens = self.consume_union_payload_tokens(stop)
+        if not payload_tokens:
+            raise InscriptionError("union constructor payload requires an expression", self.line)
+        return UnionConstructor(type_name, variant_name, payload_name, parse_expression_tokens(payload_tokens, self.line, self.phrases), self.line)
+
+    def try_parse_qualified_type_member(self) -> tuple[str, str] | None:
+        if self.at_end():
+            return None
+        component_re = re.compile(r"[A-Za-z][A-Za-z0-9_]*")
+        pos = self.pos
+        parts: list[str] = []
+        if not component_re.fullmatch(self.tokens[pos]):
+            return None
+        parts.append(self.tokens[pos])
+        pos += 1
+        while pos + 1 < len(self.tokens) and self.tokens[pos] == "." and component_re.fullmatch(self.tokens[pos + 1]):
+            pos += 1
+            parts.append(self.tokens[pos])
+            pos += 1
+        if len(parts) < 2:
+            return None
+        type_name = ".".join(parts[:-1])
+        member = parts[-1]
+        if not QUALIFIED_RECORD_NAME_RE.fullmatch(type_name) or not NAME_RE.fullmatch(member):
+            return None
+        self.pos = pos
+        return type_name, member
+
+    def consume_union_payload_tokens(self, stop: set[str]) -> list[str]:
+        start = self.pos
+        end = self.pos
+        depth = 0
+        while end < len(self.tokens):
+            token = self.tokens[end]
+            if token == "(":
+                depth += 1
+            elif token == ")":
+                if depth == 0:
+                    break
+                depth -= 1
+            elif depth == 0 and token in stop | {",", ")"}:
+                break
+            end += 1
+        self.pos = end
+        return self.tokens[start:end]
+
+
+    def try_parse_enum_case(self) -> EnumCase | None:
+        member = self.try_parse_qualified_type_member()
+        if member is None:
+            return None
+        type_name, case_name = member
+        return EnumCase(type_name, case_name, self.line)
 
     def parse_record_constructor(self, stop: set[str]) -> RecordConstructor:
         type_name = self.pop()
