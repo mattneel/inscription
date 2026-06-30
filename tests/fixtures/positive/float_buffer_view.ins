@@ -1,0 +1,9 @@
+sum float view cells: view of f32 gives f32:
+  let total: f32 be 0.0
+  for each index i of cells:
+    total becomes total plus cells at i
+  total
+
+main gives i32:
+  let cells be buffer of 4 f32 filled with 1.5
+  sum float view cells as i32

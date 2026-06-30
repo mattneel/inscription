@@ -20,6 +20,7 @@ from .ast import (
     Expr,
     FieldAccess,
     FieldAssignStmt,
+    Float,
     ForEachStmt,
     ForStmt,
     Function,
@@ -58,6 +59,8 @@ from .semantic import (
     function_table,
     infer_comparison_operand_type,
     infer_expr_type,
+    is_float_type,
+    is_integer_type,
     is_signed_type,
     layout_info,
     memref_type,
@@ -125,7 +128,7 @@ class CallArg:
 
 
 EnvValue = Value | BufferStorage | ViewStorage | RecordStorage
-ConstantKey = tuple[str, int | bool, TypeName]
+ConstantKey = tuple[str, int | bool | float, TypeName]
 
 
 def mlir_value_type(type_name: ValueType) -> str:
@@ -401,7 +404,11 @@ class MlirEmitter:
         if isinstance(type_name, RecordType):
             raise AssertionError("record expression used where scalar value was expected")  # pragma: no cover
         if isinstance(expr, Integer):
+            if is_float_type(type_name) and expr.is_word_zero:
+                return self.emit_float(0.0, type_name, lines, indent)
             return self.emit_integer(expr.value, type_name, lines, indent)
+        if isinstance(expr, Float):
+            return self.emit_float(float(expr.text), type_name, lines, indent)
         if isinstance(expr, Boolean):
             return self.emit_boolean(expr.value, lines, indent)
         if isinstance(expr, Variable):
@@ -480,12 +487,14 @@ class MlirEmitter:
 
     def binary_mlir_op(self, op: str, type_name: TypeName) -> str:
         if op == "plus":
-            return "addi"
+            return "addf" if is_float_type(type_name) else "addi"
         if op == "minus":
-            return "subi"
+            return "subf" if is_float_type(type_name) else "subi"
         if op == "times":
-            return "muli"
+            return "mulf" if is_float_type(type_name) else "muli"
         if op == "divided by":
+            if is_float_type(type_name):
+                return "divf"
             return "divsi" if is_signed_type(type_name) else "divui"
         if op == "remainder":
             return "remsi" if is_signed_type(type_name) else "remui"
@@ -504,6 +513,22 @@ class MlirEmitter:
     def emit_cast(self, expr: Cast, env: dict[str, EnvValue], lines: list[str], indent: str, target_type: TypeName) -> Value:
         source = self.emit_expr(expr.expr, env, lines, indent)
         source_type = source.type_name
+        if source_type == target_type:
+            return Value(source.name, target_type)
+        if is_float_type(source_type) or is_float_type(target_type):
+            out = Value(self.fresh(), target_type)
+            if is_integer_type(source_type) and is_float_type(target_type):
+                op = "sitofp" if is_signed_type(source_type) else "uitofp"
+            elif is_float_type(source_type) and is_integer_type(target_type):
+                op = "fptosi" if is_signed_type(target_type) else "fptoui"
+            elif source_type == "f32" and target_type == "f64":
+                op = "extf"
+            elif source_type == "f64" and target_type == "f32":
+                op = "truncf"
+            else:  # pragma: no cover - semantic analysis rejects these casts
+                raise AssertionError(f"unsupported cast {source_type} to {target_type}")
+            lines.append(f"{indent}{out.name} = arith.{op} {source.name} : {mlir_type(source_type)} to {mlir_type(target_type)}")
+            return out
         if type_width(source_type) == type_width(target_type):
             return Value(source.name, target_type)
         out = Value(self.fresh(), target_type)
@@ -526,6 +551,24 @@ class MlirEmitter:
         lines.append(f"{indent}{out.name} = arith.constant {value} : {mlir_type(type_name)}")
         return out
 
+    def emit_float(self, value: float, type_name: TypeName, lines: list[str], indent: str) -> Value:
+        key: ConstantKey = ("float", value, type_name)
+        cached = self.constants.get(key)
+        if cached is not None:
+            return cached
+        out = Value(self.fresh(), type_name)
+        self.constants[key] = out
+        lines.append(f"{indent}{out.name} = arith.constant {self.float_literal(value, type_name)} : {mlir_type(type_name)}")
+        return out
+
+    def float_literal(self, value: float, type_name: TypeName) -> str:
+        if value == 0.0:
+            return "0.0"
+        text = format(value, ".9g") if type_name == "f32" else repr(value)
+        if "e" not in text and "E" not in text and "." not in text:
+            text += ".0"
+        return text
+
     def emit_index_constant(self, value: int, lines: list[str], indent: str) -> str:
         out = self.fresh()
         lines.append(f"{indent}{out} = arith.constant {value} : index")
@@ -545,6 +588,8 @@ class MlirEmitter:
     def emit_const_value(self, value, lines: list[str], indent: str) -> Value:
         if value.type_name == "i1":
             return self.emit_boolean(bool(value.value), lines, indent)
+        if is_float_type(value.type_name):
+            return self.emit_float(float(value.value), value.type_name, lines, indent)
         return self.emit_integer(int(value.value), value.type_name, lines, indent)
 
     def emit_require(self, stmt: RequireStmt, env: dict[str, EnvValue], lines: list[str], indent: str) -> None:
@@ -1074,10 +1119,13 @@ class MlirEmitter:
         right = self.emit_expr(condition.right, env, lines, indent, expected=type_name)
         out = Value(self.fresh(), "i1")
         pred = self.comparison_predicate(condition.pred, type_name)
-        lines.append(f"{indent}{out.name} = arith.cmpi {pred}, {left.name}, {right.name} : {mlir_type(type_name)}")
+        op = "cmpf" if is_float_type(type_name) else "cmpi"
+        lines.append(f"{indent}{out.name} = arith.{op} {pred}, {left.name}, {right.name} : {mlir_type(type_name)}")
         return out
 
     def comparison_predicate(self, pred: str, type_name: TypeName) -> str:
+        if is_float_type(type_name):
+            return {"eq": "oeq", "ne": "one", "slt": "olt", "sle": "ole", "sgt": "ogt", "sge": "oge"}[pred]
         if pred in {"eq", "ne"} or is_signed_type(type_name):
             return pred
         return {"slt": "ult", "sle": "ule", "sgt": "ugt", "sge": "uge"}[pred]

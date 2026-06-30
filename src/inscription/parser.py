@@ -21,6 +21,7 @@ from .ast import (
     Expr,
     FieldAccess,
     FieldAssignStmt,
+    Float,
     ForEachStmt,
     ForStmt,
     Function,
@@ -59,16 +60,17 @@ from .diagnostics import InscriptionError
 NAME_RE = re.compile(r"[a-z][a-z0-9_]*")
 RECORD_NAME_RE = re.compile(r"[A-Z][A-Za-z0-9_]*")
 QUALIFIED_RECORD_NAME_RE = re.compile(r"(?:[A-Za-z][A-Za-z0-9_]*\.)*[A-Z][A-Za-z0-9_]*")
-TOKEN_RE = re.compile(r"\s*(-?\d+|[A-Z][A-Za-z0-9_]*|[a-z][a-z0-9_]*|[().,])")
+FLOAT_LITERAL_RE = r"(?:\d+\.\d+(?:[eE][+-]?\d+)?|\d+[eE][+-]?\d+)"
+TOKEN_RE = re.compile(rf"\s*({FLOAT_LITERAL_RE}|-?\d+|[A-Z][A-Za-z0-9_]*|[a-z][a-z0-9_]*|[().,])")
 RESERVED = {
     "address", "alignment", "and", "arguments", "array", "as", "at", "be", "becomes", "bitwise", "buffer", "by", "call",
     "check", "constant", "divided", "do", "does", "each", "else", "equal", "export", "extern", "false", "filled", "float", "for", "from",
-    "function", "gives", "greater", "i1", "i32", "i64", "if", "in", "index", "input", "into", "import",
+    "function", "gives", "greater", "f32", "f64", "i1", "i32", "i64", "if", "in", "index", "input", "into", "import",
     "i8", "i16", "is", "layout", "length", "less", "let", "memref", "minus", "module", "no", "not", "or", "otherwise", "output", "packed", "parameters",
     "pointer", "plus", "print", "read", "remainder", "require", "return", "set", "shifted", "size", "takes", "than", "then", "times", "to",
     "track", "true", "u8", "u16", "u32", "u64", "up", "record", "view", "when", "while", "with", "write", "xor", "zero",
 }
-TYPE_NAMES: set[str] = {"i1", "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64"}
+TYPE_NAMES: set[str] = {"i1", "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "f32", "f64"}
 COMPARATORS: tuple[tuple[tuple[str, ...], str], ...] = (
     (("equal", "to"), "eq"),
     (("not", "equal", "to"), "ne"),
@@ -853,16 +855,16 @@ class Parser:
     def _type_name(self, value: str, line: int) -> TypeName:
         if value in TYPE_NAMES:
             return value  # type: ignore[return-value]
-        raise InscriptionError("supported scalar types are i1, i8, i16, i32, i64, u8, u16, u32, and u64", line)
+        raise InscriptionError("supported scalar types are i1, i8, i16, i32, i64, u8, u16, u32, u64, f32, and f64", line)
 
 
 def tokenize(text: str, line: int) -> list[str]:
     tokens: list[str] = []
     pos = 0
     while pos < len(text):
-        float_match = re.match(r"-?\d+\.\d+", text[pos:])
-        if float_match is not None:
-            raise InscriptionError(f"invalid token near '{float_match.group(0)}'", line)
+        negative_float_match = re.match(rf"-(?:{FLOAT_LITERAL_RE})", text[pos:])
+        if negative_float_match is not None:
+            raise InscriptionError(f"invalid token near '{negative_float_match.group(0)}'", line)
         match = TOKEN_RE.match(text, pos)
         if not match:
             if text[pos:].strip() == "":
@@ -1134,13 +1136,15 @@ class ExpressionParser:
             return inner
         if token == ")":
             raise InscriptionError("unexpected token ')' in expression", self.line)
+        if re.fullmatch(FLOAT_LITERAL_RE, token):
+            return Float(token, self.line)
         if re.fullmatch(r"-?\d+", token):
             value = int(token)
             if not -(2**63) <= value <= 2**64 - 1:
                 raise InscriptionError("integer literal is outside supported 64-bit range", self.line)
             return Integer(value, self.line)
         if token == "zero":
-            return Integer(0, self.line)
+            return Integer(0, self.line, is_word_zero=True)
         if token == "true":
             return Boolean(True, self.line)
         if token == "false":

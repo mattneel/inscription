@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import math
+import struct
 from dataclasses import dataclass
 from typing import Literal
 
@@ -21,6 +23,7 @@ from .ast import (
     Expr,
     FieldAccess,
     FieldAssignStmt,
+    Float,
     ForEachStmt,
     ForStmt,
     Function,
@@ -56,7 +59,9 @@ BOOLEAN_TYPE: TypeName = "i1"
 SIGNED_INTEGER_TYPES: set[TypeName] = {"i8", "i16", "i32", "i64"}
 UNSIGNED_INTEGER_TYPES: set[TypeName] = {"u8", "u16", "u32", "u64"}
 INTEGER_TYPES: set[TypeName] = SIGNED_INTEGER_TYPES | UNSIGNED_INTEGER_TYPES
-SCALAR_TYPES: set[TypeName] = {BOOLEAN_TYPE} | INTEGER_TYPES
+FLOAT_TYPES: set[TypeName] = {"f32", "f64"}
+NUMERIC_TYPES: set[TypeName] = INTEGER_TYPES | FLOAT_TYPES
+SCALAR_TYPES: set[TypeName] = {BOOLEAN_TYPE} | NUMERIC_TYPES
 TYPE_WIDTHS: dict[TypeName, int] = {
     "i1": 1,
     "i8": 8,
@@ -67,6 +72,8 @@ TYPE_WIDTHS: dict[TypeName, int] = {
     "u16": 16,
     "u32": 32,
     "u64": 64,
+    "f32": 32,
+    "f64": 64,
 }
 INTEGER_RANGES: dict[TypeName, tuple[int, int]] = {
     "i8": (-(2**7), 2**7 - 1),
@@ -93,7 +100,7 @@ class Binding:
 @dataclass(frozen=True)
 class ConstValue:
     type_name: TypeName
-    value: int | bool
+    value: int | bool | float
 
 
 class CompileTimeEvaluationError(Exception):
@@ -291,6 +298,14 @@ def is_integer_type(type_name: ValueType | None) -> bool:
     return type_name in INTEGER_TYPES
 
 
+def is_float_type(type_name: ValueType | None) -> bool:
+    return type_name in FLOAT_TYPES
+
+
+def is_numeric_type(type_name: ValueType | None) -> bool:
+    return type_name in NUMERIC_TYPES
+
+
 def is_signed_type(type_name: TypeName) -> bool:
     return type_name in SIGNED_INTEGER_TYPES
 
@@ -474,7 +489,7 @@ def _check_parameter_type(
             raise InscriptionError(f"unknown type {type_name.name}", line)
         return
     if type_name not in SCALAR_TYPES:
-        raise InscriptionError("supported scalar types are i1, i8, i16, i32, i64, u8, u16, u32, and u64", line)
+        raise InscriptionError("supported scalar types are i1, i8, i16, i32, i64, u8, u16, u32, u64, f32, and f64", line)
 
 
 def _check_buffer_type(
@@ -488,12 +503,12 @@ def _check_buffer_type(
     resolved = resolve_buffer_type(buffer_type, line, records, constants, functions, env)
     if resolved.length < 1:
         raise InscriptionError("buffer length must be at least 1", line)
-    if not is_integer_type(resolved.element_type):
+    if not is_numeric_type(resolved.element_type):
         raise InscriptionError(f"buffer element type must be an integer type, got {format_type(resolved.element_type)}", line)
 
 
 def _check_view_type(view_type: ViewType, line: int) -> None:
-    if view_type.element_type not in INTEGER_TYPES:
+    if view_type.element_type not in NUMERIC_TYPES:
         raise InscriptionError(f"view element type must be an integer type, got {format_type(view_type.element_type)}", line)
 
 
@@ -1100,6 +1115,8 @@ def _should_preserve_expected_error(error: InscriptionError) -> bool:
     message = str(error)
     return (
         ("integer literal" in message and "out of range" in message)
+        or message.startswith("floating literal")
+        or message.startswith("constant floating expression")
         or message.startswith("cannot cast")
     )
 
@@ -1227,8 +1244,13 @@ def evaluate_const_expr(
         raise CompileTimeEvaluationError("record value is not compile-time evaluable", getattr(expr, "line", None))
 
     if isinstance(expr, Integer):
+        if is_float_type(type_name) and expr.is_word_zero:
+            return ConstValue(type_name, normalize_float(0.0, type_name))
         assert is_integer_type(type_name)
         return ConstValue(type_name, normalize_integer(expr.value, type_name))
+    if isinstance(expr, Float):
+        assert is_float_type(type_name)
+        return ConstValue(type_name, normalize_float(parse_float_literal(expr.text, expr.line), type_name))
     if isinstance(expr, Boolean):
         return ConstValue("i1", expr.value)
     if isinstance(expr, Variable):
@@ -1265,8 +1287,6 @@ def evaluate_const_expr(
         raise CompileTimeEvaluationError("expression is not compile-time evaluable", expr.line)
     if isinstance(expr, Cast):
         source = evaluate_const_expr(expr.expr, env, functions, records, constants)
-        assert is_integer_type(source.type_name)
-        assert is_integer_type(expr.target_type)
         return ConstValue(expr.target_type, cast_const_value(source.value, source.type_name, expr.target_type))
     if isinstance(expr, Unary):
         operand_expected = "i1" if expr.op == "not" else type_name
@@ -1282,12 +1302,12 @@ def evaluate_const_expr(
             return ConstValue("i1", bool(left.value) and bool(right.value) if expr.op == "and" else bool(left.value) or bool(right.value))
         left = evaluate_const_expr(expr.left, env, functions, records, constants, expected=type_name)
         right = evaluate_const_expr(expr.right, env, functions, records, constants, expected=type_name)
-        return ConstValue(type_name, evaluate_integer_binary(expr.op, int(left.value), int(right.value), type_name, expr.line))
+        return ConstValue(type_name, evaluate_numeric_binary(expr.op, left.value, right.value, type_name, expr.line))
     if isinstance(expr, Comparison):
         operand_type = infer_comparison_operand_type(expr, env, functions, records)
         left = evaluate_const_expr(expr.left, env, functions, records, constants, expected=operand_type)
         right = evaluate_const_expr(expr.right, env, functions, records, constants, expected=operand_type)
-        return ConstValue("i1", evaluate_comparison(expr.pred, int(left.value), int(right.value), operand_type))
+        return ConstValue("i1", evaluate_comparison(expr.pred, left.value, right.value, operand_type))
     raise CompileTimeEvaluationError("expression is not compile-time evaluable", getattr(expr, "line", None))
 
 
@@ -1304,7 +1324,43 @@ def to_bits(value: int, type_name: TypeName) -> int:
     return value & ((1 << TYPE_WIDTHS[type_name]) - 1)
 
 
-def cast_const_value(value: int | bool, source_type: TypeName, target_type: TypeName) -> int:
+def parse_float_literal(text: str, line: int) -> float:
+    try:
+        value = float(text)
+    except ValueError as exc:  # pragma: no cover - tokenizer should prevent this
+        raise InscriptionError(f"invalid floating literal {text}", line) from exc
+    if not math.isfinite(value):
+        raise InscriptionError(f"floating literal {text} is outside supported finite range", line)
+    return value
+
+
+def normalize_float(value: float, type_name: TypeName) -> float:
+    if not math.isfinite(value):
+        raise InscriptionError("constant floating expression is not finite")
+    if type_name == "f32":
+        try:
+            return struct.unpack("!f", struct.pack("!f", float(value)))[0]
+        except OverflowError as exc:
+            raise InscriptionError("constant floating expression is not finite") from exc
+    if type_name == "f64":
+        return float(value)
+    raise AssertionError(type_name)  # pragma: no cover
+
+
+def cast_const_value(value: int | bool | float, source_type: TypeName, target_type: TypeName) -> int | float:
+    if is_float_type(source_type) or is_float_type(target_type):
+        if source_type == "i1" or target_type == "i1":
+            raise InscriptionError(f"cannot cast {source_type} to {target_type}")
+        if is_float_type(source_type) and is_float_type(target_type):
+            return normalize_float(float(value), target_type)
+        if is_float_type(source_type) and is_integer_type(target_type):
+            return normalize_integer(int(float(value)), target_type)
+        if is_integer_type(source_type) and is_float_type(target_type):
+            int_value = int(value)
+            if source_type in UNSIGNED_INTEGER_TYPES:
+                int_value = to_bits(int_value, source_type)
+            return normalize_float(float(int_value), target_type)
+        raise InscriptionError(f"cannot cast {source_type} to {target_type}")
     source_bits = to_bits(int(value), source_type)
     if type_width(source_type) == type_width(target_type):
         return normalize_integer(source_bits, target_type)
@@ -1355,9 +1411,47 @@ def evaluate_integer_binary(op: str, left: int, right: int, type_name: TypeName,
     raise AssertionError(op)  # pragma: no cover
 
 
-def evaluate_comparison(pred: str, left: int, right: int, type_name: TypeName) -> bool:
-    lhs = left if is_signed_type(type_name) else to_bits(left, type_name)
-    rhs = right if is_signed_type(type_name) else to_bits(right, type_name)
+def evaluate_float_binary(op: str, left: float, right: float, type_name: TypeName, line: int) -> float:
+    if op == "plus":
+        return normalize_float(left + right, type_name)
+    if op == "minus":
+        return normalize_float(left - right, type_name)
+    if op == "times":
+        return normalize_float(left * right, type_name)
+    if op == "divided by":
+        if right == 0.0:
+            raise InscriptionError("constant expression divides by zero", line)
+        return normalize_float(left / right, type_name)
+    raise InscriptionError(f"{op} requires integer operands, got {type_name} and {type_name}", line)
+
+
+def evaluate_numeric_binary(op: str, left: int | bool | float, right: int | bool | float, type_name: TypeName, line: int) -> int | float:
+    if is_float_type(type_name):
+        return evaluate_float_binary(op, float(left), float(right), type_name, line)
+    return evaluate_integer_binary(op, int(left), int(right), type_name, line)
+
+
+def evaluate_comparison(pred: str, left: int | bool | float, right: int | bool | float, type_name: TypeName) -> bool:
+    if is_float_type(type_name):
+        lhs = float(left)
+        rhs = float(right)
+        if not math.isfinite(lhs) or not math.isfinite(rhs):
+            return False
+        if pred == "eq":
+            return lhs == rhs
+        if pred == "ne":
+            return lhs != rhs
+        if pred == "slt":
+            return lhs < rhs
+        if pred == "sle":
+            return lhs <= rhs
+        if pred == "sgt":
+            return lhs > rhs
+        if pred == "sge":
+            return lhs >= rhs
+        raise AssertionError(pred)  # pragma: no cover
+    lhs = int(left) if is_signed_type(type_name) else to_bits(int(left), type_name)
+    rhs = int(right) if is_signed_type(type_name) else to_bits(int(right), type_name)
     if pred == "eq":
         return lhs == rhs
     if pred == "ne":
@@ -1385,6 +1479,9 @@ def infer_expr_type(
     constants = constants or {}
     if isinstance(expr, Integer):
         if expected is not None:
+            if is_float_type(expected) and expr.is_word_zero:
+                assert isinstance(expected, str)
+                return expected
             if not is_integer_type(expected):
                 raise InscriptionError(f"integer literal cannot have type {format_type(expected)}", expr.line)
             assert isinstance(expected, str)
@@ -1392,6 +1489,15 @@ def infer_expr_type(
             return expected
         _check_integer_literal_range(expr.value, "i32", expr.line)
         return "i32"
+    if isinstance(expr, Float):
+        if expected is not None:
+            if not is_float_type(expected):
+                raise InscriptionError(f"floating literal cannot have type {format_type(expected)}", expr.line)
+            assert isinstance(expected, str)
+            normalize_float(parse_float_literal(expr.text, expr.line), expected)
+            return expected
+        normalize_float(parse_float_literal(expr.text, expr.line), "f64")
+        return "f64"
     if isinstance(expr, Boolean):
         if expected is not None:
             require_type("i1", expected, expr.line)
@@ -1559,7 +1665,13 @@ def infer_cast_type(
 ) -> TypeName:
     source_type = infer_expr_type(expr.expr, env, functions, records)
     target_type = expr.target_type
-    if not is_integer_type(source_type) or not is_integer_type(target_type):
+    if (
+        (source_type == "i1" and is_float_type(target_type))
+        or (is_float_type(source_type) and target_type == "i1")
+        or (not isinstance(source_type, str))
+        or (not is_integer_type(source_type) and not is_float_type(source_type))
+        or (not is_integer_type(target_type) and not is_float_type(target_type))
+    ):
         raise InscriptionError(f"cannot cast {source_type} to {target_type}", expr.line)
     if expected is not None:
         assert isinstance(expected, str)
@@ -1587,7 +1699,10 @@ def infer_binary_type(
             require_type("i1", expected, expr.line)
         return "i1"
 
-    if expr.op in {"plus", "minus", "times", "divided by", "remainder"}:
+    if expr.op in {"plus", "minus", "times", "divided by"}:
+        return infer_numeric_pair_type(expr.op, expr.left, expr.right, env, functions, records, expr.line, expected=expected)
+
+    if expr.op == "remainder":
         return infer_integer_pair_type(expr.op, expr.left, expr.right, env, functions, records, expr.line, expected=expected)
 
     if expr.op in {"bitwise and", "bitwise xor", "bitwise or"}:
@@ -1624,6 +1739,73 @@ def infer_integer_operand_type(
                 raise
             return infer_expr_type(expr, env, functions, records)  # type: ignore[return-value]
     return infer_expr_type(expr, env, functions, records)  # type: ignore[return-value]
+
+
+def infer_numeric_operand_type(
+    expr: Expr,
+    env: dict[str, ValueType],
+    functions: dict[str, Function],
+    records: dict[str, RecordDecl],
+    *,
+    expected: TypeName | None = None,
+) -> TypeName:
+    if expected is not None:
+        try:
+            return infer_expr_type(expr, env, functions, records, expected=expected)  # type: ignore[return-value]
+        except InscriptionError as expected_error:
+            if _should_preserve_expected_error(expected_error):
+                raise
+            return infer_expr_type(expr, env, functions, records)  # type: ignore[return-value]
+    return infer_expr_type(expr, env, functions, records)  # type: ignore[return-value]
+
+
+def _is_numeric_literal(expr: Expr) -> bool:
+    return isinstance(expr, Integer | Float)
+
+
+def infer_numeric_pair_type(
+    op: str,
+    left: Expr,
+    right: Expr,
+    env: dict[str, ValueType],
+    functions: dict[str, Function],
+    records: dict[str, RecordDecl],
+    line: int,
+    *,
+    expected: ValueType | None = None,
+) -> TypeName:
+    target = expected if is_numeric_type(expected) else None
+    if target is not None:
+        left_type = infer_numeric_operand_type(left, env, functions, records, expected=target)
+        right_type = infer_numeric_operand_type(right, env, functions, records, expected=target)
+    elif _is_numeric_literal(left) and not _is_numeric_literal(right):
+        right_type = infer_expr_type(right, env, functions, records)
+        left_type = infer_numeric_operand_type(left, env, functions, records, expected=right_type if is_numeric_type(right_type) else None)  # type: ignore[arg-type]
+    elif _is_numeric_literal(right) and not _is_numeric_literal(left):
+        left_type = infer_expr_type(left, env, functions, records)
+        right_type = infer_numeric_operand_type(right, env, functions, records, expected=left_type if is_numeric_type(left_type) else None)  # type: ignore[arg-type]
+    else:
+        left_type = infer_expr_type(left, env, functions, records)
+        right_type = infer_numeric_operand_type(right, env, functions, records, expected=left_type if is_numeric_type(left_type) else None)  # type: ignore[arg-type]
+
+    if not is_numeric_type(left_type) or not is_numeric_type(right_type):
+        if not is_float_type(left_type) and not is_float_type(right_type):
+            raise InscriptionError(f"{op} requires integer operands, got {format_type(left_type)} and {format_type(right_type)}", line)
+        raise InscriptionError(f"{op} requires numeric operands, got {format_type(left_type)} and {format_type(right_type)}", line)
+    if left_type != right_type:
+        if is_integer_type(left_type) and is_integer_type(right_type):
+            raise InscriptionError(
+                f"{op} requires matching integer types, got {format_type(left_type)} and {format_type(right_type)}", line
+            )
+        raise InscriptionError(
+            f"{op} requires matching numeric types, got {format_type(left_type)} and {format_type(right_type)}", line
+        )
+    if target is not None and left_type != target:
+        if is_integer_type(left_type) and is_integer_type(target):
+            raise InscriptionError(f"{op} requires matching integer types, got {format_type(left_type)} and {target}", line)
+        raise InscriptionError(f"{op} requires matching numeric types, got {format_type(left_type)} and {format_type(target)}", line)
+    assert isinstance(left_type, str)
+    return left_type
 
 
 def infer_integer_pair_type(
@@ -1676,24 +1858,33 @@ def infer_comparison_pair_type(
     records: dict[str, RecordDecl],
     line: int,
 ) -> TypeName:
-    if isinstance(left, Integer) and not isinstance(right, Integer):
+    if _is_numeric_literal(left) and not _is_numeric_literal(right):
         right_type = infer_expr_type(right, env, functions, records)
-        left_type = infer_integer_operand_type(left, env, functions, records, expected=right_type if is_integer_type(right_type) else None)
-    elif isinstance(right, Integer) and not isinstance(left, Integer):
+        left_type = infer_numeric_operand_type(left, env, functions, records, expected=right_type if is_numeric_type(right_type) else None)  # type: ignore[arg-type]
+    elif _is_numeric_literal(right) and not _is_numeric_literal(left):
         left_type = infer_expr_type(left, env, functions, records)
-        right_type = infer_integer_operand_type(right, env, functions, records, expected=left_type if is_integer_type(left_type) else None)
+        right_type = infer_numeric_operand_type(right, env, functions, records, expected=left_type if is_numeric_type(left_type) else None)  # type: ignore[arg-type]
     else:
         left_type = infer_expr_type(left, env, functions, records)
-        right_type = infer_integer_operand_type(right, env, functions, records, expected=left_type if is_integer_type(left_type) else None)
+        right_type = infer_numeric_operand_type(right, env, functions, records, expected=left_type if is_numeric_type(left_type) else None)  # type: ignore[arg-type]
 
-    if not is_integer_type(left_type) or not is_integer_type(right_type):
+    if not is_numeric_type(left_type) or not is_numeric_type(right_type):
+        if not is_float_type(left_type) and not is_float_type(right_type):
+            raise InscriptionError(
+                f"comparison requires integer operands, got {format_type(left_type)} and {format_type(right_type)}", line
+            )
         raise InscriptionError(
-            f"comparison requires integer operands, got {format_type(left_type)} and {format_type(right_type)}", line
+            f"comparison requires numeric operands, got {format_type(left_type)} and {format_type(right_type)}", line
         )
     if left_type != right_type:
+        if is_integer_type(left_type) and is_integer_type(right_type):
+            raise InscriptionError(
+                f"comparison requires matching integer types, got {format_type(left_type)} and {format_type(right_type)}", line
+            )
         raise InscriptionError(
-            f"comparison requires matching integer types, got {format_type(left_type)} and {format_type(right_type)}", line
+            f"comparison requires matching numeric types, got {format_type(left_type)} and {format_type(right_type)}", line
         )
+    assert isinstance(left_type, str)
     return left_type
 
 

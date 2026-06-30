@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal
 
-TypeName = Literal["i1", "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64"]
+TypeName = Literal["i1", "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "f32", "f64"]
 CmpPredicate = Literal["eq", "ne", "slt", "sle", "sgt", "sge"]
 BinOp = Literal[
     "plus",
@@ -85,6 +85,13 @@ class Function:
 @dataclass(frozen=True)
 class Integer:
     value: int
+    line: int
+    is_word_zero: bool = False
+
+
+@dataclass(frozen=True)
+class Float:
+    text: str
     line: int
 
 
@@ -243,6 +250,7 @@ class WhenExpr:
 
 Expr = (
     Integer
+    | Float
     | Boolean
     | Variable
     | BufferLoad

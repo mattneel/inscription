@@ -23,12 +23,14 @@ from .semantic import (
 
 INTERFACE_JSON_FORMAT = "inscription-interface-v1"
 C_HEADER_FORMAT = "inscription-c-header-v1"
-HEADER_SUPPORTED_TYPES = {"i32", "u32", "i64", "u64"}
+HEADER_SUPPORTED_TYPES = {"i32", "u32", "i64", "u64", "f32", "f64"}
 C_TYPE_MAP = {
     "i32": "int32_t",
     "u32": "uint32_t",
     "i64": "int64_t",
     "u64": "uint64_t",
+    "f32": "float",
+    "f64": "double",
 }
 C_IDENTIFIER_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 
@@ -220,7 +222,7 @@ def _c_prototype(fn: Function) -> str:
 def _c_type(type_name: ValueType, symbol: str, line: int) -> str:
     if not isinstance(type_name, str) or type_name not in HEADER_SUPPORTED_TYPES:
         raise InscriptionError(
-            "C header emission supports exported scalar types i32, u32, i64, and u64 in v0.19; "
+            "C header emission supports exported scalar types i32, u32, i64, u64, f32, and f64 in v0.21; "
             f"{symbol} uses {format_type(type_name)}",
             line,
         )

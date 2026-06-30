@@ -1193,7 +1193,7 @@ class CompilerTests(unittest.TestCase):
             )
             self.assertEqual(narrow_proc.returncode, 2)
             self.assertIn(
-                "C header emission supports exported scalar types i32, u32, i64, and u64 in v0.19; ins_byte uses u8",
+                "C header emission supports exported scalar types i32, u32, i64, u64, f32, and f64 in v0.21; ins_byte uses u8",
                 narrow_proc.stderr,
             )
 
@@ -1571,6 +1571,167 @@ class CompilerTests(unittest.TestCase):
                 42,
             )
 
+    def test_v021_float_scalars_lower_and_emit_interfaces(self):
+        arithmetic = compile_source(self.fixture("float_arithmetic.ins"))
+        self.assertIn("arith.addf", arithmetic)
+        self.assertIn("arith.divf", arithmetic)
+        self.assertIn("arith.fptosi", arithmetic)
+
+        comparison = compile_source(self.fixture("float_comparison.ins"))
+        self.assertIn("arith.cmpf ogt", comparison)
+
+        casts = compile_source(self.fixture("float_casts.ins"))
+        self.assertIn("arith.sitofp", casts)
+        self.assertIn("arith.fptosi", casts)
+
+        buffer_view = compile_source(self.fixture("float_buffer_view.ins"))
+        self.assertIn("memref<4xf32>", buffer_view)
+        self.assertIn("memref<?xf32>", buffer_view)
+        self.assertIn("arith.addf", buffer_view)
+
+        record_return = compile_source(self.fixture("float_record_return.ins"))
+        self.assertIn("func.func @make_vec(%x: f64, %y: f64) -> (f64, f64)", record_return)
+        self.assertIn("arith.mulf", record_return)
+
+        extern_float = compile_source((FIXTURES / "extern_float_compile_only.ins").read_text())
+        self.assertIn("func.func private @llvm.sqrt.f64(f64) -> f64", extern_float)
+        self.assertIn("func.call @llvm.sqrt.f64", extern_float)
+
+        env = {**os.environ, "PYTHONPATH": str(SRC)}
+        interface_proc = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "inscription",
+                "compile",
+                str(FIXTURES / "export_float_multiply.ins"),
+                "--emit",
+                "interface-json",
+            ],
+            cwd=ROOT,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(interface_proc.returncode, 0, interface_proc.stderr)
+        payload = json.loads(interface_proc.stdout)
+        export = payload["modules"][0]["exports"][0]
+        self.assertEqual(export["symbol"], "ins_multiply_f64")
+        self.assertEqual(export["parameters"], [{"name": "x", "type": "f64"}, {"name": "y", "type": "f64"}])
+        self.assertEqual(export["return"], "f64")
+
+        header_proc = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "inscription",
+                "compile",
+                str(FIXTURES / "export_float_multiply.ins"),
+                "--emit",
+                "c-header",
+            ],
+            cwd=ROOT,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(header_proc.returncode, 0, header_proc.stderr)
+        self.assertIn("double ins_multiply_f64(double arg0, double arg1);", header_proc.stdout)
+
+        f32_header_proc = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "inscription",
+                "compile",
+                str(FIXTURES / "export_float_identity.ins"),
+                "--emit",
+                "c-header",
+            ],
+            cwd=ROOT,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(f32_header_proc.returncode, 0, f32_header_proc.stderr)
+        self.assertIn("float ins_identity_f32(float arg0);", f32_header_proc.stdout)
+
+    def test_v021_float_artifacts_and_run_rejects_float_main(self):
+        env = {**os.environ, "PYTHONPATH": str(SRC)}
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            llvm_ir = tmp_path / "float_arithmetic.ll"
+            proc = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "inscription",
+                    "compile",
+                    str(FIXTURES / "float_arithmetic.ins"),
+                    "--emit",
+                    "llvm-ir",
+                    "--verify",
+                    "-o",
+                    str(llvm_ir),
+                ],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            self.assertIn("define i32 @main", llvm_ir.read_text())
+
+            float_main = tmp_path / "float_main.ins"
+            float_main.write_text("main gives f64:\n  1.0\n")
+            run_proc = subprocess.run(
+                [sys.executable, "-m", "inscription", "run", str(float_main)],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(run_proc.returncode, 2)
+            self.assertIn("program main must return an integer scalar, got f64", run_proc.stderr)
+
+            try:
+                resolve_toolchain(require_executable=True)
+            except ToolchainError:
+                return
+            executable = tmp_path / "float_arithmetic"
+            exe_proc = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "inscription",
+                    "compile",
+                    str(FIXTURES / "float_arithmetic.ins"),
+                    "--emit",
+                    "executable",
+                    "-o",
+                    str(executable),
+                ],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(exe_proc.returncode, 0, exe_proc.stderr)
+            run = subprocess.run([str(executable)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False)
+            self.assertEqual(run.returncode, 3, run.stderr)
+
     @unittest.skipUnless(importlib.util.find_spec("pygments"), "Pygments is not installed")
     def test_cli_highlight_outputs_terminal_ansi(self):
         proc = subprocess.run(
@@ -1654,7 +1815,9 @@ class CompilerTests(unittest.TestCase):
                 (GOLDENS / "81_require_divide.ins").read_text(),
                 (GOLDENS / "94_extern_ctpop.ins").read_text(),
                 (GOLDENS / "99_export_scalar_gives.ins").read_text(),
+                (GOLDENS / "105_float_arithmetic.ins").read_text(),
                 "highlight new widths a: i8 and b: i16 and c: u64 gives u64:\n  c bitwise xor c\n",
+                "highlight floats x: f32 and y: f64 gives f64:\n  y plus (x as f64) plus 1.5e2\n",
             ]
         )
         html = highlight_source(source, output_format="html")
@@ -2226,11 +2389,11 @@ main gives i32:
 
     def test_phrase_definitions_reject_unsupported_types(self):
         self.assertCompileError(
-            "identity of x: f64 gives i32:\n  x\n\nmain gives i32:\n  0\n",
+            "identity of x: f16 gives i32:\n  x\n\nmain gives i32:\n  0\n",
             "supported scalar types",
         )
         self.assertCompileError(
-            "identity of x: i32 gives f64:\n  x\n\nmain gives i32:\n  0\n",
+            "identity of x: i32 gives f16:\n  x\n\nmain gives i32:\n  0\n",
             "supported scalar types",
         )
 
@@ -2278,7 +2441,34 @@ main gives i32:
             ),
             "unsupported io": ("main gives i32:\n  print 1\n", "unexpected token"),
             "arrays": ("main gives i32:\n  array of 1\n", "unexpected token"),
-            "floats": ("main gives i32:\n  1.5\n", "invalid token"),
+            "float in integer return": ("main gives i32:\n  1.5\n", "expected i32, got f64"),
+            "mixed integer float arithmetic": (
+                "bad gives f64:\n  1 plus 2.0\n",
+                "plus requires matching numeric types, got i32 and f64",
+            ),
+            "mixed f32 f64 arithmetic": (
+                "bad gives f64:\n  let x: f32 be 1.0\n  let y: f64 be 2.0\n  x plus y\n",
+                "plus requires matching numeric types, got f32 and f64",
+            ),
+            "float remainder": ("bad gives f64:\n  1.0 remainder 2.0\n", "remainder requires integer operands, got f64 and f64"),
+            "float buffer index": (
+                "bad gives i32:\n  let cells be buffer of 4 i32 filled with 0\n  cells at 1.0\n",
+                "buffer index must be an integer type, got f64",
+            ),
+            "float view start": (
+                "bad gives i32:\n  let cells be buffer of 4 i32 filled with 0\n  let window be view of cells from 1.0 for 2\n  0\n",
+                "view start must have type i32, got f64",
+            ),
+            "layout record float field": (
+                "layout record Bad:\n  x: f32\n",
+                "layout record fields must be integer types, got f32",
+            ),
+            "float to boolean cast": ("bad gives i1:\n  1.0 as i1\n", "cannot cast f64 to i1"),
+            "boolean to float cast": ("bad gives f64:\n  true as f64\n", "cannot cast i1 to f64"),
+            "constant float division by zero": (
+                "constant bad: f64 be 1.0 divided by 0.0\n",
+                "constant expression divides by zero",
+            ),
             "pointers": ("main gives i32:\n  pointer\n", "unexpected token"),
             "memrefs": ("main gives i32:\n  memref\n", "unexpected token"),
             "reserved hole name": ("echo of let: i32 gives i32:\n  let\n\nmain gives i32:\n  0\n", "reserved word"),
