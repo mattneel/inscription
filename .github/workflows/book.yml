@@ -3,7 +3,7 @@ name: Book
 on:
   pull_request:
   push:
-    branches: [main]
+    branches: [master]
   workflow_dispatch:
 
 permissions:
@@ -40,7 +40,7 @@ jobs:
           path: book/book
 
   deploy-pages:
-    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/master'
     needs: build-book
     runs-on: ubuntu-latest
     permissions:

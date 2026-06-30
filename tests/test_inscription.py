@@ -5568,6 +5568,9 @@ class BookDocumentationTests(unittest.TestCase):
         self.assertIn("python book/tools/check_book_examples.py", workflow)
         self.assertIn("actions/upload-pages-artifact@v4", workflow)
         self.assertIn("actions/deploy-pages@v4", workflow)
+        self.assertIn("branches: [master]", workflow)
+        self.assertIn("refs/heads/master", workflow)
+        self.assertNotIn("refs/heads/main", workflow)
         self.assertIn("pages: write", workflow)
         self.assertNotIn("\t", workflow)
 

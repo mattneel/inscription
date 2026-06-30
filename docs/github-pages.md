@@ -7,7 +7,7 @@ To enable hosting:
 1. Open the repository on GitHub.
 2. Go to **Settings → Pages**.
 3. Set **Build and deployment → Source** to **GitHub Actions**.
-4. Push to `main` or run the book workflow manually.
+4. Push to `master` or run the book workflow manually.
 
 The workflow builds `book/book` with `mdbook build book`, uploads it as a Pages artifact, and deploys it through `actions/deploy-pages`. The public site is expected at:
 

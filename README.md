@@ -112,4 +112,4 @@ The unit suite includes exact source-MLIR golden tests, artifact smoke tests, fo
 
 ## GitHub Pages
 
-The `.github/workflows/book.yml` workflow builds the book on pull requests and deploys it on pushes to `main` or manual dispatches. In repository **Settings → Pages**, set the Pages source to **GitHub Actions**. See [`docs/github-pages.md`](docs/github-pages.md).
+The `.github/workflows/book.yml` workflow builds the book on pull requests and deploys it on pushes to `master` or manual dispatches. In repository **Settings → Pages**, set the Pages source to **GitHub Actions**. See [`docs/github-pages.md`](docs/github-pages.md).
