@@ -233,7 +233,7 @@ class MlirEmitter:
         self.binding_order: list[str] = []
         self.record_order: list[str] = []
         self.union_order: list[str] = []
-        self.owned_buffers: list[OwnedBufferStorage] = []
+        self.owned_buffer_scopes: list[list[OwnedBufferStorage]] = []
         self.while_counter = 0
         self.while_depth = 0
         self.for_counter = 0
@@ -281,7 +281,7 @@ class MlirEmitter:
         ]
         self.record_order = [param.name for param in fn.params if isinstance(param.type_name, RecordType)]
         self.union_order = [param.name for param in fn.params if isinstance(param.type_name, UnionType)]
-        self.owned_buffers = []
+        self.owned_buffer_scopes = [[]]
         self.while_counter = 0
         self.while_depth = 0
         self.for_counter = 0
@@ -317,8 +317,28 @@ class MlirEmitter:
         lines.append("  }")
 
     def emit_owned_deallocs(self, lines: list[str], indent: str) -> None:
-        for storage in reversed(self.owned_buffers):
+        for scope in reversed(self.owned_buffer_scopes):
+            for storage in reversed(scope):
+                lines.append(f"{indent}memref.dealloc {storage.name} : {dynamic_memref_type(storage.element_type)}")
+
+    def enter_owned_scope(self) -> None:
+        self.owned_buffer_scopes.append([])
+
+    def discard_owned_scope(self) -> None:
+        if self.owned_buffer_scopes:
+            self.owned_buffer_scopes.pop()
+
+    def emit_exit_owned_scope(self, lines: list[str], indent: str) -> None:
+        if not self.owned_buffer_scopes:
+            return
+        scope = self.owned_buffer_scopes.pop()
+        for storage in reversed(scope):
             lines.append(f"{indent}memref.dealloc {storage.name} : {dynamic_memref_type(storage.element_type)}")
+
+    def remember_owned_buffer(self, buffer: OwnedBufferStorage) -> None:
+        if not self.owned_buffer_scopes:
+            self.owned_buffer_scopes.append([])
+        self.owned_buffer_scopes[-1].append(buffer)
 
     def function_argument_decls(self, fn: Function) -> list[str]:
         args: list[str] = []
@@ -863,7 +883,7 @@ class MlirEmitter:
         lines.append(f"{indent}  memref.store {fill.name}, {buffer.name}[{iv}] : {dynamic_memref_type(element_type)}")
         lines.append(f"{indent}}}")
         env[stmt.name] = buffer
-        self.owned_buffers.append(buffer)
+        self.remember_owned_buffer(buffer)
 
     def emit_storage_alias_binding(
         self,
@@ -1908,13 +1928,20 @@ class MlirEmitter:
         lines: list[str],
         indent: str,
     ) -> None:
-        for body_stmt in stmt.body:
-            self.emit_body_stmt(body_stmt, env, lines, indent + "  ")
+        body_indent = indent + "  "
+        self.enter_owned_scope()
+        try:
+            for body_stmt in stmt.body:
+                self.emit_body_stmt(body_stmt, env, lines, body_indent)
+            yielded = ", ".join(self.slot_value(env, slot).name for slot in carried_slots) if carried_slots else ""
+            self.emit_exit_owned_scope(lines, body_indent)
+        except Exception:
+            self.discard_owned_scope()
+            raise
         if carried_slots:
-            yielded = ", ".join(self.slot_value(env, slot).name for slot in carried_slots)
-            lines.append(f"{indent}  scf.yield {yielded} : {self.type_list(carried_types)}")
+            lines.append(f"{body_indent}scf.yield {yielded} : {self.type_list(carried_types)}")
         else:
-            lines.append(f"{indent}  scf.yield")
+            lines.append(f"{body_indent}scf.yield")
 
     def emit_for(self, stmt: ForStmt, env: dict[str, EnvValue], lines: list[str], indent: str) -> None:
         loop_id = self.for_counter
@@ -2044,12 +2071,18 @@ class MlirEmitter:
         indent: str,
     ) -> None:
         body_indent = indent + "  "
-        env[name] = self.emit_index_to_integer(iv, loop_type, lines, body_indent)
-        self.binding_order.append(name)
-        for body_stmt in body:
-            self.emit_body_stmt(body_stmt, env, lines, body_indent)
+        self.enter_owned_scope()
+        try:
+            env[name] = self.emit_index_to_integer(iv, loop_type, lines, body_indent)
+            self.binding_order.append(name)
+            for body_stmt in body:
+                self.emit_body_stmt(body_stmt, env, lines, body_indent)
+            yielded = ", ".join(self.slot_value(env, slot).name for slot in carried_slots) if carried_slots else ""
+            self.emit_exit_owned_scope(lines, body_indent)
+        except Exception:
+            self.discard_owned_scope()
+            raise
         if carried_slots:
-            yielded = ", ".join(self.slot_value(env, slot).name for slot in carried_slots)
             lines.append(f"{body_indent}scf.yield {yielded} : {self.type_list(carried_types)}")
 
     def emit_if(self, stmt: IfStmt, env: dict[str, EnvValue], lines: list[str], indent: str) -> None:
@@ -2098,10 +2131,16 @@ class MlirEmitter:
         indent: str,
     ) -> None:
         branch_indent = indent + "  "
-        for body_stmt in body:
-            self.emit_body_stmt(body_stmt, env, lines, branch_indent)
+        self.enter_owned_scope()
+        try:
+            for body_stmt in body:
+                self.emit_body_stmt(body_stmt, env, lines, branch_indent)
+            yielded = ", ".join(self.slot_value(env, slot).name for slot in result_slots) if result_slots else ""
+            self.emit_exit_owned_scope(lines, branch_indent)
+        except Exception:
+            self.discard_owned_scope()
+            raise
         if result_slots:
-            yielded = ", ".join(self.slot_value(env, slot).name for slot in result_slots)
             lines.append(f"{branch_indent}scf.yield {yielded} : {self.type_list(result_types)}")
         else:
             lines.append(f"{branch_indent}scf.yield")

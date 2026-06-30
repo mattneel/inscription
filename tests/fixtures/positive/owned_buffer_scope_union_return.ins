@@ -1,0 +1,13 @@
+union MaybeI32:
+  none
+  some value: i32
+
+make maybe from owned gives MaybeI32:
+  let cells be owned buffer of 1 i32 filled with 7
+  MaybeI32.some with value be cells at 0
+
+main gives i32:
+  let maybe be make maybe from owned
+  match maybe:
+    MaybeI32.some with value gives value
+    otherwise gives 0

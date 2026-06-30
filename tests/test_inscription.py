@@ -3686,6 +3686,154 @@ main gives i32:
             run = subprocess.run([str(executable)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False)
             self.assertEqual(run.returncode, 7, run.stderr)
 
+    def test_v030_nested_owned_buffers_cleanup_at_lexical_scope(self):
+        if_scope = compile_source(self.fixture("owned_buffer_if_scope.ins"))
+        self.assertIn("memref.alloc(", if_scope)
+        self.assertIn("memref.dealloc", if_scope)
+        self.assertRegex(if_scope, r"memref\.dealloc %\d+ : memref<\?xi32>\n      scf\.yield")
+
+        for_scope = compile_source(self.fixture("owned_buffer_for_scope.ins"))
+        self.assertIn("scf.for", for_scope)
+        self.assertRegex(for_scope, r"memref\.dealloc %\d+ : memref<\?xi32>\n +scf\.yield")
+
+        while_scope = compile_source(self.fixture("owned_buffer_while_scope.ins"))
+        self.assertIn("scf.while", while_scope)
+        self.assertRegex(while_scope, r"memref\.dealloc %\d+ : memref<\?xi32>\n +scf\.yield")
+
+        match_scope = compile_source(self.fixture("owned_buffer_match_scope.ins"))
+        self.assertIn("memref.dealloc", match_scope)
+        self.assertIn("memref<?xi32>", match_scope)
+
+        nested_scope = compile_source(self.fixture("owned_buffer_nested_scope.ins"))
+        self.assertIn("memref.dealloc", nested_scope)
+
+        record_return = compile_source(self.fixture("owned_buffer_scope_record_return.ins"))
+        self.assertRegex(
+            record_return,
+            r"memref\.load %\d+\[%\d+\] : memref<\?xi32>\n    memref\.dealloc %\d+ : memref<\?xi32>\n    return",
+        )
+
+        union_return = compile_source(self.fixture("owned_buffer_scope_union_return.ins"))
+        self.assertIn("memref.dealloc", union_return)
+        self.assertIn("return", union_return)
+
+        view_parameter = compile_source(self.fixture("owned_buffer_nested_view_parameter.ins"))
+        self.assertIn("func.call @sum_view", view_parameter)
+        self.assertIn("memref.dealloc", view_parameter)
+
+    def test_v030_nested_owned_buffer_artifacts_and_runtime_checks(self):
+        try:
+            resolve_toolchain()
+        except ToolchainError:
+            return
+
+        env = {**os.environ, "PYTHONPATH": str(SRC)}
+        for fixture, status in [
+            ("checked_nested_owned_index.ins", 3),
+            ("checked_loop_owned_view.ins", 7),
+        ]:
+            with self.subTest(runtime_checked=fixture):
+                checked = subprocess.run(
+                    [
+                        sys.executable,
+                        "-m",
+                        "inscription",
+                        "run",
+                        str(FIXTURES / fixture),
+                        "--runtime-checks",
+                    ],
+                    cwd=ROOT,
+                    env=env,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    check=False,
+                )
+                self.assertEqual(checked.returncode, status, checked.stderr)
+                self.assertEqual(checked.stdout, "")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            llvm_ir = tmp_path / "owned_buffer_if_scope.ll"
+            llvm_proc = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "inscription",
+                    "compile",
+                    str(FIXTURES / "owned_buffer_if_scope.ins"),
+                    "--emit",
+                    "llvm-ir",
+                    "--verify",
+                    "-o",
+                    str(llvm_ir),
+                ],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(llvm_proc.returncode, 0, llvm_proc.stderr)
+            self.assertIn("define i32 @main", llvm_ir.read_text())
+
+            try:
+                resolve_toolchain(require_static_library=True)
+            except ToolchainError:
+                pass
+            else:
+                archive = tmp_path / "libowned_buffer_if_scope.a"
+                archive_proc = subprocess.run(
+                    [
+                        sys.executable,
+                        "-m",
+                        "inscription",
+                        "compile",
+                        str(FIXTURES / "owned_buffer_if_scope.ins"),
+                        "--emit",
+                        "static-library",
+                        "-o",
+                        str(archive),
+                    ],
+                    cwd=ROOT,
+                    env=env,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    check=False,
+                )
+                self.assertEqual(archive_proc.returncode, 0, archive_proc.stderr)
+                self.assertGreater(archive.stat().st_size, 0)
+
+            try:
+                resolve_toolchain(require_executable=True)
+            except ToolchainError:
+                return
+            executable = tmp_path / "owned_buffer_if_scope"
+            exe_proc = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "inscription",
+                    "compile",
+                    str(FIXTURES / "owned_buffer_if_scope.ins"),
+                    "--emit",
+                    "executable",
+                    "-o",
+                    str(executable),
+                ],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(exe_proc.returncode, 0, exe_proc.stderr)
+            run = subprocess.run([str(executable)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False)
+            self.assertEqual(run.returncode, 7, run.stderr)
+
     def test_negative_diagnostics(self):
         cases = {
             "malformed top level": ("Please add two numbers\n", "expected phrase definition"),
@@ -4844,7 +4992,7 @@ main gives i32:
             ),
             "owned buffer union element unsupported": (
                 "union MaybeI32:\n  none\n\nbad n: i32 gives i32:\n  let values be owned buffer of n MaybeI32 filled with MaybeI32.none\n  0\n",
-                "owned buffer element type may not be a union type in v0.29",
+                "owned buffer element type may not be a union type in v0.30",
             ),
             "owned buffer fill type mismatch": (
                 "bad n: i32 gives i32:\n  let cells be owned buffer of n i32 filled with true\n  0\n",
@@ -4866,13 +5014,29 @@ main gives i32:
                 "sum buffer cells: buffer of 4 i32 gives i32:\n  0\n\nbad gives i32:\n  let cells be owned buffer of 4 i32 filled with 0\n  sum buffer cells\n",
                 "argument cells must have type buffer of 4 i32, got owned buffer of i32",
             ),
-            "owned buffer declaration inside if": (
-                "bad flag: i1 gives i32:\n  if flag:\n    let cells be owned buffer of 4 i32 filled with 0\n  otherwise:\n    let ignored be 0\n  0\n",
-                "owned buffer declarations are only supported at phrase body scope in v0.29",
+            "branch local owned buffer escape": (
+                "bad flag: i1 gives i32:\n  if flag:\n    let cells be owned buffer of 4 i32 filled with 0\n  otherwise:\n    let ignored be 0\n  cells at 0\n",
+                "unknown binding cells",
             ),
-            "owned buffer declaration inside loop": (
-                "bad gives i32:\n  for i from 0 up to 4:\n    let cells be owned buffer of 4 i32 filled with 0\n  0\n",
-                "owned buffer declarations are only supported at phrase body scope in v0.29",
+            "loop local owned buffer escape": (
+                "bad gives i32:\n  for i from 0 up to 1:\n    let cells be owned buffer of 4 i32 filled with 0\n  cells at 0\n",
+                "unknown binding cells",
+            ),
+            "match arm local owned buffer escape": (
+                "enum Mode: u8:\n  small be 0\n\nbad mode: Mode gives i32:\n  match mode:\n    Mode.small:\n      let cells be owned buffer of 4 i32 filled with 0\n    otherwise:\n      let ignored be 0\n  cells at 0\n",
+                "unknown binding cells",
+            ),
+            "branch local owned view escape": (
+                "bad flag: i1 gives i32:\n  if flag:\n    let cells be owned buffer of 4 i32 filled with 0\n    let window be view of cells from 0 for 4\n  otherwise:\n    let ignored be 0\n  length of window\n",
+                "unknown binding window",
+            ),
+            "nested owned buffer copy invalid": (
+                "bad flag: i1 gives i32:\n  if flag:\n    let cells be owned buffer of 4 i32 filled with 0\n    let copy be cells\n  otherwise:\n    let ignored be 0\n  0\n",
+                "owned buffer cells cannot be used as a value",
+            ),
+            "nested owned buffer rebind invalid": (
+                "bad gives i32:\n  for i from 0 up to 1:\n    let cells be owned buffer of 4 i32 filled with 0\n    cells becomes 1\n  0\n",
+                "cannot rebind owned buffer cells",
             ),
             "owned buffer byte string unsupported": (
                 "bad gives i32:\n  let bytes be owned buffer of bytes \"hello\"\n  0\n",
@@ -4880,6 +5044,10 @@ main gives i32:
             ),
             "owned buffer static index out of bounds": (
                 "bad gives i32:\n  let cells be owned buffer of 4 i32 filled with 0\n  cells at 4\n",
+                "owned buffer index 4 is out of bounds for owned buffer cells of length 4",
+            ),
+            "nested owned buffer static index out of bounds": (
+                "bad gives i32:\n  let result be 0\n  if true:\n    let cells be owned buffer of 4 i32 filled with 0\n    result becomes cells at 4\n  otherwise:\n    let ignored be 0\n  result\n",
                 "owned buffer index 4 is out of bounds for owned buffer cells of length 4",
             ),
             "layout write to non u8 owned buffer": (

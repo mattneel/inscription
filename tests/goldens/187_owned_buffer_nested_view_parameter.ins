@@ -1,0 +1,15 @@
+sum view cells: view of i32 gives i32:
+  let total be 0
+  for each index i of cells:
+    total becomes total plus cells at i
+  total
+
+nested owned view gives i32:
+  let total be 0
+  for i from 0 up to 3:
+    let cells be owned buffer of 2 i32 filled with i
+    total becomes total plus sum view cells
+  total
+
+main gives i32:
+  nested owned view

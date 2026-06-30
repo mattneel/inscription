@@ -1,0 +1,11 @@
+while owned gives i32:
+  let total be 0
+  let i be 0
+  while i is less than 4:
+    let cells be owned buffer of 2 i32 filled with i
+    total becomes total plus cells at 0 plus cells at 1
+    i becomes i plus 1
+  total
+
+main gives i32:
+  while owned

@@ -977,7 +977,7 @@ def _check_view_type(view_type: ViewType, line: int) -> None:
 
 def _check_owned_buffer_element_type(element_type: ValueType, line: int) -> None:
     if isinstance(element_type, UnionType):
-        raise InscriptionError("owned buffer element type may not be a union type in v0.29", line)
+        raise InscriptionError("owned buffer element type may not be a union type in v0.30", line)
     if not is_numeric_type(element_type) and not isinstance(element_type, EnumType):
         raise InscriptionError(f"owned buffer element type must be numeric or enum, got {format_type(element_type)}", line)
 
@@ -1008,7 +1008,8 @@ def _check_body_stmt(
         _declare_storage_alias(stmt, bindings, functions, records, constants)
         return
     if isinstance(stmt, OwnedBufferBinding):
-        raise InscriptionError("owned buffer declarations are only supported at phrase body scope in v0.29", stmt.line)
+        _declare_owned_buffer(stmt, bindings, functions, records, constants)
+        return
     if isinstance(stmt, ViewBinding):
         _declare_view(stmt, bindings, functions, records, constants)
         return
