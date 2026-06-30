@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .ast import Function, Program, RecordDecl, TypeName, ValueType
+from .ast import EnumType, Function, Program, RecordDecl, TypeName, ValueType
 from .compiler import LoadedCompilation, load_compilation, module_path
 from .diagnostics import InscriptionError
 from .semantic import (
@@ -15,8 +15,10 @@ from .semantic import (
     analyze,
     byte_width,
     constant_table,
+    enum_table,
     format_type,
     function_table,
+    EnumInfo,
     record_table,
     resolve_function_table,
 )
@@ -38,6 +40,7 @@ C_IDENTIFIER_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 @dataclass(frozen=True)
 class InterfaceContext:
     compilation: LoadedCompilation
+    enums: dict[str, EnumInfo]
     records: dict[str, RecordDecl]
     constants: dict[str, ConstValue]
     functions: dict[str, Function]
@@ -49,10 +52,11 @@ def load_interface_context(source_path: Path, *, module_root: Path | None = None
     compilation = load_compilation(source_path.read_text(), source_path=source_path, module_root=module_root)
     analyze(compilation.program)
     raw_functions = function_table(compilation.program)
+    enums = enum_table(compilation.program)
     records = record_table(compilation.program)
     constants = constant_table(compilation.program, records, raw_functions)
     functions = resolve_function_table(raw_functions, records, constants)
-    return InterfaceContext(compilation, records, constants, functions, compilation.module_root)
+    return InterfaceContext(compilation, enums, records, constants, functions, compilation.module_root)
 
 
 def emit_interface_json(context: InterfaceContext) -> str:
@@ -127,7 +131,8 @@ def _module_json(
         "name": name,
         "path": _relative_path(path, _root_dir(context)),
         "imports": [_import_json(import_decl.module, _root_dir(context)) for import_decl in program.imports],
-        "constants": [_constant_json(const.name, name, context.constants[const.name]) for const in program.constants],
+        "constants": [_constant_json(const.name, name, context.constants[const.name], context) for const in program.constants],
+        "enums": [_enum_json(context.enums[enum.name], name) for enum in program.enums],
         "records": [
             _record_json(context.records[record.name], name)
             for record in program.records
@@ -156,8 +161,28 @@ def _import_json(module_name: str, root_dir: Path | None) -> dict[str, Any]:
     return {"module": module_name, "path": _relative_path(path, root_dir), "alias": None}
 
 
-def _constant_json(name: str, module_name: str | None, value: ConstValue) -> dict[str, Any]:
-    return {"name": _display_name(name, module_name), "type": value.type_name, "value": value.value}
+def _constant_json(name: str, module_name: str | None, value: ConstValue, context: InterfaceContext) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "name": _display_name(name, module_name),
+        "type": _format_interface_type(value.type_name, module_name),
+        "value": value.value,
+    }
+    if isinstance(value.type_name, EnumType):
+        info = context.enums[value.type_name.name]
+        for case_name in info.case_order:
+            if info.cases[case_name] == value.value:
+                payload["case"] = _display_name(f"{info.name}.{case_name}", module_name)
+                break
+    return payload
+
+
+def _enum_json(enum: EnumInfo, module_name: str | None) -> dict[str, Any]:
+    return {
+        "name": _display_name(enum.name, module_name),
+        "kind": "enum",
+        "underlying_type": enum.underlying_type,
+        "cases": [{"name": case_name, "value": enum.cases[case_name]} for case_name in enum.case_order],
+    }
 
 
 def _record_json(record: RecordDecl, module_name: str | None) -> dict[str, Any]:
@@ -236,6 +261,8 @@ def _ordered_module_programs(compilation: LoadedCompilation) -> tuple[tuple[str 
 
 
 def _field_scalar_type(type_name: ValueType) -> TypeName:
+    if isinstance(type_name, EnumType):
+        return type_name.underlying_type
     assert isinstance(type_name, str)
     return type_name
 

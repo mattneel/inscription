@@ -1,0 +1,14 @@
+constant active_raw: u8 be 1
+
+enum Mode: u8:
+  idle be 0
+  active be active_raw
+
+constant default_mode: Mode be Mode.active
+constant default_value: u8 be default_mode as u8
+
+check default_mode is equal to Mode.active
+check default_value is equal to active_raw
+
+main gives i32:
+  default_value as i32

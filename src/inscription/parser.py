@@ -20,6 +20,9 @@ from .ast import (
     CheckStmt,
     Comparison,
     ConstantDecl,
+    EnumCase,
+    EnumCaseDecl,
+    EnumDecl,
     Expr,
     FieldAccess,
     FieldAssignStmt,
@@ -67,7 +70,7 @@ TOKEN_RE = re.compile(rf"\s*({FLOAT_LITERAL_RE}|-?\d+|[A-Z][A-Za-z0-9_]*|[a-z][a
 RESERVED = {
     "address", "alignment", "and", "arguments", "array", "as", "at", "be", "becomes", "bitwise", "buffer", "by", "call",
     "check", "constant", "containing", "divided", "do", "does", "each", "else", "equal", "export", "extern", "false", "filled", "float", "for", "from",
-    "function", "gives", "greater", "f32", "f64", "i1", "i32", "i64", "if", "in", "index", "input", "into", "import",
+    "enum", "function", "gives", "greater", "f32", "f64", "i1", "i32", "i64", "if", "in", "index", "input", "into", "import",
     "i8", "i16", "is", "layout", "length", "less", "let", "memref", "minus", "module", "no", "not", "or", "otherwise", "output", "packed", "parameters",
     "pointer", "plus", "print", "read", "remainder", "require", "return", "set", "shifted", "size", "takes", "than", "then", "times", "to",
     "track", "true", "u8", "u16", "u32", "u64", "up", "record", "view", "when", "while", "with", "write", "xor", "zero",
@@ -83,7 +86,8 @@ COMPARATORS: tuple[tuple[tuple[str, ...], str], ...] = (
 )
 CONNECTOR_WORDS = {"of", "from", "to", "at", "in", "into", "between", "and", "with", "by"}
 BUFFER_LENGTH_PATTERN = r"(?:-?\d+|[a-z][a-z0-9_]*|\([^)]*\))"
-TYPE_PATTERN = rf"(?:buffer\s+of\s+{BUFFER_LENGTH_PATTERN}\s+(?:[A-Za-z][A-Za-z0-9_]*(?:\.[A-Z][A-Za-z0-9_]*)?|[a-z][a-z0-9_]*)|array\s+of\s+{BUFFER_LENGTH_PATTERN}\s+(?:[A-Za-z][A-Za-z0-9_]*(?:\.[A-Z][A-Za-z0-9_]*)?|[a-z][a-z0-9_]*)|view\s+of\s+[a-z][a-z0-9_]*|(?:[A-Za-z][A-Za-z0-9_]*\.)*[A-Z][A-Za-z0-9_]*|[a-z][a-z0-9_]*)"
+TYPE_REF_PATTERN = r"(?:(?:[A-Za-z][A-Za-z0-9_]*\.)*[A-Z][A-Za-z0-9_]*|[a-z][a-z0-9_]*)"
+TYPE_PATTERN = rf"(?:buffer\s+of\s+{BUFFER_LENGTH_PATTERN}\s+{TYPE_REF_PATTERN}|array\s+of\s+{BUFFER_LENGTH_PATTERN}\s+{TYPE_REF_PATTERN}|view\s+of\s+{TYPE_REF_PATTERN}|(?:[A-Za-z][A-Za-z0-9_]*\.)*[A-Z][A-Za-z0-9_]*|[a-z][a-z0-9_]*)"
 MODULE_RE = re.compile(r"[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z][A-Za-z0-9_]*)*")
 EXTERNAL_SYMBOL_PATTERN = r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*"
 
@@ -124,7 +128,7 @@ class PhraseTemplate:
     display_name: str
 
 
-ParsedTopLevel = RecordDecl | ConstantDecl | CheckStmt | Function
+ParsedTopLevel = RecordDecl | EnumDecl | ConstantDecl | CheckStmt | Function
 
 
 class Parser:
@@ -182,6 +186,7 @@ class Parser:
 
     def parse_program(self) -> Program:
         records: list[RecordDecl] = []
+        enums: list[EnumDecl] = []
         constants: list[ConstantDecl] = []
         checks: list[CheckStmt] = []
         functions: list[Function] = []
@@ -207,6 +212,10 @@ class Parser:
             if self._looks_like_record_header(line):
                 record, index = self._parse_record_decl(index)
                 records.append(record)
+                continue
+            if self._looks_like_enum_header(line):
+                enum, index = self._parse_enum_decl(index)
+                enums.append(enum)
                 continue
             if line.text.startswith("constant "):
                 constants.append(self._parse_constant_decl(line))
@@ -251,7 +260,7 @@ class Parser:
             if line.text.startswith("require "):
                 raise InscriptionError("require may only appear inside phrase bodies", line.number)
             if not self._looks_like_phrase_header(line):
-                raise InscriptionError("expected phrase definition, record declaration, constant declaration, check, extern, export, module, or import", line.number)
+                raise InscriptionError("expected phrase definition, record declaration, enum declaration, constant declaration, check, extern, export, module, or import", line.number)
             template, return_type = self._parse_phrase_header(line)
             body, index = self._parse_phrase_body(index + 1, template, line.number)
             functions.append(
@@ -269,7 +278,7 @@ class Parser:
             if imported.module in seen_imports:
                 raise InscriptionError(f"module {imported.module} is already imported", imported.line)
             seen_imports.add(imported.module)
-        return Program(tuple(records), tuple(constants), tuple(checks), tuple(functions), module_name, tuple(imports))
+        return Program(tuple(records), tuple(enums), tuple(constants), tuple(checks), tuple(functions), module_name, tuple(imports))
 
     def _looks_like_record_header(self, line: Line) -> bool:
         return (
@@ -278,11 +287,15 @@ class Parser:
             is not None
         )
 
+    def _looks_like_enum_header(self, line: Line) -> bool:
+        return line.is_header and re.fullmatch(r"enum [A-Za-z][A-Za-z0-9_]*:\s*[a-z][a-z0-9_]*", line.text) is not None
+
     def _looks_like_top_level_item(self, line: Line) -> bool:
         return (
             self._looks_like_phrase_header(line)
             or self._looks_like_record_header(line)
-            or (line.indent == 0 and (line.text.startswith("constant ") or line.text.startswith("check ") or line.text.startswith("extern ") or line.text.startswith("export ") or line.text.startswith("module ") or line.text.startswith("import ") or line.text.startswith("require ")))
+            or self._looks_like_enum_header(line)
+            or (line.indent == 0 and (line.text.startswith("constant ") or line.text.startswith("check ") or line.text.startswith("extern ") or line.text.startswith("export ") or line.text.startswith("module ") or line.text.startswith("import ") or line.text.startswith("require ") or line.text.startswith("enum ")))
         )
 
     def _parse_record_decl(self, index: int) -> tuple[RecordDecl, int]:
@@ -314,13 +327,41 @@ class Parser:
             raise InscriptionError(f"{prefix} {name} must declare at least one field", line.number)
         return RecordDecl(name, tuple(fields), line.number, layout_kind), field_index
 
+    def _parse_enum_decl(self, index: int) -> tuple[EnumDecl, int]:
+        line = self.lines[index]
+        match = re.fullmatch(r"enum ([A-Za-z][A-Za-z0-9_]*):\s*([a-z][a-z0-9_]*)", line.text)
+        if not line.is_header or match is None:
+            raise InscriptionError("malformed enum declaration", line.number)
+        name = self._record_name(match.group(1), line.number)
+        underlying_type = self._type_name(match.group(2), line.number)
+        cases: list[EnumCaseDecl] = []
+        case_index = index + 1
+        while case_index < len(self.lines):
+            current = self.lines[case_index]
+            if current.indent <= line.indent:
+                break
+            case_match = re.fullmatch(r"([a-z][a-z0-9_]*) be (.+)", current.text)
+            if current.is_header or case_match is None:
+                raise InscriptionError("malformed enum case declaration", current.number)
+            cases.append(
+                EnumCaseDecl(
+                    self._field_name(case_match.group(1), current.number),
+                    self._parse_expression(case_match.group(2), current.number),
+                    current.number,
+                )
+            )
+            case_index += 1
+        if not cases:
+            raise InscriptionError(f"enum {name} must declare at least one case", line.number)
+        return EnumDecl(name, underlying_type, tuple(cases), line.number), case_index
+
     def _parse_constant_decl(self, line: Line) -> ConstantDecl:
-        match = re.fullmatch(r"constant ([A-Za-z][A-Za-z0-9_]*):\s*([a-z][a-z0-9_]*) be (.+)", line.text)
+        match = re.fullmatch(rf"constant ([A-Za-z][A-Za-z0-9_]*):\s*({TYPE_PATTERN}) be (.+)", line.text)
         if line.is_header or match is None:
             raise InscriptionError("malformed constant declaration", line.number)
         raw_name = match.group(1)
         name = self._name(raw_name, line.number) if NAME_RE.fullmatch(raw_name) else raw_name
-        return ConstantDecl(name, self._type_name(match.group(2), line.number), self._parse_expression(match.group(3), line.number), line.number)
+        return ConstantDecl(name, self._return_type(match.group(2), line.number), self._parse_expression(match.group(3), line.number), line.number)
 
     def _parse_check_stmt(self, line: Line) -> CheckStmt:
         if line.is_header:
@@ -695,7 +736,7 @@ class Parser:
 
     def _parse_let(self, line: Line) -> SetStmt | BufferBinding | ArrayBinding | ViewBinding:
         buffer_match = re.fullmatch(
-            rf"let ([a-z][a-z0-9_]*) be buffer of ({BUFFER_LENGTH_PATTERN}) ((?:(?:[A-Za-z][A-Za-z0-9_]*\.)*[A-Z][A-Za-z0-9_]*)|[a-z][a-z0-9_]*) (filled with|containing) (.+)",
+            rf"let ([a-z][a-z0-9_]*) be buffer of ({BUFFER_LENGTH_PATTERN}) ({TYPE_REF_PATTERN}) (filled with|containing) (.+)",
             line.text,
         )
         if buffer_match:
@@ -719,7 +760,7 @@ class Parser:
                 fill=self._parse_expression(initializer_text, line.number),
             )
         array_match = re.fullmatch(
-            rf"let ([a-z][a-z0-9_]*) be array of ({BUFFER_LENGTH_PATTERN}) ((?:(?:[A-Za-z][A-Za-z0-9_]*\.)*[A-Z][A-Za-z0-9_]*)|[a-z][a-z0-9_]*) (filled with|containing) (.+)",
+            rf"let ([a-z][a-z0-9_]*) be array of ({BUFFER_LENGTH_PATTERN}) ({TYPE_REF_PATTERN}) (filled with|containing) (.+)",
             line.text,
         )
         if array_match:
@@ -751,7 +792,7 @@ class Parser:
                 self._parse_expression(view_match.group(4), line.number),
                 line.number,
             )
-        match = re.fullmatch(r"let ([a-z][a-z0-9_]*)(?::\s*((?:[A-Za-z][A-Za-z0-9_]*\.)*[A-Z][A-Za-z0-9_]*|[a-z][a-z0-9_]*))? be (.+)", line.text)
+        match = re.fullmatch(rf"let ([a-z][a-z0-9_]*)(?::\s*({TYPE_REF_PATTERN}))? be (.+)", line.text)
         if not match:
             raise InscriptionError("malformed let binding", line.number)
         return SetStmt(
@@ -891,15 +932,15 @@ class Parser:
 
     def _value_type(self, value: str, line: int) -> ValueType:
         value = " ".join(value.split())
-        buffer_match = re.fullmatch(rf"buffer of ({BUFFER_LENGTH_PATTERN}) ((?:(?:[A-Za-z][A-Za-z0-9_]*\.)*[A-Z][A-Za-z0-9_]*)|[a-z][a-z0-9_]*)", value)
+        buffer_match = re.fullmatch(rf"buffer of ({BUFFER_LENGTH_PATTERN}) ({TYPE_REF_PATTERN})", value)
         if buffer_match is not None:
             return BufferType(self._buffer_length(buffer_match.group(1), line), self._return_type(buffer_match.group(2), line))
-        array_match = re.fullmatch(rf"array of ({BUFFER_LENGTH_PATTERN}) ((?:(?:[A-Za-z][A-Za-z0-9_]*\.)*[A-Z][A-Za-z0-9_]*)|[a-z][a-z0-9_]*)", value)
+        array_match = re.fullmatch(rf"array of ({BUFFER_LENGTH_PATTERN}) ({TYPE_REF_PATTERN})", value)
         if array_match is not None:
             return ArrayType(self._buffer_length(array_match.group(1), line), self._return_type(array_match.group(2), line))
-        view_match = re.fullmatch(r"view of ([a-z][a-z0-9_]*)", value)
+        view_match = re.fullmatch(rf"view of ({TYPE_REF_PATTERN})", value)
         if view_match is not None:
-            return ViewType(self._type_name(view_match.group(1), line))
+            return ViewType(self._return_type(view_match.group(1), line))
         return self._return_type(value, line)
 
     def _buffer_length(self, value: str, line: int) -> int | Expr:
@@ -916,12 +957,12 @@ class Parser:
         if value.startswith("buffer of "):
             raise InscriptionError("buffer return types are not supported", line)
         if value.startswith("array of "):
-            match = re.fullmatch(rf"array of ({BUFFER_LENGTH_PATTERN}) ((?:(?:[A-Za-z][A-Za-z0-9_]*\.)*[A-Z][A-Za-z0-9_]*)|[a-z][a-z0-9_]*)", value)
+            match = re.fullmatch(rf"array of ({BUFFER_LENGTH_PATTERN}) ({TYPE_REF_PATTERN})", value)
             if match is None:
                 raise InscriptionError("malformed array type", line)
             return ArrayType(self._buffer_length(match.group(1), line), self._return_type(match.group(2), line))
         if value.startswith("view of "):
-            return ViewType(self._type_name(value[len("view of ") :].strip(), line))
+            return ViewType(self._return_type(value[len("view of ") :].strip(), line))
         if QUALIFIED_RECORD_NAME_RE.fullmatch(value):
             return RecordType(value)
         return self._type_name(value, line)
@@ -1144,13 +1185,23 @@ class ExpressionParser:
                 continue
             if self.peek() == "as" and "as" not in stop:
                 self.pop()
-                type_token = self.pop()
-                if type_token not in TYPE_NAMES:
-                    raise InscriptionError(f"unknown cast target type '{type_token}'", self.line)
-                expr = Cast(expr, type_token, self.line)  # type: ignore[arg-type]
+                expr = Cast(expr, self.parse_type_reference(), self.line)
                 continue
             break
         return expr
+
+
+    def parse_type_reference(self) -> ValueType:
+        parts = [self.pop()]
+        while self.pos + 1 < len(self.tokens) and self.tokens[self.pos] == "." and RECORD_NAME_RE.fullmatch(self.tokens[self.pos + 1]):
+            self.pop()
+            parts.append(self.pop())
+        type_name = ".".join(parts)
+        if type_name in TYPE_NAMES:
+            return type_name  # type: ignore[return-value]
+        if QUALIFIED_RECORD_NAME_RE.fullmatch(type_name):
+            return RecordType(type_name)
+        raise InscriptionError(f"unknown cast target type '{type_name}'", self.line)
 
     def parse_primary(self, stop: set[str]) -> Expr:
         token = self.peek()
@@ -1196,6 +1247,9 @@ class ExpressionParser:
         phrase_call = self.try_parse_phrase_call(stop)
         if phrase_call is not None:
             return phrase_call
+        enum_case = self.try_parse_enum_case()
+        if enum_case is not None:
+            return enum_case
         token = self.pop()
         if token == "check":
             raise InscriptionError("check is a step and cannot be used as an expression", self.line)
@@ -1228,6 +1282,22 @@ class ExpressionParser:
         if RECORD_NAME_RE.fullmatch(token):
             raise InscriptionError(f"invalid token near '{token}'", self.line)
         raise InscriptionError(f"unexpected token '{token}' in expression", self.line)
+
+
+    def try_parse_enum_case(self) -> EnumCase | None:
+        if self.at_end() or not RECORD_NAME_RE.fullmatch(self.tokens[self.pos]):
+            return None
+        saved = self.pos
+        parts = [self.pop()]
+        while self.pos + 1 < len(self.tokens) and self.tokens[self.pos] == "." and RECORD_NAME_RE.fullmatch(self.tokens[self.pos + 1]):
+            self.pop()
+            parts.append(self.pop())
+        if self.pos + 1 < len(self.tokens) and self.tokens[self.pos] == "." and NAME_RE.fullmatch(self.tokens[self.pos + 1]):
+            self.pop()
+            case_name = self.pop()
+            return EnumCase(".".join(parts), case_name, self.line)
+        self.pos = saved
+        return None
 
     def parse_record_constructor(self, stop: set[str]) -> RecordConstructor:
         type_name = self.pop()

@@ -1,0 +1,17 @@
+enum Mode: u8:
+  idle be 0
+  active be 1
+  failed be 2
+
+count active modes modes: view of Mode gives i32:
+  let total be 0
+  for each index i of modes:
+    if modes at i is equal to Mode.active:
+      total becomes total plus 1
+    otherwise:
+      total becomes total
+  total
+
+main gives i32:
+  let modes be array of 4 Mode containing Mode.idle, Mode.active, Mode.failed, Mode.active
+  count active modes modes

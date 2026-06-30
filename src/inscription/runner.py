@@ -11,7 +11,7 @@ from .ast import Program
 from .compiler import load_program
 from .diagnostics import InscriptionError
 from .mlir import emit_mlir
-from .semantic import INTEGER_TYPES, constant_table, format_type, function_table, record_table, resolve_function_table, validate_external_symbols
+from .semantic import INTEGER_TYPES, constant_table, enum_table, format_type, function_table, record_table, resolve_function_table, validate_external_symbols
 
 LOWERING_PASSES = [
     "--convert-scf-to-cf",
@@ -521,6 +521,7 @@ def validate_executable_main(program: Program) -> None:
 
 
 def _validate_main(program: Program, *, require_no_hole_main: bool) -> None:
+    enum_table(program)
     records = record_table(program)
     functions = function_table(program)
     constants = constant_table(program, records, functions)

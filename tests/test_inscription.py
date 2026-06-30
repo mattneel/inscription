@@ -1871,6 +1871,218 @@ class CompilerTests(unittest.TestCase):
             run = subprocess.run([str(executable)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False)
             self.assertEqual(run.returncode, 10, run.stderr)
 
+    def test_v023_enums_lower_to_underlying_integer_storage(self):
+        basic = compile_source(self.fixture("enum_basic.ins"))
+        self.assertIn("func.func @choose_mode(%mode: i8) -> i32", basic)
+        self.assertIn("arith.cmpi eq", basic)
+
+        casts = compile_source(self.fixture("enum_casts.ins"))
+        self.assertIn("arith.extui", casts)
+        self.assertIn("return %", casts)
+
+        constants = compile_source(self.fixture("enum_constants_checks.ins"))
+        self.assertIn("arith.constant 1 : i8", constants)
+        self.assertNotIn("check", constants)
+
+        storage = compile_source(self.fixture("enum_array_buffer_view.ins"))
+        self.assertIn("memref<4xi8>", storage)
+        self.assertIn("memref<?xi8>", storage)
+        self.assertIn("arith.cmpi eq", storage)
+
+        record = compile_source(self.fixture("enum_record_return.ins"))
+        self.assertIn("func.func @make_device() -> (i8, i8)", record)
+        self.assertIn("return %", record)
+
+        layout = compile_source(self.fixture("enum_layout_record.ins"))
+        self.assertIn("memref<2xi8>", layout)
+        self.assertIn("arith.cmpi eq", layout)
+
+        layout_write = compile_source(self.fixture("enum_layout_write.ins"))
+        self.assertIn("memref.store", layout_write)
+        self.assertIn("memref<2xi8>", layout_write)
+
+    def test_v023_module_enums_and_interface_json(self):
+        fixture = FIXTURES / "enum_module" / "main.ins"
+        mlir = compile_file(fixture, module_root=fixture.parent)
+        self.assertIn("func.func @Protocol__choose_mode(%mode: i8) -> i32", mlir)
+        self.assertIn("func.call @Protocol__choose_mode", mlir)
+        try:
+            result = run_file(fixture, module_root=fixture.parent)
+        except ToolchainError:
+            result = None
+        if result is not None:
+            self.assertEqual(result.exit_status, 7)
+
+        env = {**os.environ, "PYTHONPATH": str(SRC)}
+        enum_json = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "inscription",
+                "compile",
+                str(FIXTURES / "enum_basic.ins"),
+                "--emit",
+                "interface-json",
+            ],
+            cwd=ROOT,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(enum_json.returncode, 0, enum_json.stderr)
+        payload = json.loads(enum_json.stdout)
+        mode = payload["modules"][0]["enums"][0]
+        self.assertEqual(mode["name"], "Mode")
+        self.assertEqual(mode["kind"], "enum")
+        self.assertEqual(mode["underlying_type"], "u8")
+        self.assertEqual([case["name"] for case in mode["cases"]], ["idle", "active", "failed"])
+        self.assertEqual([case["value"] for case in mode["cases"]], [0, 1, 2])
+
+        layout_json = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "inscription",
+                "compile",
+                str(FIXTURES / "enum_layout_record.ins"),
+                "--emit",
+                "interface-json",
+            ],
+            cwd=ROOT,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(layout_json.returncode, 0, layout_json.stderr)
+        layout_payload = json.loads(layout_json.stdout)
+        header = layout_payload["modules"][0]["layout_records"][0]
+        self.assertEqual(header["name"], "Header")
+        self.assertEqual(header["size"], 2)
+        self.assertEqual([field["type"] for field in header["fields"]], ["Mode", "u8"])
+        self.assertEqual([field["offset"] for field in header["fields"]], [0, 1])
+
+        module_json = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "inscription",
+                "compile",
+                str(fixture),
+                "--emit",
+                "interface-json",
+            ],
+            cwd=ROOT,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(module_json.returncode, 0, module_json.stderr)
+        module_payload = json.loads(module_json.stdout)
+        protocol = next(module for module in module_payload["modules"] if module["name"] == "Protocol")
+        self.assertEqual(protocol["enums"][0]["name"], "Mode")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            wrapper = Path(tmp) / "enum_header_wrapper.ins"
+            wrapper.write_text(
+                "enum Mode: u8:\n"
+                "  idle be 0\n"
+                "  active be 1\n\n"
+                "export active value gives i32 as ins_active_value:\n"
+                "  Mode.active as i32\n"
+            )
+            header = subprocess.run(
+                [sys.executable, "-m", "inscription", "compile", str(wrapper), "--emit", "c-header"],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(header.returncode, 0, header.stderr)
+            self.assertIn("int32_t ins_active_value(void);", header.stdout)
+            root = Path(tmp) / "modules"
+            root.mkdir()
+            (root / "Protocol.ins").write_text("module Protocol\n\nenum Mode: u8:\n  active be 1\n")
+            (root / "Other.ins").write_text("module Other\n\nenum Mode: u8:\n  active be 1\n")
+            (root / "main.ins").write_text(
+                "import Protocol\n"
+                "import Other\n\n"
+                "use mode mode: Protocol.Mode gives i32:\n"
+                "  0\n\n"
+                "main gives i32:\n"
+                "  use mode Other.Mode.active\n"
+            )
+            with self.assertRaises(InscriptionError) as ctx:
+                compile_file(root / "main.ins", module_root=root)
+            self.assertIn("argument mode must have type Protocol.Mode, got Other.Mode", str(ctx.exception))
+
+    def test_v023_enum_artifacts(self):
+        env = {**os.environ, "PYTHONPATH": str(SRC)}
+        try:
+            resolve_toolchain()
+        except ToolchainError as exc:
+            self.skipTest(str(exc))
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            llvm_ir = tmp_path / "enum_basic.ll"
+            proc = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "inscription",
+                    "compile",
+                    str(FIXTURES / "enum_basic.ins"),
+                    "--emit",
+                    "llvm-ir",
+                    "--verify",
+                    "-o",
+                    str(llvm_ir),
+                ],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            self.assertIn("define i32 @main", llvm_ir.read_text())
+
+            try:
+                resolve_toolchain(require_executable=True)
+            except ToolchainError:
+                return
+            executable = tmp_path / "enum_basic"
+            exe_proc = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "inscription",
+                    "compile",
+                    str(FIXTURES / "enum_basic.ins"),
+                    "--emit",
+                    "executable",
+                    "-o",
+                    str(executable),
+                ],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(exe_proc.returncode, 0, exe_proc.stderr)
+            run = subprocess.run([str(executable)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False)
+            self.assertEqual(run.returncode, 7, run.stderr)
+
     @unittest.skipUnless(importlib.util.find_spec("pygments"), "Pygments is not installed")
     def test_cli_highlight_outputs_terminal_ansi(self):
         proc = subprocess.run(
@@ -1960,6 +2172,7 @@ class CompilerTests(unittest.TestCase):
                 "highlight new widths a: i8 and b: i16 and c: u64 gives u64:\n  c bitwise xor c\n",
                 "highlight floats x: f32 and y: f64 gives f64:\n  y plus (x as f64) plus 1.5e2\n",
                 "highlight arrays gives i32:\n  let numbers be array of 2 i32 containing 1, 2\n  length of numbers\n",
+                "enum HighlightMode: u8:\n  idle be 0\n  active be 1\n\nhighlight enum mode: HighlightMode gives i32:\n  Mode.active as i32\n",
             ]
         )
         html = highlight_source(source, output_format="html")
@@ -3217,6 +3430,82 @@ main gives i32:
             "view return type unsupported": (
                 "bad gives view of i32:\n  0\n",
                 "view return types are not supported",
+            ),
+            "duplicate enum name": (
+                "enum Mode: u8:\n  idle be 0\n\nenum Mode: u8:\n  active be 1\n",
+                "enum Mode is already defined",
+            ),
+            "enum collides with record": (
+                "record Mode:\n  value: u8\n\nenum Mode: u8:\n  idle be 0\n",
+                "enum Mode conflicts with record Mode",
+            ),
+            "enum unsupported underlying type": (
+                "enum Bad: f64:\n  value be 0\n",
+                "enum underlying type must be an integer type, got f64",
+            ),
+            "enum i1 underlying type": (
+                "enum Bad: i1:\n  no be false\n  yes be true\n",
+                "enum underlying type must be an integer type, got i1",
+            ),
+            "empty enum": (
+                "enum Empty: u8:\n",
+                "enum Empty must declare at least one case",
+            ),
+            "duplicate enum case name": (
+                "enum Mode: u8:\n  idle be 0\n  idle be 1\n",
+                "enum Mode has duplicate case idle",
+            ),
+            "duplicate enum case value": (
+                "enum Mode: u8:\n  idle be 0\n  inactive be 0\n",
+                "enum Mode has duplicate case value 0",
+            ),
+            "enum case value out of range": (
+                "enum Mode: u8:\n  invalid be 256\n",
+                "integer literal 256 is out of range for u8",
+            ),
+            "unknown enum case": (
+                "enum Mode: u8:\n  idle be 0\n\nbad gives i32:\n  Mode.active as i32\n",
+                "enum Mode has no case active",
+            ),
+            "unknown enum type": (
+                "bad gives i32:\n  Missing.active as i32\n",
+                "unknown type Missing",
+            ),
+            "enum arithmetic invalid": (
+                "enum Mode: u8:\n  idle be 0\n  active be 1\n\nbad gives u8:\n  Mode.idle plus Mode.active\n",
+                "plus requires numeric primitive operands, got Mode and Mode",
+            ),
+            "enum ordered comparison invalid": (
+                "enum Mode: u8:\n  idle be 0\n  active be 1\n\nbad gives i1:\n  Mode.active is greater than Mode.idle\n",
+                "ordered comparisons are not supported for enum Mode; cast to u8 first",
+            ),
+            "enum comparison mismatch": (
+                "enum Mode: u8:\n  idle be 0\n\nenum Status: u8:\n  idle be 0\n\nbad gives i1:\n  Mode.idle is equal to Status.idle\n",
+                "comparison requires matching enum types, got Mode and Status",
+            ),
+            "integer assigned to enum without cast": (
+                "enum Mode: u8:\n  idle be 0\n\nbad gives i32:\n  let mode: Mode be 0\n  0\n",
+                "let mode must have type Mode, got i32",
+            ),
+            "enum assigned to integer without cast": (
+                "enum Mode: u8:\n  idle be 0\n\nbad gives i32:\n  let value: u8 be Mode.idle\n  value as i32\n",
+                "let value must have type u8, got Mode",
+            ),
+            "enum as array index": (
+                "enum Index: u8:\n  zero be 0\n\nbad gives i32:\n  let cells be array of 1 i32 containing 7\n  cells at Index.zero\n",
+                "array index must be an integer type, got Index",
+            ),
+            "enum export parameter unsupported": (
+                "enum Mode: u8:\n  idle be 0\n\nexport set mode mode: Mode does as ins_set_mode:\n  require mode is equal to Mode.idle\n",
+                "exported phrase parameters must be primitive scalar types, got Mode",
+            ),
+            "enum extern parameter unsupported": (
+                "enum Mode: u8:\n  idle be 0\n\nextern host set mode mode: Mode does as host_set_mode\n",
+                "extern phrase parameters must be primitive scalar types, got Mode",
+            ),
+            "enum cast through wrong integer type": (
+                "enum Mode: u8:\n  idle be 0\n\nbad gives i32:\n  let value: i32 be 0\n  let mode: Mode be value as Mode\n  0\n",
+                "cannot cast i32 to Mode; cast to u8 first",
             ),
             "extern with body": (
                 "extern population count of x: i32 gives i32 as llvm.ctpop.i32:\n  x\n",

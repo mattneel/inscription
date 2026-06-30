@@ -33,6 +33,7 @@ class ImportDecl:
 @dataclass(frozen=True)
 class Program:
     records: tuple["RecordDecl", ...]
+    enums: tuple["EnumDecl", ...]
     constants: tuple["ConstantDecl", ...]
     checks: tuple["CheckStmt", ...]
     functions: tuple["Function", ...]
@@ -62,6 +63,21 @@ class LayoutInfo:
     alignment: int
     field_offsets: dict[str, int]
     padding_offsets: tuple[int, ...]
+
+
+@dataclass(frozen=True)
+class EnumCaseDecl:
+    name: str
+    value: "Expr"
+    line: int
+
+
+@dataclass(frozen=True)
+class EnumDecl:
+    name: str
+    underlying_type: TypeName
+    cases: tuple[EnumCaseDecl, ...]
+    line: int
 
 
 @dataclass(frozen=True)
@@ -121,7 +137,7 @@ class ArrayType:
 
 @dataclass(frozen=True)
 class ViewType:
-    element_type: TypeName
+    element_type: "ValueType"
     length: int | None = None
 
 
@@ -130,14 +146,20 @@ class RecordType:
     name: str
 
 
-ValueType = TypeName | BufferType | ArrayType | ViewType | RecordType
-ReturnType = TypeName | RecordType | ArrayType | ViewType | None
+@dataclass(frozen=True)
+class EnumType:
+    name: str
+    underlying_type: TypeName
+
+
+ValueType = TypeName | BufferType | ArrayType | ViewType | RecordType | EnumType
+ReturnType = TypeName | RecordType | ArrayType | ViewType | EnumType | None
 
 
 @dataclass(frozen=True)
 class ConstantDecl:
     name: str
-    type_name: TypeName
+    type_name: ValueType
     expr: "Expr"
     line: int
 
@@ -182,6 +204,13 @@ class FieldAccess:
 
 
 @dataclass(frozen=True)
+class EnumCase:
+    type_name: str
+    case_name: str
+    line: int
+
+
+@dataclass(frozen=True)
 class RecordFieldInit:
     name: str
     expr: "Expr"
@@ -221,7 +250,7 @@ class Unary:
 @dataclass(frozen=True)
 class Cast:
     expr: "Expr"
-    target_type: TypeName
+    target_type: "ValueType"
     line: int
 
 
@@ -265,6 +294,7 @@ Expr = (
     | AlignmentOfType
     | OffsetOfField
     | FieldAccess
+    | EnumCase
     | RecordConstructor
     | LayoutRead
     | Unary

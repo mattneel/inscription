@@ -19,6 +19,8 @@ from .ast import (
     Cast,
     CheckStmt,
     Comparison,
+    EnumCase,
+    EnumType,
     Expr,
     FieldAccess,
     FieldAssignStmt,
@@ -57,6 +59,7 @@ from .semantic import (
     byte_width,
     CompileTimeEvaluationError,
     constant_table,
+    enum_table,
     evaluate_const_expr,
     function_table,
     infer_comparison_operand_type,
@@ -71,6 +74,7 @@ from .semantic import (
     resolve_array_type,
     resolve_buffer_type,
     resolve_function_table,
+    storage_type,
     type_width,
 )
 
@@ -78,7 +82,7 @@ from .semantic import (
 @dataclass(frozen=True)
 class Value:
     name: str
-    type_name: TypeName
+    type_name: ValueType
 
 
 @dataclass(frozen=True)
@@ -98,7 +102,7 @@ class ViewStorage:
     base: str
     start: Value
     length: Value
-    element_type: TypeName
+    element_type: ValueType
     static_length: int | None
     root: str
 
@@ -121,7 +125,7 @@ class RecordStorage:
 class CarrySlot:
     name: str
     field: str | None
-    type_name: TypeName
+    type_name: ValueType
 
     @property
     def label(self) -> str:
@@ -137,7 +141,7 @@ class CallArg:
 
 
 EnvValue = Value | BufferStorage | ArrayStorage | ViewStorage | RecordStorage
-ConstantKey = tuple[str, int | bool | float, TypeName]
+ConstantKey = tuple[str, int | bool | float, ValueType]
 
 
 def mlir_value_type(type_name: ValueType) -> str:
@@ -164,7 +168,7 @@ def mlir_env_value_type(value: "EnvValue") -> str:
     return mlir_type(value.type_name)
 
 
-def dynamic_memref_type(element_type: TypeName) -> str:
+def dynamic_memref_type(element_type: ValueType) -> str:
     return f"memref<?x{mlir_type(element_type)}>"
 
 
@@ -176,6 +180,7 @@ def emit_mlir(program: Program, *, runtime_checks: bool = False) -> str:
 
 class MlirEmitter:
     def __init__(self, program: Program, *, runtime_checks: bool = False):
+        self.enums = enum_table(program)
         self.records = record_table(program)
         raw_functions = function_table(program)
         self.top_constants = constant_table(program, self.records, raw_functions)
@@ -275,7 +280,6 @@ class MlirEmitter:
                 continue
             if isinstance(param.type_name, RecordType):
                 for field in self.record_fields(param.type_name):
-                    assert isinstance(field.type_name, str)
                     args.append(f"%{param.name}_{field.name}: {mlir_type(field.type_name)}")
                 continue
             args.append(f"%{param.name}: {mlir_type(param.type_name)}")
@@ -294,7 +298,6 @@ class MlirEmitter:
                 continue
             if isinstance(param.type_name, RecordType):
                 for field in self.record_fields(param.type_name):
-                    assert isinstance(field.type_name, str)
                     args.append(mlir_type(field.type_name))
                 continue
             args.append(mlir_type(param.type_name))
@@ -304,7 +307,7 @@ class MlirEmitter:
         return RecordStorage(
             record_type,
             {
-                field.name: Value(f"%{name}_{field.name}", field.type_name)  # type: ignore[arg-type]
+                field.name: Value(f"%{name}_{field.name}", field.type_name)
                 for field in self.record_fields(record_type)
             },
         )
@@ -415,7 +418,7 @@ class MlirEmitter:
         lines: list[str],
         indent: str,
         *,
-        expected: TypeName | None = None,
+        expected: ValueType | None = None,
     ) -> Value:
         env_types = self.env_types(env)
         type_name = infer_expr_type(
@@ -431,6 +434,9 @@ class MlirEmitter:
             return self.emit_float(float(expr.text), type_name, lines, indent)
         if isinstance(expr, Boolean):
             return self.emit_boolean(expr.value, lines, indent)
+        if isinstance(expr, EnumCase):
+            info = self.enums[expr.type_name]
+            return self.emit_integer(info.cases[expr.case_name], type_name, lines, indent)
         if isinstance(expr, Variable):
             if expr.name in self.top_constants:
                 return self.emit_const_value(self.top_constants[expr.name], lines, indent)
@@ -483,7 +489,7 @@ class MlirEmitter:
             return self.emit_when_expr(expr, env, lines, indent, type_name)
         raise AssertionError(expr)  # pragma: no cover
 
-    def emit_unary(self, expr: Unary, env: dict[str, EnvValue], lines: list[str], indent: str, type_name: TypeName) -> Value:
+    def emit_unary(self, expr: Unary, env: dict[str, EnvValue], lines: list[str], indent: str, type_name: ValueType) -> Value:
         if expr.op == "not":
             operand = self.emit_expr(expr.expr, env, lines, indent, expected="i1")
             true = self.emit_boolean(True, lines, indent)
@@ -498,7 +504,7 @@ class MlirEmitter:
             return out
         raise AssertionError(expr)  # pragma: no cover
 
-    def emit_binary(self, expr: Binary, env: dict[str, EnvValue], lines: list[str], indent: str, type_name: TypeName) -> Value:
+    def emit_binary(self, expr: Binary, env: dict[str, EnvValue], lines: list[str], indent: str, type_name: ValueType) -> Value:
         operand_type = "i1" if expr.op in {"and", "or"} else type_name
         left = self.emit_expr(expr.left, env, lines, indent, expected=operand_type)
         right = self.emit_expr(expr.right, env, lines, indent, expected=operand_type)
@@ -507,7 +513,7 @@ class MlirEmitter:
         lines.append(f"{indent}{out.name} = arith.{op} {left.name}, {right.name} : {mlir_type(type_name)}")
         return out
 
-    def binary_mlir_op(self, op: str, type_name: TypeName) -> str:
+    def binary_mlir_op(self, op: str, type_name: ValueType) -> str:
         if op == "plus":
             return "addf" if is_float_type(type_name) else "addi"
         if op == "minus":
@@ -532,11 +538,18 @@ class MlirEmitter:
             return "shrsi" if is_signed_type(type_name) else "shrui"
         raise AssertionError(op)  # pragma: no cover
 
-    def emit_cast(self, expr: Cast, env: dict[str, EnvValue], lines: list[str], indent: str, target_type: TypeName) -> Value:
-        source = self.emit_expr(expr.expr, env, lines, indent)
+    def emit_cast(self, expr: Cast, env: dict[str, EnvValue], lines: list[str], indent: str, target_type: ValueType) -> Value:
+        source_expected: ValueType | None = None
+        if isinstance(target_type, EnumType) and isinstance(expr.expr, Integer):
+            source_expected = target_type.underlying_type
+        source = self.emit_expr(expr.expr, env, lines, indent, expected=source_expected)
         source_type = source.type_name
         if source_type == target_type:
             return Value(source.name, target_type)
+        if isinstance(target_type, EnumType):
+            if source_type == target_type.underlying_type:
+                return Value(source.name, target_type)
+            raise AssertionError(f"unsupported cast {source_type} to {target_type}")
         if is_float_type(source_type) or is_float_type(target_type):
             out = Value(self.fresh(), target_type)
             if is_integer_type(source_type) and is_float_type(target_type):
@@ -563,7 +576,7 @@ class MlirEmitter:
         lines.append(f"{indent}{out.name} = arith.{op} {source.name} : {mlir_type(source_type)} to {mlir_type(target_type)}")
         return out
 
-    def emit_integer(self, value: int, type_name: TypeName, lines: list[str], indent: str) -> Value:
+    def emit_integer(self, value: int, type_name: ValueType, lines: list[str], indent: str) -> Value:
         key: ConstantKey = ("int", value, type_name)
         cached = self.constants.get(key)
         if cached is not None:
@@ -768,7 +781,7 @@ class MlirEmitter:
         self,
         name: str,
         source_type: str,
-        element_type: TypeName,
+        element_type: ValueType,
         lines: list[str],
         indent: str,
     ) -> str:
@@ -816,7 +829,6 @@ class MlirEmitter:
         base = self.emit_storage_index(buffer, expr.index, env, lines, indent, check_width=info.size)
         fields: dict[str, Value] = {}
         for field in record.fields:
-            assert isinstance(field.type_name, str)
             offset = info.field_offsets[field.name]
             fields[field.name] = self.emit_layout_field_read(buffer, base, offset, field.type_name, lines, indent)
         return RecordStorage(expected, fields)
@@ -826,7 +838,7 @@ class MlirEmitter:
         buffer: BufferStorage | ArrayStorage | ViewStorage,
         base: str,
         offset: int,
-        type_name: TypeName,
+        type_name: ValueType,
         lines: list[str],
         indent: str,
     ) -> Value:
@@ -863,7 +875,6 @@ class MlirEmitter:
         base = self.emit_storage_index(buffer, stmt.index, env, lines, indent, check_width=info.size)
         field_bytes: dict[int, tuple[str, int]] = {}
         for field in record_decl.fields:
-            assert isinstance(field.type_name, str)
             field_offset = info.field_offsets[field.name]
             for byte_index in range(byte_width(field.type_name)):
                 field_bytes[field_offset + byte_index] = (field.name, byte_index)
@@ -914,7 +925,6 @@ class MlirEmitter:
         if isinstance(expr, RecordConstructor):
             fields: dict[str, Value] = {}
             for initializer, field in zip(expr.fields, self.record_fields(expected), strict=True):
-                assert isinstance(field.type_name, str)
                 fields[field.name] = self.emit_expr(initializer.expr, env, lines, indent, expected=field.type_name)
             return RecordStorage(expected, fields)
         if isinstance(expr, LayoutRead):
@@ -925,7 +935,6 @@ class MlirEmitter:
             args = self.emit_call_arguments(expr, target, env, lines, indent)
             fields = self.record_fields(expected)
             result_types = [field.type_name for field in fields]
-            assert all(isinstance(type_name, str) for type_name in result_types)
             result_base = self.fresh()
             assignment = f"{result_base}:{len(fields)} = " if len(fields) > 1 else f"{result_base} = "
             arg_values = ", ".join(arg.name for arg in args)
@@ -937,7 +946,7 @@ class MlirEmitter:
             return RecordStorage(
                 expected,
                 {
-                    field.name: Value(result_base if len(fields) == 1 else f"{result_base}#{index}", field.type_name)  # type: ignore[arg-type]
+                    field.name: Value(result_base if len(fields) == 1 else f"{result_base}#{index}", field.type_name)
                     for index, field in enumerate(fields)
                 },
             )
@@ -1002,7 +1011,7 @@ class MlirEmitter:
         return RecordStorage(
             record_type,
             {
-                field.name: Value(result_base if len(fields) == 1 else f"{result_base}#{index}", field.type_name)  # type: ignore[arg-type]
+                field.name: Value(result_base if len(fields) == 1 else f"{result_base}#{index}", field.type_name)
                 for index, field in enumerate(fields)
             },
         )
@@ -1154,7 +1163,7 @@ class MlirEmitter:
         return out
 
     def emit_when_expr(
-        self, expr: WhenExpr, env: dict[str, EnvValue], lines: list[str], indent: str, type_name: TypeName
+        self, expr: WhenExpr, env: dict[str, EnvValue], lines: list[str], indent: str, type_name: ValueType
     ) -> Value:
         return self.emit_when_cases(list(expr.cases), expr.otherwise, env, lines, indent, type_name)
 
@@ -1165,7 +1174,7 @@ class MlirEmitter:
         env: dict[str, EnvValue],
         lines: list[str],
         indent: str,
-        type_name: TypeName,
+        type_name: ValueType,
     ) -> Value:
         if not cases:
             return self.emit_expr(otherwise, env, lines, indent, expected=type_name)
@@ -1193,7 +1202,7 @@ class MlirEmitter:
         lines.append(f"{indent}{out.name} = arith.{op} {pred}, {left.name}, {right.name} : {mlir_type(type_name)}")
         return out
 
-    def comparison_predicate(self, pred: str, type_name: TypeName) -> str:
+    def comparison_predicate(self, pred: str, type_name: ValueType) -> str:
         if is_float_type(type_name):
             return {"eq": "oeq", "ne": "one", "slt": "olt", "sle": "ole", "sgt": "ogt", "sge": "oge"}[pred]
         if pred in {"eq", "ne"} or is_signed_type(type_name):
@@ -1260,7 +1269,7 @@ class MlirEmitter:
         stmt: WhileStmt,
         env: dict[str, EnvValue],
         carried_slots: list[CarrySlot],
-        carried_types: list[TypeName],
+        carried_types: list[ValueType],
         lines: list[str],
         indent: str,
     ) -> None:
@@ -1276,7 +1285,7 @@ class MlirEmitter:
         stmt: WhileStmt,
         env: dict[str, EnvValue],
         carried_slots: list[CarrySlot],
-        carried_types: list[TypeName],
+        carried_types: list[ValueType],
         lines: list[str],
         indent: str,
     ) -> None:
@@ -1406,7 +1415,7 @@ class MlirEmitter:
         body: tuple[BodyStmt, ...],
         env: dict[str, EnvValue],
         carried_slots: list[CarrySlot],
-        carried_types: list[TypeName],
+        carried_types: list[ValueType],
         iv: str,
         lines: list[str],
         indent: str,
@@ -1460,7 +1469,7 @@ class MlirEmitter:
         body: tuple[BodyStmt, ...],
         env: dict[str, EnvValue],
         result_slots: list[CarrySlot],
-        result_types: list[TypeName],
+        result_types: list[ValueType],
         lines: list[str],
         indent: str,
     ) -> None:
@@ -1588,7 +1597,7 @@ class MlirEmitter:
             raise AssertionError("non-storage used where indexable storage was expected")  # pragma: no cover
         return value
 
-    def storage_element_type(self, value: BufferStorage | ArrayStorage | ViewStorage) -> TypeName:
+    def storage_element_type(self, value: BufferStorage | ArrayStorage | ViewStorage) -> ValueType:
         if isinstance(value, BufferStorage):
             return value.buffer_type.element_type
         if isinstance(value, ArrayStorage):
@@ -1613,22 +1622,21 @@ class MlirEmitter:
     def call_symbol(self, fn: Function) -> str:
         return fn.extern_symbol or fn.name
 
-    def return_types(self, return_type: TypeName | RecordType) -> list[TypeName]:
+    def return_types(self, return_type: ValueType | RecordType) -> list[ValueType]:
         if isinstance(return_type, RecordType):
-            result: list[TypeName] = []
+            result: list[ValueType] = []
             for field in self.record_fields(return_type):
-                assert isinstance(field.type_name, str)
                 result.append(field.type_name)
             return result
         return [return_type]
 
-    def return_type_list(self, return_type: TypeName | RecordType) -> str:
+    def return_type_list(self, return_type: ValueType | RecordType) -> str:
         return self.result_type_list(self.return_types(return_type))
 
-    def type_list(self, types: list[TypeName]) -> str:
+    def type_list(self, types: list[ValueType]) -> str:
         return ", ".join(mlir_type(type_name) for type_name in types)
 
-    def result_type_list(self, types: list[TypeName]) -> str:
+    def result_type_list(self, types: list[ValueType]) -> str:
         if len(types) == 1:
             return mlir_type(types[0])
         return f"({self.type_list(types)})"

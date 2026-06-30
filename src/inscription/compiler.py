@@ -20,6 +20,8 @@ from .ast import (
     CheckStmt,
     Comparison,
     ConstantDecl,
+    EnumCase,
+    EnumDecl,
     Expr,
     FieldAccess,
     FieldAssignStmt,
@@ -235,29 +237,35 @@ def prefix_template_for_import(template: PhraseTemplate, module_name: str) -> Ph
 
 def combine_programs(modules: list[LoadedModule], entry: Program) -> Program:
     records: list[RecordDecl] = []
+    enums: list[EnumDecl] = []
     constants: list[ConstantDecl] = []
     checks: list[CheckStmt] = []
     functions: list[Function] = []
     for module in modules:
         records.extend(module.program.records)
+        enums.extend(module.program.enums)
         constants.extend(module.program.constants)
         checks.extend(module.program.checks)
         functions.extend(module.program.functions)
     records.extend(entry.records)
+    enums.extend(entry.enums)
     constants.extend(entry.constants)
     checks.extend(entry.checks)
     functions.extend(entry.functions)
-    return Program(tuple(records), tuple(constants), tuple(checks), tuple(functions), entry.module_name, entry.imports)
+    return Program(tuple(records), tuple(enums), tuple(constants), tuple(checks), tuple(functions), entry.module_name, entry.imports)
 
 
 def qualify_imported_program(program: Program, module_name: str) -> Program:
     record_names = {record.name for record in program.records}
+    enum_names = {enum.name for enum in program.enums}
+    type_names = record_names | enum_names
     constant_names = {constant.name for constant in program.constants}
-    records = tuple(qualify_record_decl(record, module_name, record_names) for record in program.records)
-    constants = tuple(qualify_constant(constant, module_name, record_names, constant_names) for constant in program.constants)
-    checks = tuple(qualify_stmt(check, module_name, record_names, constant_names) for check in program.checks)
-    functions = tuple(qualify_function(function, module_name, record_names, constant_names) for function in program.functions)
-    return Program(records, constants, checks, functions, program.module_name, program.imports)
+    records = tuple(qualify_record_decl(record, module_name, type_names) for record in program.records)
+    enums = tuple(qualify_enum_decl(enum, module_name, type_names, constant_names) for enum in program.enums)
+    constants = tuple(qualify_constant(constant, module_name, type_names, constant_names) for constant in program.constants)
+    checks = tuple(qualify_stmt(check, module_name, type_names, constant_names) for check in program.checks)
+    functions = tuple(qualify_function(function, module_name, type_names, constant_names) for function in program.functions)
+    return Program(records, enums, constants, checks, functions, program.module_name, program.imports)
 
 
 def qname(module_name: str, name: str) -> str:
@@ -277,6 +285,15 @@ def qualify_record_decl(record: RecordDecl, module_name: str, record_names: set[
     )
 
 
+def qualify_enum_decl(enum: EnumDecl, module_name: str, type_names: set[str], constant_names: set[str]) -> EnumDecl:
+    return EnumDecl(
+        qname(module_name, enum.name),
+        enum.underlying_type,
+        tuple(type(case)(case.name, qualify_expr(case.value, module_name, type_names, constant_names), case.line) for case in enum.cases),
+        enum.line,
+    )
+
+
 def qualify_constant(
     constant: ConstantDecl,
     module_name: str,
@@ -285,7 +302,7 @@ def qualify_constant(
 ) -> ConstantDecl:
     return ConstantDecl(
         qname(module_name, constant.name),
-        constant.type_name,
+        qualify_type(constant.type_name, module_name, record_names, constant_names),
         qualify_expr(constant.expr, module_name, record_names, constant_names),
         constant.line,
     )
@@ -315,7 +332,7 @@ def qualify_type(type_name: ValueType, module_name: str, record_names: set[str],
     if isinstance(type_name, ArrayType):
         return ArrayType(qualify_buffer_length(type_name.length, module_name, record_names, constant_names), qualify_type(type_name.element_type, module_name, record_names, constant_names))
     if isinstance(type_name, ViewType):
-        return type_name
+        return ViewType(qualify_type(type_name.element_type, module_name, record_names, constant_names), type_name.length)
     if isinstance(type_name, RecordType) and type_name.name in record_names:
         return RecordType(qname(module_name, type_name.name))
     return type_name
@@ -324,6 +341,8 @@ def qualify_type(type_name: ValueType, module_name: str, record_names: set[str],
 def qualify_return_type(type_name, module_name: str, record_names: set[str]):
     if isinstance(type_name, ArrayType):
         return ArrayType(qualify_buffer_length(type_name.length, module_name, record_names, set()), qualify_return_type(type_name.element_type, module_name, record_names))
+    if isinstance(type_name, ViewType):
+        return ViewType(qualify_return_type(type_name.element_type, module_name, record_names), type_name.length)
     if isinstance(type_name, RecordType) and type_name.name in record_names:
         return RecordType(qname(module_name, type_name.name))
     return type_name
@@ -415,6 +434,11 @@ def qualify_expr(expr: Expr, module_name: str, record_names: set[str], constant_
         return OffsetOfField(expr.field, qname(module_name, expr.type_name) if expr.type_name in record_names else expr.type_name, expr.line)
     if isinstance(expr, FieldAccess):
         return expr
+    if isinstance(expr, EnumCase):
+        parts = expr.type_name.split(".")
+        if len(parts) == 1 and expr.type_name in record_names:
+            return EnumCase(qname(module_name, expr.type_name), expr.case_name, expr.line)
+        return expr
     if isinstance(expr, RecordConstructor):
         return RecordConstructor(
             qname(module_name, expr.type_name) if expr.type_name in record_names else expr.type_name,
@@ -428,7 +452,7 @@ def qualify_expr(expr: Expr, module_name: str, record_names: set[str], constant_
     if isinstance(expr, Unary):
         return Unary(expr.op, qualify_expr(expr.expr, module_name, record_names, constant_names), expr.line)
     if isinstance(expr, Cast):
-        return Cast(qualify_expr(expr.expr, module_name, record_names, constant_names), expr.target_type, expr.line)
+        return Cast(qualify_expr(expr.expr, module_name, record_names, constant_names), qualify_type(expr.target_type, module_name, record_names, constant_names), expr.line)
     if isinstance(expr, Call):
         return Call(expr.name, tuple(qualify_expr(arg, module_name, record_names, constant_names) for arg in expr.args), expr.line)
     if isinstance(expr, Comparison):

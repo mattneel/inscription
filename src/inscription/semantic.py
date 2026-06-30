@@ -22,6 +22,9 @@ from .ast import (
     CheckStmt,
     Comparison,
     ConstantDecl,
+    EnumCase,
+    EnumDecl,
+    EnumType,
     Expr,
     FieldAccess,
     FieldAssignStmt,
@@ -101,9 +104,51 @@ class Binding:
 
 @dataclass(frozen=True)
 class ConstValue:
-    type_name: TypeName
+    type_name: ValueType
     value: int | bool | float
 
+
+
+@dataclass(frozen=True)
+class EnumInfo:
+    name: str
+    underlying_type: TypeName
+    cases: dict[str, int]
+    case_order: tuple[str, ...]
+    line: int
+
+
+ACTIVE_ENUMS: dict[str, EnumInfo] = {}
+
+
+def enum_type_for_name(name: str) -> EnumType | None:
+    info = ACTIVE_ENUMS.get(name)
+    if info is None:
+        return None
+    return EnumType(info.name, info.underlying_type)
+
+
+def is_enum_type(type_name: ValueType | None) -> bool:
+    return isinstance(type_name, EnumType)
+
+
+def storage_type(type_name: ValueType) -> ValueType:
+    return type_name.underlying_type if isinstance(type_name, EnumType) else type_name
+
+
+
+def resolve_named_value_type(type_name: ValueType) -> ValueType:
+    if isinstance(type_name, BufferType):
+        return BufferType(type_name.length, resolve_named_value_type(type_name.element_type))
+    if isinstance(type_name, ArrayType):
+        return ArrayType(type_name.length, resolve_named_value_type(type_name.element_type))
+    if isinstance(type_name, ViewType):
+        return ViewType(resolve_named_value_type(type_name.element_type), type_name.length)
+    if isinstance(type_name, RecordType):
+        enum_type = enum_type_for_name(type_name.name)
+        if enum_type is not None:
+            return enum_type
+    return type_name
 
 class CompileTimeEvaluationError(Exception):
     def __init__(self, message: str, line: int | None = None):
@@ -112,6 +157,7 @@ class CompileTimeEvaluationError(Exception):
 
 
 def analyze(program: Program) -> None:
+    enum_table(program)
     records = record_table(program)
     functions = function_table(program)
     constants = constant_table(program, records, functions)
@@ -126,33 +172,116 @@ def analyze(program: Program) -> None:
         _check_function(fn, functions, records, constants)
 
 
+def enum_table(program: Program) -> dict[str, EnumInfo]:
+    global ACTIVE_ENUMS
+    ACTIVE_ENUMS = {}
+    record_names = {record.name for record in program.records}
+    constant_names = {constant.name for constant in program.constants}
+    enums: dict[str, EnumInfo] = {}
+    for enum in program.enums:
+        if enum.name in SCALAR_TYPES:
+            raise InscriptionError(f"enum {enum.name} conflicts with scalar type {enum.name}", enum.line)
+        if enum.name in enums:
+            raise InscriptionError(f"enum {enum.name} is already defined", enum.line)
+        if enum.name in record_names:
+            raise InscriptionError(f"enum {enum.name} conflicts with record {enum.name}", enum.line)
+        if enum.name in constant_names:
+            raise InscriptionError(f"enum {enum.name} conflicts with constant {enum.name}", enum.line)
+        if enum.underlying_type not in INTEGER_TYPES:
+            raise InscriptionError(
+                f"enum underlying type must be an integer type, got {format_type(enum.underlying_type)}", enum.line
+            )
+        if not enum.cases:
+            raise InscriptionError(f"enum {enum.name} must declare at least one case", enum.line)
+        case_constants = _primitive_constants_before_enum(program, enum.line)
+        cases: dict[str, int] = {}
+        values: dict[int, str] = {}
+        for case in enum.cases:
+            if case.name in cases:
+                raise InscriptionError(f"enum {enum.name} has duplicate case {case.name}", case.line)
+            try:
+                value = evaluate_const_expr(
+                    case.value,
+                    _constant_env_types(case_constants),
+                    {},
+                    {},
+                    case_constants,
+                    expected=enum.underlying_type,
+                )
+            except CompileTimeEvaluationError as exc:
+                raise InscriptionError(f"enum case {case.name} must be compile-time evaluable", exc.line or case.line) from exc
+            if value.type_name != enum.underlying_type:
+                raise InscriptionError(
+                    f"enum case {case.name} must have type {enum.underlying_type}, got {format_type(value.type_name)}", case.line
+                )
+            int_value = int(value.value)
+            if int_value in values:
+                raise InscriptionError(f"enum {enum.name} has duplicate case value {int_value}", case.line)
+            cases[case.name] = int_value
+            values[int_value] = case.name
+        enums[enum.name] = EnumInfo(enum.name, enum.underlying_type, cases, tuple(cases), enum.line)
+    ACTIVE_ENUMS = enums
+    return enums
+
+
+def _primitive_constants_before_enum(program: Program, enum_line: int) -> dict[str, ConstValue]:
+    """Evaluate earlier primitive scalar constants for enum case expressions.
+
+    The main constant table needs enum metadata, but enum case values are
+    themselves compile-time expressions. This narrow prepass preserves the
+    existing declaration-order rule for constants while allowing simple integer
+    constants declared before an enum to be used as case values.
+    """
+
+    constants: dict[str, ConstValue] = {}
+    for const in sorted(program.constants, key=lambda item: item.line):
+        if const.line >= enum_line:
+            continue
+        if not isinstance(const.type_name, str) or const.type_name not in SCALAR_TYPES:
+            continue
+        env = _constant_env_types(constants)
+        try:
+            value = evaluate_const_expr(const.expr, env, {}, {}, constants, expected=const.type_name)
+        except (CompileTimeEvaluationError, InscriptionError):
+            continue
+        if value.type_name == const.type_name:
+            constants[const.name] = value
+    return constants
+
+
 def record_table(program: Program) -> dict[str, RecordDecl]:
     records: dict[str, RecordDecl] = {}
     for record in program.records:
         if record.name in SCALAR_TYPES:
             raise InscriptionError(f"record name {record.name} collides with scalar type", record.line)
+        if record.name in ACTIVE_ENUMS:
+            raise InscriptionError(f"record {record.name} conflicts with enum {record.name}", record.line)
         if record.name in records:
             raise InscriptionError(f"record {record.name} is already defined", record.line)
         if not record.fields:
             prefix = "record" if record.layout_kind == "value" else "layout record"
             raise InscriptionError(f"{prefix} {record.name} must declare at least one field", record.line)
         seen_fields: set[str] = set()
+        resolved_fields = []
         for field in record.fields:
             if field.name in seen_fields:
                 prefix = "record" if record.layout_kind == "value" else "layout record"
                 raise InscriptionError(f"{prefix} {record.name} has duplicate field {field.name}", field.line)
             seen_fields.add(field.name)
+            field_type = resolve_named_value_type(field.type_name)
             if record.layout_kind == "value":
-                if not isinstance(field.type_name, str) or field.type_name not in SCALAR_TYPES:
+                if not (isinstance(field_type, str) and field_type in SCALAR_TYPES) and not isinstance(field_type, EnumType):
                     raise InscriptionError(
-                        f"record fields must be scalar types, got {format_type(field.type_name)}", field.line
+                        f"record fields must be scalar types, got {format_type(field_type)}", field.line
                     )
-            elif not isinstance(field.type_name, str) or field.type_name not in INTEGER_TYPES:
+            elif not ((isinstance(field_type, str) and field_type in INTEGER_TYPES) or isinstance(field_type, EnumType)):
                 raise InscriptionError(
-                    f"layout record fields must be integer types, got {format_type(field.type_name)}", field.line
+                    f"layout record fields must be integer types, got {format_type(field_type)}", field.line
                 )
-        layout_info = compute_layout_info(record) if record.layout_kind != "value" else None
-        records[record.name] = RecordDecl(record.name, record.fields, record.line, record.layout_kind, layout_info)
+            resolved_fields.append(type(field)(field.name, field_type, field.line))
+        resolved_record = RecordDecl(record.name, tuple(resolved_fields), record.line, record.layout_kind)
+        layout_info = compute_layout_info(resolved_record) if record.layout_kind != "value" else None
+        records[record.name] = RecordDecl(record.name, tuple(resolved_fields), record.line, record.layout_kind, layout_info)
     return records
 
 
@@ -225,11 +354,14 @@ def constant_table(
             raise InscriptionError(f"constant {const.name} conflicts with scalar type {const.name}", const.line)
         if const.name in records:
             raise InscriptionError(f"constant {const.name} conflicts with record {const.name}", const.line)
-        if const.type_name not in SCALAR_TYPES:
+        if const.name in ACTIVE_ENUMS:
+            raise InscriptionError(f"constant {const.name} conflicts with enum {const.name}", const.line)
+        resolved_type = resolve_value_type(const.type_name, const.line, records, constants, functions, {})
+        if not (isinstance(resolved_type, str) and resolved_type in SCALAR_TYPES) and not isinstance(resolved_type, EnumType):
             raise InscriptionError(f"constant {const.name} must have a scalar type", const.line)
         env = _constant_env_types(constants)
         try:
-            value = evaluate_const_expr(const.expr, env, functions, records, constants, expected=const.type_name)
+            value = evaluate_const_expr(const.expr, env, functions, records, constants, expected=resolved_type)
         except CompileTimeEvaluationError as exc:
             raise InscriptionError(f"constant {const.name} must be compile-time evaluable", exc.line or const.line) from exc
         except InscriptionError as exc:
@@ -246,11 +378,11 @@ def constant_table(
             except InscriptionError:
                 raise exc
             raise InscriptionError(
-                f"constant {const.name} must have type {const.type_name}, got {format_type(actual)}", const.line
+                f"constant {const.name} must have type {format_type(resolved_type)}, got {format_type(actual)}", const.line
             ) from exc
-        if value.type_name != const.type_name:
+        if value.type_name != resolved_type:
             raise InscriptionError(
-                f"constant {const.name} must have type {const.type_name}, got {format_type(value.type_name)}", const.line
+                f"constant {const.name} must have type {format_type(resolved_type)}, got {format_type(value.type_name)}", const.line
             )
         constants[const.name] = value
     return constants
@@ -276,7 +408,9 @@ def resolve_function_table(
     return resolved
 
 
-def mlir_type(type_name: TypeName) -> str:
+def mlir_type(type_name: ValueType) -> str:
+    type_name = storage_type(type_name)
+    assert isinstance(type_name, str)
     if type_name.startswith("u"):
         return f"i{TYPE_WIDTHS[type_name]}"
     return type_name
@@ -292,8 +426,10 @@ def format_type(type_name: ValueType) -> str:
     if isinstance(type_name, ArrayType):
         return f"array of {type_name.length} {format_type(type_name.element_type)}"
     if isinstance(type_name, ViewType):
-        return f"view of {type_name.element_type}"
+        return f"view of {format_type(type_name.element_type)}"
     if isinstance(type_name, RecordType):
+        return type_name.name
+    if isinstance(type_name, EnumType):
         return type_name.name
     return type_name
 
@@ -310,15 +446,20 @@ def is_numeric_type(type_name: ValueType | None) -> bool:
     return type_name in NUMERIC_TYPES
 
 
-def is_signed_type(type_name: TypeName) -> bool:
+def is_signed_type(type_name: ValueType) -> bool:
+    type_name = storage_type(type_name)
     return type_name in SIGNED_INTEGER_TYPES
 
 
-def type_width(type_name: TypeName) -> int:
+def type_width(type_name: ValueType) -> int:
+    type_name = storage_type(type_name)
+    assert isinstance(type_name, str)
     return TYPE_WIDTHS[type_name]
 
 
-def byte_width(type_name: TypeName) -> int:
+def byte_width(type_name: ValueType) -> int:
+    type_name = storage_type(type_name)
+    assert isinstance(type_name, str)
     return TYPE_WIDTHS[type_name] // 8
 
 
@@ -332,7 +473,6 @@ def compute_layout_info(record: RecordDecl) -> LayoutInfo:
     field_offsets: dict[str, int] = {}
     occupied: set[int] = set()
     for field in record.fields:
-        assert isinstance(field.type_name, str)
         field_size = byte_width(field.type_name)
         field_alignment = 1 if record.layout_kind == "packed" else field_size
         alignment = max(alignment, field_alignment)
@@ -418,37 +558,41 @@ def _check_function(
         raise InscriptionError(f"phrase '{fn.name}' must evaluate to a value", fn.line)
 
 
+def _primitive_abi_type_message(prefix: str, type_name: ValueType) -> str:
+    wording = "primitive scalar types" if isinstance(resolve_named_value_type(type_name), EnumType) else "scalar types"
+    return f"{prefix} must be {wording}, got {format_type(type_name)}"
+
+
 def _check_extern_function(fn: Function, records: dict[str, RecordDecl]) -> None:
     if fn.body:
         raise InscriptionError("extern phrase declarations cannot have bodies", fn.line)
     for param in fn.params:
         if not isinstance(param.type_name, str) or param.type_name not in SCALAR_TYPES:
             raise InscriptionError(
-                f"extern phrase parameters must be scalar types, got {format_type(param.type_name)}",
+                _primitive_abi_type_message("extern phrase parameters", param.type_name),
                 fn.line,
             )
     if fn.return_type is not None and (not isinstance(fn.return_type, str) or fn.return_type not in SCALAR_TYPES):
-        if isinstance(fn.return_type, RecordType) and fn.return_type.name not in records:
+        if isinstance(fn.return_type, RecordType) and fn.return_type.name not in records and enum_type_for_name(fn.return_type.name) is None:
             raise InscriptionError(f"unknown type {fn.return_type.name}", fn.line)
         raise InscriptionError(
-            f"extern phrase return types must be scalar types, got {format_type(fn.return_type)}",
+            _primitive_abi_type_message("extern phrase return types", fn.return_type),
             fn.line,
         )
-
 
 
 def _check_exported_function(fn: Function, records: dict[str, RecordDecl]) -> None:
     for param in fn.params:
         if not isinstance(param.type_name, str) or param.type_name not in SCALAR_TYPES:
             raise InscriptionError(
-                f"exported phrase parameters must be scalar types, got {format_type(param.type_name)}",
+                _primitive_abi_type_message("exported phrase parameters", param.type_name),
                 fn.line,
             )
     if fn.return_type is not None and (not isinstance(fn.return_type, str) or fn.return_type not in SCALAR_TYPES):
-        if isinstance(fn.return_type, RecordType) and fn.return_type.name not in records:
+        if isinstance(fn.return_type, RecordType) and fn.return_type.name not in records and enum_type_for_name(fn.return_type.name) is None:
             raise InscriptionError(f"unknown type {fn.return_type.name}", fn.line)
         raise InscriptionError(
-            f"exported phrase return types must be scalar types, got {format_type(fn.return_type)}",
+            _primitive_abi_type_message("exported phrase return types", fn.return_type),
             fn.line,
         )
 
@@ -499,6 +643,8 @@ def _check_parameter_type(
         if type_name.name not in records:
             raise InscriptionError(f"unknown type {type_name.name}", line)
         return
+    if isinstance(type_name, EnumType):
+        return
     if type_name not in SCALAR_TYPES:
         raise InscriptionError("supported scalar types are i1, i8, i16, i32, i64, u8, u16, u32, u64, f32, and f64", line)
 
@@ -514,19 +660,19 @@ def _check_buffer_type(
     resolved = resolve_buffer_type(buffer_type, line, records, constants, functions, env)
     if resolved.length < 1:
         raise InscriptionError("buffer length must be at least 1", line)
-    if not is_numeric_type(resolved.element_type):
+    if not is_numeric_type(resolved.element_type) and not isinstance(resolved.element_type, EnumType):
         raise InscriptionError(f"buffer element type must be an integer type, got {format_type(resolved.element_type)}", line)
 
 
 def _check_array_type(array_type: ArrayType, line: int) -> None:
     if array_type.length < 1:
         raise InscriptionError("buffer length must be at least 1", line)
-    if not is_numeric_type(array_type.element_type):
+    if not is_numeric_type(array_type.element_type) and not isinstance(array_type.element_type, EnumType):
         raise InscriptionError(f"array element type must be numeric, got {format_type(array_type.element_type)}", line)
 
 
 def _check_view_type(view_type: ViewType, line: int) -> None:
-    if view_type.element_type not in NUMERIC_TYPES:
+    if not is_numeric_type(view_type.element_type) and not isinstance(view_type.element_type, EnumType):
         raise InscriptionError(f"view element type must be an integer type, got {format_type(view_type.element_type)}", line)
 
 
@@ -614,8 +760,8 @@ def _declare_let(
         resolved_declared_type = resolve_value_type(stmt.type_name, stmt.line, records, constants, functions, _env_types(bindings))
         if isinstance(resolved_declared_type, ArrayType):
             raise InscriptionError("array type annotations are not supported in v0.22", stmt.line)
-        if isinstance(stmt.type_name, RecordType) and stmt.type_name.name not in records:
-            raise InscriptionError(f"unknown type {stmt.type_name.name}", stmt.line)
+        if isinstance(resolved_declared_type, RecordType) and resolved_declared_type.name not in records:
+            raise InscriptionError(f"unknown type {resolved_declared_type.name}", stmt.line)
         actual = _infer_declared_type(stmt.expr, resolved_declared_type, _env_types(bindings), functions, records, constants)
         if actual != resolved_declared_type:
             raise InscriptionError(
@@ -637,7 +783,6 @@ def _declare_buffer(
     _check_no_shadow(stmt.name, stmt.line, bindings, kind="buffer")
     buffer_type = resolve_buffer_type(stmt.buffer_type, stmt.line, records, constants, functions, _env_types(bindings))
     _check_buffer_type(buffer_type, stmt.line, records, constants, functions, _env_types(bindings))
-    assert isinstance(buffer_type.element_type, str)
     if stmt.values:
         if len(stmt.values) != buffer_type.length:
             raise InscriptionError(f"buffer {stmt.name} expects {buffer_type.length} elements, got {len(stmt.values)}", stmt.line)
@@ -645,7 +790,7 @@ def _declare_buffer(
             actual = _infer_declared_type(value, buffer_type.element_type, _env_types(bindings), functions, records, constants)
             if actual != buffer_type.element_type:
                 raise InscriptionError(
-                    f"buffer {stmt.name} element {index} must have type {buffer_type.element_type}, got {format_type(actual)}",
+                    f"buffer {stmt.name} element {index} must have type {format_type(buffer_type.element_type)}, got {format_type(actual)}",
                     getattr(value, "line", stmt.line),
                 )
     else:
@@ -653,7 +798,7 @@ def _declare_buffer(
         actual = _infer_declared_type(stmt.fill, buffer_type.element_type, _env_types(bindings), functions, records, constants)
         if actual != buffer_type.element_type:
             raise InscriptionError(
-                f"buffer {stmt.name} fill must have type {buffer_type.element_type}, got {format_type(actual)}", stmt.line
+                f"buffer {stmt.name} fill must have type {format_type(buffer_type.element_type)}, got {format_type(actual)}", stmt.line
             )
     bindings[stmt.name] = Binding(buffer_type, "buffer", stmt.line, root=stmt.name)
 
@@ -668,7 +813,6 @@ def _declare_array(
     _check_no_shadow(stmt.name, stmt.line, bindings, kind="array")
     array_type = resolve_array_type(stmt.array_type, stmt.line, records, constants, functions, _env_types(bindings))
     _check_array_type(array_type, stmt.line)
-    assert isinstance(array_type.element_type, str)
     if stmt.values:
         if len(stmt.values) != array_type.length:
             raise InscriptionError(f"array {stmt.name} expects {array_type.length} elements, got {len(stmt.values)}", stmt.line)
@@ -676,7 +820,7 @@ def _declare_array(
             actual = _infer_declared_type(value, array_type.element_type, _env_types(bindings), functions, records, constants)
             if actual != array_type.element_type:
                 raise InscriptionError(
-                    f"array {stmt.name} element {index} must have type {array_type.element_type}, got {format_type(actual)}",
+                    f"array {stmt.name} element {index} must have type {format_type(array_type.element_type)}, got {format_type(actual)}",
                     getattr(value, "line", stmt.line),
                 )
     else:
@@ -684,7 +828,7 @@ def _declare_array(
         actual = _infer_declared_type(stmt.fill, array_type.element_type, _env_types(bindings), functions, records, constants)
         if actual != array_type.element_type:
             raise InscriptionError(
-                f"array {stmt.name} fill must have type {array_type.element_type}, got {format_type(actual)}", stmt.line
+                f"array {stmt.name} fill must have type {format_type(array_type.element_type)}, got {format_type(actual)}", stmt.line
             )
     bindings[stmt.name] = Binding(array_type, "array", stmt.line, writable=False, root=stmt.name)
 
@@ -727,7 +871,6 @@ def _declare_view(
                 stmt.line,
             )
     element_type = source.type_name.element_type
-    assert isinstance(element_type, str)
     bindings[stmt.name] = Binding(
         ViewType(element_type, static_count),
         "view",
@@ -784,11 +927,10 @@ def _check_buffer_store(
             raise InscriptionError(f"cannot store through read-only view {stmt.name}", stmt.line)
         raise InscriptionError(f"cannot store to read-only buffer parameter {stmt.name}", stmt.line)
     _check_storage_index(stmt.name, storage_type, stmt.index, _env_types(bindings), functions, records, constants)
-    assert isinstance(storage_type.element_type, str)
     actual = _infer_declared_type(stmt.value, storage_type.element_type, _env_types(bindings), functions, records, constants)
     if actual != storage_type.element_type:
         raise InscriptionError(
-            f"store to {stmt.name} must have type {storage_type.element_type}, got {format_type(actual)}", stmt.line
+            f"store to {stmt.name} must have type {format_type(storage_type.element_type)}, got {format_type(actual)}", stmt.line
         )
 
 
@@ -804,7 +946,7 @@ def _check_field_assignment(
     actual = _infer_declared_type(stmt.expr, field_type, _env_types(bindings), functions, records, constants)
     if actual != field_type:
         raise InscriptionError(
-            f"field {stmt.field} of {record_type.name} must have type {field_type}, got {format_type(actual)}", stmt.line
+            f"field {stmt.field} of {record_type.name} must have type {format_type(field_type)}, got {format_type(actual)}", stmt.line
         )
 
 
@@ -1016,8 +1158,11 @@ def _check_call_arguments(
             continue
         actual = _infer_call_scalar_argument_type(arg, expected, env, functions, records)
         if actual != expected:
+            argument_name = _argument_name(arg)
+            if argument_name == "argument":
+                argument_name = param.name
             raise InscriptionError(
-                f"argument {_argument_name(arg)} must have type {format_type(expected)}, got {format_type(actual)}",
+                f"argument {argument_name} must have type {format_type(expected)}, got {format_type(actual)}",
                 getattr(arg, "line", call.line),
             )
 
@@ -1052,8 +1197,11 @@ def _check_call_argument_types(
             continue
         actual = _infer_call_scalar_argument_type(arg, expected, env, functions, records)
         if actual != expected:
+            argument_name = _argument_name(arg)
+            if argument_name == "argument":
+                argument_name = param.name
             raise InscriptionError(
-                f"argument {_argument_name(arg)} must have type {format_type(expected)}, got {format_type(actual)}",
+                f"argument {argument_name} must have type {format_type(expected)}, got {format_type(actual)}",
                 getattr(arg, "line", call.line),
             )
 
@@ -1156,7 +1304,7 @@ def _require_record_argument(
 
 def _infer_call_scalar_argument_type(
     arg: Expr,
-    expected: TypeName,
+    expected: ValueType,
     env: dict[str, ValueType],
     functions: dict[str, Function],
     records: dict[str, RecordDecl],
@@ -1165,7 +1313,7 @@ def _infer_call_scalar_argument_type(
         actual = env.get(arg.name)
         if isinstance(actual, BufferType | ArrayType | ViewType | RecordType):
             return actual
-    return infer_expr_type(arg, env, functions, records, expected=expected)
+    return _infer_declared_type(arg, expected, env, functions, records)
 
 
 def _argument_name(arg: Expr) -> str:
@@ -1228,11 +1376,13 @@ def resolve_value_type(
     functions: dict[str, Function],
     env: dict[str, ValueType],
 ) -> ValueType:
+    type_name = resolve_named_value_type(type_name)
     if isinstance(type_name, BufferType):
         return resolve_buffer_type(type_name, line, records, constants, functions, env)
     if isinstance(type_name, ArrayType):
         return resolve_array_type(type_name, line, records, constants, functions, env)
     if isinstance(type_name, ViewType):
+        type_name = ViewType(resolve_value_type(type_name.element_type, line, records, constants, functions, env), type_name.length)
         _check_view_type(type_name, line)
         return type_name
     return type_name
@@ -1247,7 +1397,7 @@ def resolve_buffer_type(
     env: dict[str, ValueType],
 ) -> BufferType:
     length = evaluate_buffer_length(buffer_type.length, line, records, constants, functions, env)
-    return BufferType(length, buffer_type.element_type)
+    return BufferType(length, resolve_value_type(buffer_type.element_type, line, records, constants, functions, env))
 
 
 def resolve_array_type(
@@ -1259,7 +1409,7 @@ def resolve_array_type(
     env: dict[str, ValueType],
 ) -> ArrayType:
     length = evaluate_buffer_length(array_type.length, line, records, constants, functions, env)
-    return ArrayType(length, array_type.element_type)
+    return ArrayType(length, resolve_value_type(array_type.element_type, line, records, constants, functions, env))
 
 
 def evaluate_buffer_length(
@@ -1338,19 +1488,30 @@ def evaluate_const_expr(
     expected: ValueType | None = None,
 ) -> ConstValue:
     type_name = infer_expr_type(expr, env, functions, records, expected=expected, constants=constants)
-    if not isinstance(type_name, str):
+    if isinstance(type_name, RecordType | BufferType | ArrayType | ViewType):
         raise CompileTimeEvaluationError("record value is not compile-time evaluable", getattr(expr, "line", None))
 
     if isinstance(expr, Integer):
         if is_float_type(type_name) and expr.is_word_zero:
+            assert isinstance(type_name, str)
             return ConstValue(type_name, normalize_float(0.0, type_name))
-        assert is_integer_type(type_name)
+        assert isinstance(type_name, str) and is_integer_type(type_name)
         return ConstValue(type_name, normalize_integer(expr.value, type_name))
     if isinstance(expr, Float):
-        assert is_float_type(type_name)
+        assert isinstance(type_name, str) and is_float_type(type_name)
         return ConstValue(type_name, normalize_float(parse_float_literal(expr.text, expr.line), type_name))
     if isinstance(expr, Boolean):
         return ConstValue("i1", expr.value)
+    if isinstance(expr, EnumCase):
+        info = ACTIVE_ENUMS.get(expr.type_name)
+        if info is None:
+            raise InscriptionError(f"unknown type {expr.type_name}", expr.line)
+        if expr.case_name not in info.cases:
+            raise InscriptionError(f"enum {expr.type_name} has no case {expr.case_name}", expr.line)
+        enum_type = EnumType(info.name, info.underlying_type)
+        if expected is not None and enum_type != expected:
+            require_type(enum_type, expected, expr.line)
+        return ConstValue(enum_type, info.cases[expr.case_name])
     if isinstance(expr, Variable):
         if expr.name in constants:
             value = constants[expr.name]
@@ -1384,14 +1545,33 @@ def evaluate_const_expr(
             return value
         raise CompileTimeEvaluationError("expression is not compile-time evaluable", expr.line)
     if isinstance(expr, Cast):
+        target_type = infer_cast_type(expr, env, functions, records)
+        if isinstance(target_type, EnumType):
+            source = evaluate_const_expr(expr.expr, env, functions, records, constants, expected=target_type.underlying_type if isinstance(expr.expr, Integer) else None)
+            if isinstance(source.type_name, EnumType):
+                if source.type_name != target_type:
+                    raise InscriptionError(
+                        f"cannot cast {format_type(source.type_name)} to {format_type(target_type)}; cast through {source.type_name.underlying_type} first",
+                        expr.line,
+                    )
+                return ConstValue(target_type, int(source.value))
+            if source.type_name != target_type.underlying_type:
+                raise InscriptionError(
+                    f"cannot cast {format_type(source.type_name)} to {format_type(target_type)}; cast to {target_type.underlying_type} first",
+                    expr.line,
+                )
+            return ConstValue(target_type, int(source.value))
         source = evaluate_const_expr(expr.expr, env, functions, records, constants)
-        return ConstValue(expr.target_type, cast_const_value(source.value, source.type_name, expr.target_type))
+        source_type = source.type_name.underlying_type if isinstance(source.type_name, EnumType) else source.type_name
+        assert isinstance(source_type, str) and isinstance(target_type, str)
+        return ConstValue(target_type, cast_const_value(source.value, source_type, target_type))
     if isinstance(expr, Unary):
         operand_expected = "i1" if expr.op == "not" else type_name
         operand = evaluate_const_expr(expr.expr, env, functions, records, constants, expected=operand_expected)
         if expr.op == "not":
             return ConstValue("i1", not bool(operand.value))
         if expr.op == "bitwise not":
+            assert isinstance(type_name, str)
             return ConstValue(type_name, normalize_integer(~to_bits(int(operand.value), type_name), type_name))
     if isinstance(expr, Binary):
         if expr.op in {"and", "or"}:
@@ -1400,6 +1580,7 @@ def evaluate_const_expr(
             return ConstValue("i1", bool(left.value) and bool(right.value) if expr.op == "and" else bool(left.value) or bool(right.value))
         left = evaluate_const_expr(expr.left, env, functions, records, constants, expected=type_name)
         right = evaluate_const_expr(expr.right, env, functions, records, constants, expected=type_name)
+        assert isinstance(type_name, str)
         return ConstValue(type_name, evaluate_numeric_binary(expr.op, left.value, right.value, type_name, expr.line))
     if isinstance(expr, Comparison):
         operand_type = infer_comparison_operand_type(expr, env, functions, records)
@@ -1529,7 +1710,9 @@ def evaluate_numeric_binary(op: str, left: int | bool | float, right: int | bool
     return evaluate_integer_binary(op, int(left), int(right), type_name, line)
 
 
-def evaluate_comparison(pred: str, left: int | bool | float, right: int | bool | float, type_name: TypeName) -> bool:
+def evaluate_comparison(pred: str, left: int | bool | float, right: int | bool | float, type_name: ValueType) -> bool:
+    type_name = storage_type(type_name)
+    assert isinstance(type_name, str)
     if is_float_type(type_name):
         lhs = float(left)
         rhs = float(right)
@@ -1578,11 +1761,9 @@ def infer_expr_type(
     if isinstance(expr, Integer):
         if expected is not None:
             if is_float_type(expected) and expr.is_word_zero:
-                assert isinstance(expected, str)
                 return expected
             if not is_integer_type(expected):
                 raise InscriptionError(f"integer literal cannot have type {format_type(expected)}", expr.line)
-            assert isinstance(expected, str)
             _check_integer_literal_range(expr.value, expected, expr.line)
             return expected
         _check_integer_literal_range(expr.value, "i32", expr.line)
@@ -1591,7 +1772,6 @@ def infer_expr_type(
         if expected is not None:
             if not is_float_type(expected):
                 raise InscriptionError(f"floating literal cannot have type {format_type(expected)}", expr.line)
-            assert isinstance(expected, str)
             normalize_float(parse_float_literal(expr.text, expr.line), expected)
             return expected
         normalize_float(parse_float_literal(expr.text, expr.line), "f64")
@@ -1600,6 +1780,16 @@ def infer_expr_type(
         if expected is not None:
             require_type("i1", expected, expr.line)
         return "i1"
+    if isinstance(expr, EnumCase):
+        info = ACTIVE_ENUMS.get(expr.type_name)
+        if info is None:
+            raise InscriptionError(f"unknown type {expr.type_name}", expr.line)
+        if expr.case_name not in info.cases:
+            raise InscriptionError(f"enum {expr.type_name} has no case {expr.case_name}", expr.line)
+        actual = EnumType(info.name, info.underlying_type)
+        if expected is not None:
+            require_type(actual, expected, expr.line)
+        return actual
     if isinstance(expr, Variable):
         actual = constants[expr.name].type_name if expr.name in constants and expr.name not in env else _lookup_binding_type(expr.name, expr.line, env)
         if isinstance(actual, BufferType):
@@ -1616,14 +1806,12 @@ def infer_expr_type(
                 expr.line,
             )
         if expected is not None:
-            assert isinstance(expected, str)
             require_type(actual, expected, expr.line)
         return actual
     if isinstance(expr, BufferLoad):
         buffer_type = _require_indexable_type(expr.name, expr.line, env)
         _check_storage_index(expr.name, buffer_type, expr.index, env, functions, records, constants)
         if expected is not None:
-            assert isinstance(expected, str)
             require_type(buffer_type.element_type, expected, expr.line)
         return buffer_type.element_type
     if isinstance(expr, LengthOf):
@@ -1637,19 +1825,16 @@ def infer_expr_type(
         if binding_type.length is not None and binding_type.length > INTEGER_RANGES["i32"][1]:
             raise InscriptionError(f"buffer length {binding_type.length} does not fit in i32", expr.line)
         if expected is not None:
-            assert isinstance(expected, str)
             require_type("i32", expected, expr.line)
         return "i32"
     if isinstance(expr, SizeOfType):
         _require_layout_record_decl(expr.type_name, expr.line, records, f"size of {expr.type_name}")
         if expected is not None:
-            assert isinstance(expected, str)
             require_type("i32", expected, expr.line)
         return "i32"
     if isinstance(expr, AlignmentOfType):
         _require_layout_record_decl(expr.type_name, expr.line, records, f"alignment of {expr.type_name}")
         if expected is not None:
-            assert isinstance(expected, str)
             require_type("i32", expected, expr.line)
         return "i32"
     if isinstance(expr, OffsetOfField):
@@ -1657,7 +1842,6 @@ def infer_expr_type(
         if expr.field not in layout_info(record).field_offsets:
             raise InscriptionError(f"layout record {expr.type_name} has no field {expr.field}", expr.line)
         if expected is not None:
-            assert isinstance(expected, str)
             require_type("i32", expected, expr.line)
         return "i32"
     if isinstance(expr, FieldAccess):
@@ -1665,13 +1849,11 @@ def infer_expr_type(
         if expr.name not in env and qualified_constant in constants:
             actual = constants[qualified_constant].type_name
             if expected is not None:
-                assert isinstance(expected, str)
                 require_type(actual, expected, expr.line)
             return actual
         record_type = _require_record_type(expr.name, expr.line, env)
         field_type = _require_record_field(record_type, expr.field, expr.line, records)
         if expected is not None:
-            assert isinstance(expected, str)
             require_type(field_type, expected, expr.line)
         return field_type
     if isinstance(expr, RecordConstructor):
@@ -1701,7 +1883,6 @@ def infer_expr_type(
     if isinstance(expr, Comparison):
         infer_comparison_operand_type(expr, env, functions, records)
         if expected is not None:
-            assert isinstance(expected, str)
             require_type("i1", expected, expr.line)
         return "i1"
     if isinstance(expr, WhenExpr):
@@ -1740,7 +1921,6 @@ def infer_unary_type(
         if actual != "i1":
             raise InscriptionError(f"not requires i1 operand, got {format_type(actual)}", expr.line)
         if expected is not None:
-            assert isinstance(expected, str)
             require_type("i1", expected, expr.line)
         return "i1"
     if expr.op == "bitwise not":
@@ -1749,7 +1929,6 @@ def infer_unary_type(
         if not is_integer_type(actual):
             raise InscriptionError(f"bitwise not requires integer operand, got {format_type(actual)}", expr.line)
         if expected is not None:
-            assert isinstance(expected, str)
             require_type(actual, expected, expr.line)
         return actual
     raise AssertionError(expr)  # pragma: no cover
@@ -1762,19 +1941,53 @@ def infer_cast_type(
     records: dict[str, RecordDecl],
     *,
     expected: ValueType | None = None,
-) -> TypeName:
+) -> ValueType:
+    target_type = resolve_named_value_type(expr.target_type)
+    if isinstance(target_type, RecordType):
+        raise InscriptionError(f"cannot cast to {format_type(target_type)}", expr.line)
+
+    if isinstance(target_type, EnumType):
+        if isinstance(expr.expr, Integer):
+            source_type = infer_expr_type(expr.expr, env, functions, records, expected=target_type.underlying_type)
+        else:
+            source_type = infer_expr_type(expr.expr, env, functions, records)
+        if isinstance(source_type, EnumType):
+            if source_type == target_type:
+                if expected is not None:
+                    require_type(target_type, expected, expr.line)
+                return target_type
+            raise InscriptionError(
+                f"cannot cast {format_type(source_type)} to {format_type(target_type)}; cast through {source_type.underlying_type} first",
+                expr.line,
+            )
+        if source_type == target_type.underlying_type:
+            if expected is not None:
+                require_type(target_type, expected, expr.line)
+            return target_type
+        raise InscriptionError(
+            f"cannot cast {format_type(source_type)} to {format_type(target_type)}; cast to {target_type.underlying_type} first",
+            expr.line,
+        )
+
     source_type = infer_expr_type(expr.expr, env, functions, records)
-    target_type = expr.target_type
+    if isinstance(source_type, EnumType):
+        if not isinstance(target_type, str) or target_type == "i1" or is_float_type(target_type):
+            raise InscriptionError(f"cannot cast {format_type(source_type)} to {format_type(target_type)}", expr.line)
+        if not is_integer_type(target_type):
+            raise InscriptionError(f"cannot cast {format_type(source_type)} to {format_type(target_type)}", expr.line)
+        if expected is not None:
+            require_type(target_type, expected, expr.line)
+        return target_type
     if (
         (source_type == "i1" and is_float_type(target_type))
         or (is_float_type(source_type) and target_type == "i1")
         or (not isinstance(source_type, str))
+        or (not isinstance(target_type, str))
         or (not is_integer_type(source_type) and not is_float_type(source_type))
         or (not is_integer_type(target_type) and not is_float_type(target_type))
     ):
-        raise InscriptionError(f"cannot cast {source_type} to {target_type}", expr.line)
+        raise InscriptionError(f"cannot cast {format_type(source_type)} to {format_type(target_type)}", expr.line)
     if expected is not None:
-        assert isinstance(expected, str)
         require_type(target_type, expected, expr.line)
     return target_type
 
@@ -1795,7 +2008,6 @@ def infer_binary_type(
                 f"{expr.op} requires i1 operands, got {format_type(left_type)} and {format_type(right_type)}", expr.line
             )
         if expected is not None:
-            assert isinstance(expected, str)
             require_type("i1", expected, expr.line)
         return "i1"
 
@@ -1889,6 +2101,8 @@ def infer_numeric_pair_type(
         right_type = infer_numeric_operand_type(right, env, functions, records, expected=left_type if is_numeric_type(left_type) else None)  # type: ignore[arg-type]
 
     if not is_numeric_type(left_type) or not is_numeric_type(right_type):
+        if isinstance(left_type, EnumType) or isinstance(right_type, EnumType):
+            raise InscriptionError(f"{op} requires numeric primitive operands, got {format_type(left_type)} and {format_type(right_type)}", line)
         if not is_float_type(left_type) and not is_float_type(right_type):
             raise InscriptionError(f"{op} requires integer operands, got {format_type(left_type)} and {format_type(right_type)}", line)
         raise InscriptionError(f"{op} requires numeric operands, got {format_type(left_type)} and {format_type(right_type)}", line)
@@ -1946,8 +2160,8 @@ def infer_integer_pair_type(
 
 def infer_comparison_operand_type(
     condition: Comparison, env: dict[str, ValueType], functions: dict[str, Function], records: dict[str, RecordDecl]
-) -> TypeName:
-    return infer_comparison_pair_type(condition.left, condition.right, env, functions, records, condition.line)
+) -> ValueType:
+    return infer_comparison_pair_type(condition.left, condition.right, env, functions, records, condition.line, condition.pred)
 
 
 def infer_comparison_pair_type(
@@ -1957,16 +2171,27 @@ def infer_comparison_pair_type(
     functions: dict[str, Function],
     records: dict[str, RecordDecl],
     line: int,
-) -> TypeName:
-    if _is_numeric_literal(left) and not _is_numeric_literal(right):
-        right_type = infer_expr_type(right, env, functions, records)
-        left_type = infer_numeric_operand_type(left, env, functions, records, expected=right_type if is_numeric_type(right_type) else None)  # type: ignore[arg-type]
-    elif _is_numeric_literal(right) and not _is_numeric_literal(left):
-        left_type = infer_expr_type(left, env, functions, records)
-        right_type = infer_numeric_operand_type(right, env, functions, records, expected=left_type if is_numeric_type(left_type) else None)  # type: ignore[arg-type]
+    pred: str,
+) -> ValueType:
+    left_type = infer_expr_type(left, env, functions, records)
+    if _is_numeric_literal(right) and is_numeric_type(left_type):
+        right_type = infer_numeric_operand_type(right, env, functions, records, expected=left_type)  # type: ignore[arg-type]
     else:
-        left_type = infer_expr_type(left, env, functions, records)
-        right_type = infer_numeric_operand_type(right, env, functions, records, expected=left_type if is_numeric_type(left_type) else None)  # type: ignore[arg-type]
+        right_type = infer_expr_type(right, env, functions, records)
+    if _is_numeric_literal(left) and is_numeric_type(right_type):
+        left_type = infer_numeric_operand_type(left, env, functions, records, expected=right_type)  # type: ignore[arg-type]
+
+    if isinstance(left_type, EnumType) or isinstance(right_type, EnumType):
+        if not isinstance(left_type, EnumType) or not isinstance(right_type, EnumType) or left_type != right_type:
+            raise InscriptionError(
+                f"comparison requires matching enum types, got {format_type(left_type)} and {format_type(right_type)}", line
+            )
+        if pred not in {"eq", "ne"}:
+            raise InscriptionError(
+                f"ordered comparisons are not supported for enum {format_type(left_type)}; cast to {left_type.underlying_type} first",
+                line,
+            )
+        return left_type
 
     if not is_numeric_type(left_type) or not is_numeric_type(right_type):
         if not is_float_type(left_type) and not is_float_type(right_type):
@@ -1984,7 +2209,6 @@ def infer_comparison_pair_type(
         raise InscriptionError(
             f"comparison requires matching numeric types, got {format_type(left_type)} and {format_type(right_type)}", line
         )
-    assert isinstance(left_type, str)
     return left_type
 
 
@@ -2061,12 +2285,11 @@ def _require_layout_record_decl(
     return record
 
 
-def _require_record_field(record_type: RecordType, field: str, line: int, records: dict[str, RecordDecl]) -> TypeName:
+def _require_record_field(record_type: RecordType, field: str, line: int, records: dict[str, RecordDecl]) -> ValueType:
     record = _record_decl(record_type, line, records)
     for field_decl in record.fields:
         if field_decl.name == field:
-            assert isinstance(field_decl.type_name, str)
-            return field_decl.type_name
+                return field_decl.type_name
     raise InscriptionError(f"record {record_type.name} has no field {field}", line)
 
 
@@ -2098,11 +2321,10 @@ def infer_record_constructor_type(
             )
         raise InscriptionError(f"record {record.name} initializer requires fields {', '.join(expected_names)}", expr.line)
     for initializer, field_decl in zip(expr.fields, record.fields, strict=True):
-        assert isinstance(field_decl.type_name, str)
         actual = _infer_declared_type(initializer.expr, field_decl.type_name, env, functions, records)
         if actual != field_decl.type_name:
             raise InscriptionError(
-                f"field {initializer.name} of {record.name} must have type {field_decl.type_name}, got {format_type(actual)}",
+                f"field {initializer.name} of {record.name} must have type {format_type(field_decl.type_name)}, got {format_type(actual)}",
                 initializer.line,
             )
     return record_type
@@ -2183,7 +2405,7 @@ def _check_array_index(
     index_type = infer_expr_type(index, env, functions, records)
     if not is_integer_type(index_type):
         raise InscriptionError(
-            f"buffer index must be an integer type, got {format_type(index_type)}", getattr(index, "line", None)
+            f"array index must be an integer type, got {format_type(index_type)}", getattr(index, "line", None)
         )
 
 

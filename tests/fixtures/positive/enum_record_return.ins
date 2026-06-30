@@ -1,0 +1,15 @@
+enum Mode: u8:
+  idle be 0
+  active be 1
+
+record Device:
+  mode: Mode
+  code: u8
+
+make device gives Device:
+  Device with mode be Mode.active and code be 5
+
+main gives i32:
+  let device be make device
+  device.code as i32 when device.mode is equal to Mode.active
+  otherwise 0

@@ -1,0 +1,9 @@
+module Protocol
+
+enum Mode: u8:
+  idle be 0
+  active be 1
+
+choose mode mode: Mode gives i32:
+  7 when mode is equal to Mode.active
+  otherwise 3
