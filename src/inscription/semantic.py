@@ -107,6 +107,7 @@ def analyze(program: Program) -> None:
     functions = function_table(program)
     constants = constant_table(program, records, functions)
     functions = resolve_function_table(functions, records, constants)
+    validate_external_symbols(functions)
     for check in program.checks:
         _check_compile_time_check(check, {}, functions, records, constants)
     main = functions.get("main")
@@ -150,6 +151,8 @@ def function_table(program: Program) -> dict[str, Function]:
     functions: dict[str, Function] = {}
     for fn in program.functions:
         if fn.name in functions:
+            if fn.extern_symbol is not None or functions[fn.name].extern_symbol is not None:
+                raise InscriptionError(f"phrase `{fn.display_name}` is already defined", fn.line)
             raise InscriptionError(f"duplicate phrase '{fn.name}'", fn.line)
         functions[fn.name] = fn
         seen_params: set[str] = set()
@@ -158,6 +161,24 @@ def function_table(program: Program) -> dict[str, Function]:
                 raise InscriptionError(f"duplicate parameter '{param.name}'", fn.line)
             seen_params.add(param.name)
     return functions
+
+
+def validate_external_symbols(functions: dict[str, Function]) -> None:
+    externs: dict[str, tuple[tuple[ValueType, ...], ValueType | None]] = {}
+    normal_symbols = {fn.name for fn in functions.values() if fn.extern_symbol is None}
+    for fn in functions.values():
+        if fn.extern_symbol is None:
+            continue
+        if fn.extern_symbol == "main" or fn.extern_symbol in normal_symbols:
+            raise InscriptionError(
+                f"external symbol {fn.extern_symbol} conflicts with generated function {fn.extern_symbol}",
+                fn.line,
+            )
+        signature = (tuple(param.type_name for param in fn.params), fn.return_type)
+        existing = externs.get(fn.extern_symbol)
+        if existing is not None and existing != signature:
+            raise InscriptionError(f"external symbol {fn.extern_symbol} declared with incompatible types", fn.line)
+        externs[fn.extern_symbol] = signature
 
 
 def constant_table(
@@ -220,7 +241,7 @@ def resolve_function_table(
             if fn.return_type is None
             else resolve_value_type(fn.return_type, fn.line, records, constants, functions, {})
         )
-        resolved[name] = Function(fn.name, params, return_type, fn.body, fn.line, fn.display_name)
+        resolved[name] = Function(fn.name, params, return_type, fn.body, fn.line, fn.display_name, fn.extern_symbol)
     return resolved
 
 
@@ -300,6 +321,9 @@ def _check_function(
     constants: dict[str, ConstValue],
 ) -> None:
     fn = functions[fn.name]
+    if fn.extern_symbol is not None:
+        _check_extern_function(fn, records)
+        return
     resolved_params: list[tuple[str, ValueType]] = []
     for param in fn.params:
         if param.name in constants:
@@ -347,6 +371,24 @@ def _check_function(
             _check_body_stmt(stmt, bindings, functions, records, constants)
     if not returned:
         raise InscriptionError(f"phrase '{fn.name}' must evaluate to a value", fn.line)
+
+
+def _check_extern_function(fn: Function, records: dict[str, RecordDecl]) -> None:
+    if fn.body:
+        raise InscriptionError("extern phrase declarations cannot have bodies", fn.line)
+    for param in fn.params:
+        if not isinstance(param.type_name, str) or param.type_name not in SCALAR_TYPES:
+            raise InscriptionError(
+                f"extern phrase parameters must be scalar types, got {format_type(param.type_name)}",
+                fn.line,
+            )
+    if fn.return_type is not None and (not isinstance(fn.return_type, str) or fn.return_type not in SCALAR_TYPES):
+        if isinstance(fn.return_type, RecordType) and fn.return_type.name not in records:
+            raise InscriptionError(f"unknown type {fn.return_type.name}", fn.line)
+        raise InscriptionError(
+            f"extern phrase return types must be scalar types, got {format_type(fn.return_type)}",
+            fn.line,
+        )
 
 
 def _check_does_function(

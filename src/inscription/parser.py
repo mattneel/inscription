@@ -62,7 +62,7 @@ QUALIFIED_RECORD_NAME_RE = re.compile(r"(?:[A-Za-z][A-Za-z0-9_]*\.)*[A-Z][A-Za-z
 TOKEN_RE = re.compile(r"\s*(-?\d+|[A-Z][A-Za-z0-9_]*|[a-z][a-z0-9_]*|[().,])")
 RESERVED = {
     "address", "alignment", "and", "arguments", "array", "as", "at", "be", "becomes", "bitwise", "buffer", "by", "call",
-    "check", "constant", "divided", "do", "does", "each", "else", "equal", "false", "filled", "float", "for", "from",
+    "check", "constant", "divided", "do", "does", "each", "else", "equal", "extern", "false", "filled", "float", "for", "from",
     "function", "gives", "greater", "i1", "i32", "i64", "if", "in", "index", "input", "into", "import",
     "i8", "i16", "is", "layout", "length", "less", "let", "memref", "minus", "module", "no", "not", "or", "otherwise", "output", "packed", "parameters",
     "pointer", "plus", "print", "read", "remainder", "require", "return", "set", "shifted", "size", "takes", "than", "then", "times", "to",
@@ -81,6 +81,7 @@ CONNECTOR_WORDS = {"of", "from", "to", "at", "in", "into", "between", "and", "wi
 BUFFER_LENGTH_PATTERN = r"(?:-?\d+|[a-z][a-z0-9_]*|\([^)]*\))"
 TYPE_PATTERN = rf"(?:buffer\s+of\s+{BUFFER_LENGTH_PATTERN}\s+(?:[A-Za-z][A-Za-z0-9_]*(?:\.[A-Z][A-Za-z0-9_]*)?|[a-z][a-z0-9_]*)|view\s+of\s+[a-z][a-z0-9_]*|(?:[A-Za-z][A-Za-z0-9_]*\.)*[A-Z][A-Za-z0-9_]*|[a-z][a-z0-9_]*)"
 MODULE_RE = re.compile(r"[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z][A-Za-z0-9_]*)*")
+EXTERNAL_SYMBOL_PATTERN = r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*"
 
 
 def parse_source(
@@ -161,6 +162,10 @@ class Parser:
     def _collect_phrase_templates(self) -> tuple[PhraseTemplate, ...]:
         templates: list[PhraseTemplate] = []
         for line in self.lines:
+            if line.indent == 0 and line.text.startswith("extern "):
+                template, _return_type, _external_symbol = self._parse_extern_decl(line)
+                templates.append(template)
+                continue
             if not self._looks_like_phrase_header(line):
                 continue
             template, _return_type = self._parse_phrase_header(line)
@@ -203,10 +208,25 @@ class Parser:
                 checks.append(self._parse_check_stmt(line))
                 index += 1
                 continue
+            if line.text.startswith("extern "):
+                template, return_type, external_symbol = self._parse_extern_decl(line)
+                functions.append(
+                    Function(
+                        template.symbol,
+                        template.params,
+                        return_type,
+                        (),
+                        line.number,
+                        template.display_name,
+                        external_symbol,
+                    )
+                )
+                index += 1
+                continue
             if line.text.startswith("require "):
                 raise InscriptionError("require may only appear inside phrase bodies", line.number)
             if not self._looks_like_phrase_header(line):
-                raise InscriptionError("expected phrase definition, record declaration, constant declaration, check, module, or import", line.number)
+                raise InscriptionError("expected phrase definition, record declaration, constant declaration, check, extern, module, or import", line.number)
             template, return_type = self._parse_phrase_header(line)
             body, index = self._parse_phrase_body(index + 1, template, line.number)
             functions.append(
@@ -237,7 +257,7 @@ class Parser:
         return (
             self._looks_like_phrase_header(line)
             or self._looks_like_record_header(line)
-            or (line.indent == 0 and (line.text.startswith("constant ") or line.text.startswith("check ") or line.text.startswith("module ") or line.text.startswith("import ") or line.text.startswith("require ")))
+            or (line.indent == 0 and (line.text.startswith("constant ") or line.text.startswith("check ") or line.text.startswith("extern ") or line.text.startswith("module ") or line.text.startswith("import ") or line.text.startswith("require ")))
         )
 
     def _parse_record_decl(self, index: int) -> tuple[RecordDecl, int]:
@@ -298,6 +318,26 @@ class Parser:
         return_type = self._return_type(match.group(2), line.number) if match.group(2) is not None else None
         template = self._parse_phrase_template(phrase_text, line.number, return_type)
         return template, return_type
+
+    def _parse_extern_decl(self, line: Line) -> tuple[PhraseTemplate, ReturnType, str]:
+        if line.is_header:
+            raise InscriptionError("extern phrase declarations cannot have bodies", line.number)
+        gives_match = re.fullmatch(
+            rf"extern (.+?) gives ({TYPE_PATTERN}) as ({EXTERNAL_SYMBOL_PATTERN})",
+            line.text,
+        )
+        if gives_match is not None:
+            return_type = self._return_type(gives_match.group(2), line.number)
+            template = self._parse_phrase_template(gives_match.group(1).strip(), line.number, return_type)
+            return template, return_type, gives_match.group(3)
+        does_match = re.fullmatch(
+            rf"extern (.+?) does as ({EXTERNAL_SYMBOL_PATTERN})",
+            line.text,
+        )
+        if does_match is not None:
+            template = self._parse_phrase_template(does_match.group(1).strip(), line.number, None)
+            return template, None, does_match.group(2)
+        raise InscriptionError("malformed extern phrase declaration", line.number)
 
     def _parse_phrase_template(self, text: str, line: int, return_type: ReturnType) -> PhraseTemplate:
         parts: list[PhrasePart] = []

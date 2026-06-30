@@ -1,0 +1,10 @@
+extern population count of x: i32 gives i32 as llvm.ctpop.i32
+
+sum population counts gives i32:
+  let total be 0
+  for i from 0 up to 4:
+    total becomes total plus population count of i
+  total
+
+main gives i32:
+  sum population counts

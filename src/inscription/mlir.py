@@ -181,12 +181,29 @@ class MlirEmitter:
 
     def emit_program(self, program: Program) -> str:
         lines = ["module {"]
-        for index, fn in enumerate(program.functions):
-            if index:
+        emitted_declarations: set[str] = set()
+        emitted_any = False
+        for fn in program.functions:
+            resolved = self.functions[fn.name]
+            if resolved.extern_symbol is None or resolved.extern_symbol in emitted_declarations:
+                continue
+            self.emit_extern_declaration(resolved, lines)
+            emitted_declarations.add(resolved.extern_symbol)
+            emitted_any = True
+        normal_functions = [fn for fn in program.functions if self.functions[fn.name].extern_symbol is None]
+        for index, fn in enumerate(normal_functions):
+            if emitted_any or index:
                 lines.append("")
             self.emit_function(fn, lines)
+            emitted_any = True
         lines.append("}")
         return "\n".join(lines) + "\n"
+
+    def emit_extern_declaration(self, fn: Function, lines: list[str]) -> None:
+        assert fn.extern_symbol is not None
+        args = ", ".join(self.function_argument_types(fn))
+        return_suffix = "" if fn.return_type is None else f" -> {self.return_type_list(fn.return_type)}"
+        lines.append(f"  func.func private @{fn.extern_symbol}({args}){return_suffix}")
 
     def emit_function(self, fn: Function, lines: list[str]) -> None:
         fn = self.functions[fn.name]
@@ -242,6 +259,25 @@ class MlirEmitter:
                     args.append(f"%{param.name}_{field.name}: {mlir_type(field.type_name)}")
                 continue
             args.append(f"%{param.name}: {mlir_type(param.type_name)}")
+        return args
+
+    def function_argument_types(self, fn: Function) -> list[str]:
+        args: list[str] = []
+        for param in fn.params:
+            if isinstance(param.type_name, BufferType):
+                args.append(memref_type(param.type_name))
+                continue
+            if isinstance(param.type_name, ViewType):
+                args.append(dynamic_memref_type(param.type_name.element_type))
+                args.append("i32")
+                args.append("i32")
+                continue
+            if isinstance(param.type_name, RecordType):
+                for field in self.record_fields(param.type_name):
+                    assert isinstance(field.type_name, str)
+                    args.append(mlir_type(field.type_name))
+                continue
+            args.append(mlir_type(param.type_name))
         return args
 
     def record_parameter_storage(self, name: str, record_type: RecordType) -> RecordStorage:
@@ -409,7 +445,7 @@ class MlirEmitter:
             arg_values = ", ".join(arg.name for arg in args)
             arg_types = ", ".join(arg.mlir_type for arg in args)
             lines.append(
-                f"{indent}{out.name} = func.call @{expr.name}({arg_values}) : ({arg_types}) -> {mlir_type(target.return_type)}"
+                f"{indent}{out.name} = func.call @{self.call_symbol(target)}({arg_values}) : ({arg_types}) -> {mlir_type(target.return_type)}"
             )
             return out
         if isinstance(expr, Comparison):
@@ -781,7 +817,7 @@ class MlirEmitter:
             arg_values = ", ".join(arg.name for arg in args)
             arg_types = ", ".join(arg.mlir_type for arg in args)
             lines.append(
-                f"{indent}{assignment}func.call @{expr.name}({arg_values}) : ({arg_types}) -> "
+                f"{indent}{assignment}func.call @{self.call_symbol(target)}({arg_values}) : ({arg_types}) -> "
                 f"{self.result_type_list(result_types)}"
             )
             return RecordStorage(
@@ -870,7 +906,7 @@ class MlirEmitter:
         args = self.emit_call_arguments(stmt.call, target, env, lines, indent)
         arg_values = ", ".join(arg.name for arg in args)
         arg_types = ", ".join(arg.mlir_type for arg in args)
-        lines.append(f"{indent}func.call @{stmt.call.name}({arg_values}) : ({arg_types}) -> ()")
+        lines.append(f"{indent}func.call @{self.call_symbol(target)}({arg_values}) : ({arg_types}) -> ()")
 
     def emit_call_arguments(
         self,
@@ -1442,6 +1478,9 @@ class MlirEmitter:
 
     def record_fields(self, record_type: RecordType):
         return self.records[record_type.name].fields
+
+    def call_symbol(self, fn: Function) -> str:
+        return fn.extern_symbol or fn.name
 
     def return_types(self, return_type: TypeName | RecordType) -> list[TypeName]:
         if isinstance(return_type, RecordType):

@@ -197,6 +197,7 @@ class CompilerTests(unittest.TestCase):
                 (GOLDENS / "67_module_import.ins").read_text(),
                 (GOLDENS / "75_view_parameter_sum.ins").read_text(),
                 (GOLDENS / "81_require_divide.ins").read_text(),
+                (GOLDENS / "94_extern_ctpop.ins").read_text(),
                 "highlight new widths a: i8 and b: i16 and c: u64 gives u64:\n  c bitwise xor c\n",
             ]
         )
@@ -495,6 +496,75 @@ main gives Point:
         with self.assertRaises(InscriptionError) as bool_ctx:
             run_source("main gives i1:\n  true\n")
         self.assertIn("program main must return an integer scalar, got i1", str(bool_ctx.exception))
+
+    def test_v014_extern_phrases_lower_to_external_declarations(self):
+        mlir = compile_source(self.fixture("extern_ctpop.ins"))
+        self.assertIn("func.func private @llvm.ctpop.i32(i32) -> i32", mlir)
+        self.assertIn("func.call @llvm.ctpop.i32", mlir)
+        self.assertNotIn("func.func @population_count", mlir)
+        try:
+            result = run_source(self.fixture("extern_ctpop.ins"))
+        except ToolchainError as exc:
+            self.skipTest(str(exc))
+        self.assertEqual(result.exit_status, 4)
+
+        loop_mlir = compile_source(self.fixture("extern_in_loop.ins"))
+        self.assertIn("scf.for", loop_mlir)
+        self.assertIn("func.call @llvm.ctpop.i32", loop_mlir)
+
+        constant_mlir = compile_source(self.fixture("extern_constant_argument.ins"))
+        self.assertIn("arith.constant 15 : i32", constant_mlir)
+        self.assertIn("func.call @llvm.ctpop.i32", constant_mlir)
+
+        does_mlir = compile_source(self.fixture("extern_does_compile_only.ins"))
+        self.assertIn("func.func private @host_notify(i32)", does_mlir)
+        self.assertIn("func.call @host_notify", does_mlir)
+
+        duplicate_symbol_mlir = compile_source(
+            "extern pop of x: i32 gives i32 as llvm.ctpop.i32\n"
+            "extern count bits of x: i32 gives i32 as llvm.ctpop.i32\n\n"
+            "main gives i32:\n"
+            "  pop of 15 plus count bits of 15\n"
+        )
+        self.assertEqual(duplicate_symbol_mlir.count("func.func private @llvm.ctpop.i32"), 1)
+
+    def test_v014_module_extern_phrase_uses_external_symbol(self):
+        fixture = FIXTURES / "extern_module_intrinsic" / "main.ins"
+        mlir = compile_file(fixture, module_root=fixture.parent)
+        self.assertIn("func.func private @llvm.ctpop.i32(i32) -> i32", mlir)
+        self.assertIn("func.call @llvm.ctpop.i32", mlir)
+        self.assertNotIn("Intrinsics__population_count", mlir)
+        try:
+            result = run_file(fixture, module_root=fixture.parent)
+        except ToolchainError as exc:
+            self.skipTest(str(exc))
+        self.assertEqual(result.exit_status, 4)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "A.ins").write_text(
+                "module A\n\nextern pop of x: i32 gives i32 as host_pop\n"
+            )
+            (root / "B.ins").write_text(
+                "module B\n\nextern pop of x: i64 gives i64 as host_pop\n"
+            )
+            self.assertIn(
+                "external symbol host_pop declared with incompatible types",
+                self._compile_file_error(root, "import A\nimport B\n\nmain gives i32:\n  A.pop of 1\n"),
+            )
+
+            (root / "Intrinsics.ins").write_text(
+                "module Intrinsics\n\nextern population count of x: i32 gives i32 as llvm.ctpop.i32\n"
+            )
+            self.assertIn(
+                "unexpected token 'count'",
+                self._compile_file_error(root, "import Intrinsics\n\nmain gives i32:\n  population count of 15\n"),
+            )
+
+            missing_symbol_mlir = compile_source(
+                "extern missing call gives i32 as definitely_missing_symbol\n\nmain gives i32:\n  missing call\n"
+            )
+            self.assertIn("func.func private @definitely_missing_symbol() -> i32", missing_symbol_mlir)
 
     def test_v010_module_diagnostics(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1221,6 +1291,54 @@ main gives i32:
             "view return type unsupported": (
                 "bad gives view of i32:\n  0\n",
                 "view return types are not supported",
+            ),
+            "extern with body": (
+                "extern population count of x: i32 gives i32 as llvm.ctpop.i32:\n  x\n",
+                "extern phrase declarations cannot have bodies",
+            ),
+            "extern buffer parameter unsupported": (
+                "extern sum cells cells: buffer of 4 i32 gives i32 as sum_cells\n",
+                "extern phrase parameters must be scalar types, got buffer of 4 i32",
+            ),
+            "extern view parameter unsupported": (
+                "extern sum view cells: view of i32 gives i32 as sum_view\n",
+                "extern phrase parameters must be scalar types, got view of i32",
+            ),
+            "extern record parameter unsupported": (
+                "record Point:\n  x: i32\n  y: i32\n\nextern sum point p: Point gives i32 as sum_point\n",
+                "extern phrase parameters must be scalar types, got Point",
+            ),
+            "extern record return unsupported": (
+                "record Point:\n  x: i32\n  y: i32\n\nextern make point gives Point as make_point\n",
+                "extern phrase return types must be scalar types, got Point",
+            ),
+            "extern duplicate normal phrase": (
+                "extern population count of x: i32 gives i32 as llvm.ctpop.i32\n\npopulation count of x: i32 gives i32:\n  x\n",
+                "phrase `population count of _` is already defined",
+            ),
+            "extern gives used as step": (
+                "extern population count of x: i32 gives i32 as llvm.ctpop.i32\n\nbad gives i32:\n  population count of 15\n  0\n",
+                "phrase `population count of _` returns i32 and cannot be used as a step",
+            ),
+            "extern does used as expression": (
+                "extern host notify code: i32 does as host_notify\n\nbad gives i32:\n  let x be host notify 1\n  x\n",
+                "phrase `host notify _` does not return a value",
+            ),
+            "extern call in constant initializer": (
+                "extern population count of x: i32 gives i32 as llvm.ctpop.i32\n\nconstant x: i32 be population count of 15\n",
+                "constant x must be compile-time evaluable",
+            ),
+            "extern call in check": (
+                "extern population count of x: i32 gives i32 as llvm.ctpop.i32\n\ncheck population count of 15 is equal to 4\n",
+                "check expression must be compile-time evaluable",
+            ),
+            "external symbol incompatible declarations": (
+                "extern pop of x: i32 gives i32 as host_pop\nextern pop wide of x: i64 gives i64 as host_pop\n\nmain gives i32:\n  pop of 1\n",
+                "external symbol host_pop declared with incompatible types",
+            ),
+            "external symbol conflicts with generated function": (
+                "extern external main gives i32 as main\n\nmain gives i32:\n  0\n",
+                "external symbol main conflicts with generated function main",
             ),
         }
         for name, (source, contains) in cases.items():

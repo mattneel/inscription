@@ -272,6 +272,7 @@ def qualify_function(
         tuple(qualify_stmt(stmt, module_name, record_names, constant_names) for stmt in function.body),
         function.line,
         function.display_name,
+        function.extern_symbol,
     )
 
 

@@ -77,6 +77,7 @@ class Function:
     body: tuple["Stmt", ...]
     line: int
     display_name: str
+    extern_symbol: str | None = None
 
 
 @dataclass(frozen=True)
