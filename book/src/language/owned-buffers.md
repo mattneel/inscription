@@ -1,6 +1,6 @@
 # Owned Buffers
 
-Owned buffers are dynamic heap-backed mutable storage. They are local storage objects, not scalar values.
+Owned buffers are dynamic heap-backed mutable storage. They are storage objects, not scalar values.
 
 ```inscription,check
 To main, giving i32.
@@ -9,4 +9,80 @@ cells at 0 becomes 4.
 Give cells at 0 plus length of cells.
 ```
 
-They deallocate at lexical scope exit. Nested-scope declarations deallocate before the branch, loop body, or match arm yields. Returning `owned buffer of TYPE` moves the allocation to the caller.
+Owned buffers deallocate at lexical scope exit. Nested declarations deallocate before the branch, loop body, or match arm yields. Returning `owned buffer of TYPE` moves the allocation to the caller, and the caller owns cleanup after binding the result.
+
+```inscription,check
+To make cells count: i32, giving owned buffer of i32.
+Let cells be owned buffer of count i32 filled with 3.
+Give cells.
+
+To main, giving i32.
+Let cells be make cells 4.
+Give length of cells.
+```
+
+## Consuming parameters and `move`
+
+Normal phrases can take ownership of owned buffers with an owned-buffer parameter. The caller must pass the argument with explicit `move`; no implicit moves or copies are performed.
+
+```inscription,check
+To consume cells cells: owned buffer of i32, giving i32.
+Give length of cells.
+
+To main, giving i32.
+Let cells be owned buffer of 7 i32 filled with 1.
+Give consume cells move cells.
+```
+
+After `move cells`, the caller binding is consumed and cannot be used again. The callee owns the buffer and deallocates it at lexical-scope exit unless it returns it or moves it onward.
+
+An owned-buffer parameter can be returned to forward ownership:
+
+```inscription,check
+To forward cells cells: owned buffer of i32, giving owned buffer of i32.
+Give cells.
+
+To main, giving i32.
+Let cells be owned buffer of 4 i32 filled with 3.
+Let forwarded be forward cells move cells.
+Give length of forwarded.
+```
+
+Owned buffers can also be moved through a chain of consuming phrases.
+
+```inscription,check
+To fill cells cells: owned buffer of i32 with value: i32, giving owned buffer of i32.
+For each index i of cells: cells at i becomes value.
+Give cells.
+
+To sum and drop cells cells: owned buffer of i32, giving i32.
+Let total be 0.
+For each index i of cells: total becomes total plus cells at i.
+Give total.
+
+To main, giving i32.
+Let cells be owned buffer of 4 i32 filled with 0.
+Let changed be fill cells move cells with 7.
+Give sum and drop cells move changed.
+```
+
+## Borrowing is still non-consuming
+
+Passing an owned buffer to a `view of TYPE` parameter borrows the storage and does not require `move`.
+
+```inscription,check
+To sum view cells: view of i32, giving i32.
+Let total be 0.
+For each index i of cells: total becomes total plus cells at i.
+Give total.
+
+To main, giving i32.
+Let cells be owned buffer of 4 i32 filled with 3.
+Let total be sum view cells.
+cells at 0 becomes 9.
+Give total plus cells at 0.
+```
+
+## Current restrictions
+
+Owned buffers cannot be copied, rebound, stored in records or unions, exposed through extern/export ABI, or moved from fixed buffers, arrays, or views. Direct temporary moves are not supported: bind an owned-buffer-returning call first, then move the binding. v0.36 also rejects moving an outer-scope owned buffer from inside branches, loops, or match arms; move a binding declared in the same lexical block instead.

@@ -38,6 +38,7 @@ from .ast import (
     LayoutWriteStmt,
     MatchExpr,
     MatchStep,
+    MoveArg,
     OffsetOfField,
     OwnedBufferBinding,
     OwnedBufferType,
@@ -278,7 +279,7 @@ class MlirEmitter:
         self.binding_order = [
             param.name
             for param in fn.params
-            if not isinstance(param.type_name, BufferType | ArrayType | ViewType | RecordType | UnionType)
+            if not isinstance(param.type_name, BufferType | ArrayType | ViewType | OwnedBufferType | RecordType | UnionType)
         ]
         self.record_order = [param.name for param in fn.params if isinstance(param.type_name, RecordType)]
         self.union_order = [param.name for param in fn.params if isinstance(param.type_name, UnionType)]
@@ -304,6 +305,15 @@ class MlirEmitter:
                     None,
                     param.name,
                 )
+            elif isinstance(param.type_name, OwnedBufferType):
+                storage = OwnedBufferStorage(
+                    f"%{param.name}",
+                    param.type_name.element_type,
+                    Value(f"%{param.name}_length", "i32"),
+                    None,
+                )
+                env[param.name] = storage
+                self.remember_owned_buffer(storage)
             elif isinstance(param.type_name, RecordType):
                 env[param.name] = self.record_parameter_storage(param.name, param.type_name)
             elif isinstance(param.type_name, UnionType):
@@ -360,6 +370,10 @@ class MlirEmitter:
                 args.append(f"%{param.name}_start: i32")
                 args.append(f"%{param.name}_length: i32")
                 continue
+            if isinstance(param.type_name, OwnedBufferType):
+                args.append(f"%{param.name}: {dynamic_memref_type(param.type_name.element_type)}")
+                args.append(f"%{param.name}_length: i32")
+                continue
             if isinstance(param.type_name, RecordType):
                 for field in self.record_fields(param.type_name):
                     args.append(f"%{param.name}_{field.name}: {mlir_type(field.type_name)}")
@@ -380,6 +394,10 @@ class MlirEmitter:
             if isinstance(param.type_name, ViewType):
                 args.append(dynamic_memref_type(param.type_name.element_type))
                 args.append("i32")
+                args.append("i32")
+                continue
+            if isinstance(param.type_name, OwnedBufferType):
+                args.append(dynamic_memref_type(param.type_name.element_type))
                 args.append("i32")
                 continue
             if isinstance(param.type_name, RecordType):
@@ -1605,7 +1623,15 @@ class MlirEmitter:
     ) -> list[CallArg]:
         args: list[CallArg] = []
         for arg, param in zip(call.args, target.params, strict=True):
-            if isinstance(param.type_name, BufferType):
+            if isinstance(param.type_name, OwnedBufferType):
+                assert isinstance(arg, MoveArg)
+                assert isinstance(arg.source, Variable)
+                storage = env[arg.source.name]
+                assert isinstance(storage, OwnedBufferStorage)
+                args.append(CallArg(storage.name, dynamic_memref_type(storage.element_type)))
+                args.append(CallArg(storage.length.name, mlir_type(storage.length.type_name)))
+                self.mark_owned_buffer_moved(storage)
+            elif isinstance(param.type_name, BufferType):
                 assert isinstance(arg, Variable)
                 buffer = self.require_buffer(env[arg.name])
                 args.append(CallArg(buffer.name, memref_type(buffer.buffer_type)))

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import math
 import struct
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Literal
 
 from .ast import (
@@ -44,6 +44,7 @@ from .ast import (
     LayoutWriteStmt,
     MatchExpr,
     MatchStep,
+    MoveArg,
     OffsetOfField,
     OwnedBufferBinding,
     OwnedBufferType,
@@ -115,6 +116,8 @@ class Binding:
     line: int
     writable: bool = True
     root: str | None = None
+    scope_depth: int = 0
+    moved: bool = False
 
 
 @dataclass(frozen=True)
@@ -817,7 +820,7 @@ def _check_function(
             "param",
             fn.line,
             writable=not isinstance(type_name, BufferType | ArrayType | ViewType),
-            root=name if isinstance(type_name, BufferType | ArrayType | ViewType) else None,
+            root=name if isinstance(type_name, BufferType | ArrayType | ViewType | OwnedBufferType) else None,
         )
     returned = False
     for index, stmt in enumerate(fn.body):
@@ -827,6 +830,7 @@ def _check_function(
         if isinstance(stmt, ReturnStmt):
             if not is_last:
                 raise InscriptionError("value expression must be the final phrase body form", stmt.line)
+            _check_expr_ownership(stmt.expr, bindings, functions, records, constants, scope_depth=0)
             if isinstance(fn.return_type, OwnedBufferType):
                 _check_owned_buffer_return_expr(stmt.expr, fn, bindings, functions, records, constants)
             else:
@@ -841,9 +845,9 @@ def _check_function(
             returned = True
         else:
             if isinstance(stmt, OwnedBufferBinding):
-                _declare_owned_buffer(stmt, bindings, functions, records, constants)
+                _declare_owned_buffer(stmt, bindings, functions, records, constants, scope_depth=0)
             else:
-                _check_body_stmt(stmt, bindings, functions, records, constants)
+                _check_body_stmt(stmt, bindings, functions, records, constants, scope_depth=0)
     if not returned:
         raise InscriptionError(f"phrase '{fn.name}' must evaluate to a value", fn.line)
 
@@ -904,15 +908,15 @@ def _check_does_function(
             "param",
             fn.line,
             writable=True,
-            root=name if isinstance(type_name, BufferType | ArrayType | ViewType) else None,
+            root=name if isinstance(type_name, BufferType | ArrayType | ViewType | OwnedBufferType) else None,
         )
     for stmt in fn.body:
         if isinstance(stmt, ReturnStmt):
             raise InscriptionError("does phrase body cannot end with a value expression", stmt.line)
         if isinstance(stmt, OwnedBufferBinding):
-            _declare_owned_buffer(stmt, bindings, functions, records, constants)
+            _declare_owned_buffer(stmt, bindings, functions, records, constants, scope_depth=0)
         else:
-            _check_body_stmt(stmt, bindings, functions, records, constants)
+            _check_body_stmt(stmt, bindings, functions, records, constants, scope_depth=0)
 
 
 def _check_parameter_type(
@@ -935,10 +939,7 @@ def _check_parameter_type(
         return
     if isinstance(type_name, OwnedBufferType):
         _check_owned_buffer_element_type(type_name.element_type, line)
-        raise InscriptionError(
-            f"owned buffer parameters are not supported in v0.31; use view of {format_type(type_name.element_type)}",
-            line,
-        )
+        return
     if isinstance(type_name, RecordType):
         if type_name.name not in records:
             raise InscriptionError(f"unknown type {type_name.name}", line)
@@ -988,7 +989,7 @@ def _check_view_type(view_type: ViewType, line: int) -> None:
 
 def _check_owned_buffer_element_type(element_type: ValueType, line: int) -> None:
     if isinstance(element_type, UnionType):
-        raise InscriptionError("owned buffer element type may not be a union type in v0.31", line)
+        raise InscriptionError("owned buffer element type may not be a union type in v0.36", line)
     if not is_numeric_type(element_type) and not isinstance(element_type, EnumType):
         raise InscriptionError(f"owned buffer element type must be numeric or enum, got {format_type(element_type)}", line)
 
@@ -999,60 +1000,64 @@ def _check_body_stmt(
     functions: dict[str, Function],
     records: dict[str, RecordDecl],
     constants: dict[str, ConstValue],
+    *,
+    scope_depth: int = 0,
 ) -> None:
     if isinstance(stmt, CheckStmt):
+        _check_expr_ownership(stmt.expr, bindings, functions, records, constants, scope_depth=scope_depth)
         _check_compile_time_check(stmt, _env_types(bindings), functions, records, constants)
         return
     if isinstance(stmt, RequireStmt):
+        _check_expr_ownership(stmt.expr, bindings, functions, records, constants, scope_depth=scope_depth)
         _check_require(stmt, _env_types(bindings), functions, records, constants)
         return
     if isinstance(stmt, SetStmt):
-        _declare_let(stmt, bindings, functions, records, constants)
+        _declare_let(stmt, bindings, functions, records, constants, scope_depth=scope_depth)
         return
     if isinstance(stmt, BufferBinding):
-        _declare_buffer(stmt, bindings, functions, records, constants)
+        _declare_buffer(stmt, bindings, functions, records, constants, scope_depth=scope_depth)
         return
     if isinstance(stmt, ArrayBinding):
-        _declare_array(stmt, bindings, functions, records, constants)
+        _declare_array(stmt, bindings, functions, records, constants, scope_depth=scope_depth)
         return
     if isinstance(stmt, StorageAliasBinding):
-        _declare_storage_alias(stmt, bindings, functions, records, constants)
+        _declare_storage_alias(stmt, bindings, functions, records, constants, scope_depth=scope_depth)
         return
     if isinstance(stmt, OwnedBufferBinding):
-        _declare_owned_buffer(stmt, bindings, functions, records, constants)
+        _declare_owned_buffer(stmt, bindings, functions, records, constants, scope_depth=scope_depth)
         return
     if isinstance(stmt, ViewBinding):
-        _declare_view(stmt, bindings, functions, records, constants)
+        _declare_view(stmt, bindings, functions, records, constants, scope_depth=scope_depth)
         return
     if isinstance(stmt, AssignStmt):
-        _check_assignment(stmt, bindings, functions, records, constants)
+        _check_assignment(stmt, bindings, functions, records, constants, scope_depth=scope_depth)
         return
     if isinstance(stmt, BufferStoreStmt):
-        _check_buffer_store(stmt, bindings, functions, records, constants)
+        _check_buffer_store(stmt, bindings, functions, records, constants, scope_depth=scope_depth)
         return
     if isinstance(stmt, FieldAssignStmt):
-        _check_field_assignment(stmt, bindings, functions, records, constants)
+        _check_field_assignment(stmt, bindings, functions, records, constants, scope_depth=scope_depth)
         return
     if isinstance(stmt, LayoutWriteStmt):
-        _check_layout_write(stmt, bindings, functions, records, constants)
+        _check_layout_write(stmt, bindings, functions, records, constants, scope_depth=scope_depth)
         return
     if isinstance(stmt, CallStmt):
-        _check_call_stmt(stmt, bindings, functions, records, constants)
+        _check_call_stmt(stmt, bindings, functions, records, constants, scope_depth=scope_depth)
         return
     if isinstance(stmt, WhileStmt):
-        _check_while(stmt, bindings, functions, records, constants)
+        _check_while(stmt, bindings, functions, records, constants, scope_depth=scope_depth)
         return
     if isinstance(stmt, ForStmt):
-        _check_for(stmt, bindings, functions, records, constants)
+        _check_for(stmt, bindings, functions, records, constants, scope_depth=scope_depth)
         return
     if isinstance(stmt, ForEachStmt):
-        _check_for_each(stmt, bindings, functions, records, constants)
+        _check_for_each(stmt, bindings, functions, records, constants, scope_depth=scope_depth)
         return
     if isinstance(stmt, IfStmt):
-        _check_if(stmt, bindings, functions, records, constants)
+        _check_if(stmt, bindings, functions, records, constants, scope_depth=scope_depth)
         return
     if isinstance(stmt, MatchStep):
-        _check_match_step(stmt, bindings, functions, records, constants)
+        _check_match_step(stmt, bindings, functions, records, constants, scope_depth=scope_depth)
         return
     raise AssertionError(stmt)  # pragma: no cover
 
@@ -1076,14 +1081,110 @@ def _check_no_shadow(name: str, line: int, bindings: dict[str, Binding], *, kind
     raise InscriptionError(f"duplicate {kind} binding '{name}'", line)
 
 
+def _require_live_binding(name: str, line: int, bindings: dict[str, Binding]) -> Binding:
+    binding = bindings.get(name)
+    if binding is None:
+        raise InscriptionError(f"unknown binding {name}", line)
+    if binding.moved:
+        raise InscriptionError(f"owned buffer {name} was moved and cannot be used", line)
+    return binding
+
+
+def _check_expr_ownership(
+    expr: Expr,
+    bindings: dict[str, Binding],
+    functions: dict[str, Function],
+    records: dict[str, RecordDecl],
+    constants: dict[str, ConstValue],
+    *,
+    scope_depth: int,
+) -> None:
+    if isinstance(expr, Variable):
+        if expr.name in bindings:
+            _require_live_binding(expr.name, expr.line, bindings)
+        return
+    if isinstance(expr, BufferLoad):
+        _require_live_binding(expr.name, expr.line, bindings)
+        _check_expr_ownership(expr.index, bindings, functions, records, constants, scope_depth=scope_depth)
+        return
+    if isinstance(expr, LengthOf):
+        _require_live_binding(expr.name, expr.line, bindings)
+        return
+    if isinstance(expr, FieldAccess):
+        if expr.name in bindings:
+            _require_live_binding(expr.name, expr.line, bindings)
+        return
+    if isinstance(expr, LayoutRead):
+        _require_live_binding(expr.buffer_name, expr.line, bindings)
+        _check_expr_ownership(expr.index, bindings, functions, records, constants, scope_depth=scope_depth)
+        return
+    if isinstance(expr, RecordConstructor):
+        for field in expr.fields:
+            _check_expr_ownership(field.expr, bindings, functions, records, constants, scope_depth=scope_depth)
+        return
+    if isinstance(expr, UnionConstructor):
+        for field in expr.fields:
+            _check_expr_ownership(field.expr, bindings, functions, records, constants, scope_depth=scope_depth)
+        return
+    if isinstance(expr, Unary):
+        _check_expr_ownership(expr.expr, bindings, functions, records, constants, scope_depth=scope_depth)
+        return
+    if isinstance(expr, Cast):
+        _check_expr_ownership(expr.expr, bindings, functions, records, constants, scope_depth=scope_depth)
+        return
+    if isinstance(expr, Binary):
+        _check_expr_ownership(expr.left, bindings, functions, records, constants, scope_depth=scope_depth)
+        _check_expr_ownership(expr.right, bindings, functions, records, constants, scope_depth=scope_depth)
+        return
+    if isinstance(expr, Comparison):
+        _check_expr_ownership(expr.left, bindings, functions, records, constants, scope_depth=scope_depth)
+        _check_expr_ownership(expr.right, bindings, functions, records, constants, scope_depth=scope_depth)
+        return
+    if isinstance(expr, WhenExpr):
+        for case in expr.cases:
+            _check_expr_ownership(case.condition, bindings, functions, records, constants, scope_depth=scope_depth)
+            _check_expr_ownership(case.expr, bindings, functions, records, constants, scope_depth=scope_depth + 1)
+        _check_expr_ownership(expr.otherwise, bindings, functions, records, constants, scope_depth=scope_depth + 1)
+        return
+    if isinstance(expr, MatchExpr):
+        _check_expr_ownership(expr.scrutinee, bindings, functions, records, constants, scope_depth=scope_depth)
+        env = {**_constant_env_types(constants), **_env_types(bindings)}
+        scrutinee_type = infer_match_scrutinee_type(expr.scrutinee, env, functions, records, constants=constants)
+        _check_match_patterns(tuple(arm.pattern for arm in expr.arms), scrutinee_type, env, functions, records, constants)
+        for arm in expr.arms:
+            arm_scope = _bindings_with_match_payload(arm.pattern, scrutinee_type, bindings, constants)
+            _check_expr_ownership(arm.expr, arm_scope, functions, records, constants, scope_depth=scope_depth + 1)
+        _check_expr_ownership(expr.otherwise, bindings, functions, records, constants, scope_depth=scope_depth + 1)
+        return
+    if isinstance(expr, Call):
+        for actual in expr.args:
+            if not isinstance(actual, MoveArg):
+                _check_expr_ownership(actual, bindings, functions, records, constants, scope_depth=scope_depth)
+        target = _lookup_phrase(expr.name, expr.line, functions)
+        _check_call_arguments(
+            expr,
+            target,
+            bindings,
+            functions,
+            records,
+            constants,
+            effectful=False,
+            scope_depth=scope_depth,
+        )
+        return
+
+
 def _declare_let(
     stmt: SetStmt,
     bindings: dict[str, Binding],
     functions: dict[str, Function],
     records: dict[str, RecordDecl],
     constants: dict[str, ConstValue],
+    *,
+    scope_depth: int,
 ) -> None:
     _check_no_shadow(stmt.name, stmt.line, bindings, kind="let")
+    _check_expr_ownership(stmt.expr, bindings, functions, records, constants, scope_depth=scope_depth)
     if stmt.type_name is not None:
         resolved_declared_type = resolve_value_type(stmt.type_name, stmt.line, records, constants, functions, _env_types(bindings))
         if isinstance(resolved_declared_type, ArrayType):
@@ -1095,7 +1196,7 @@ def _declare_let(
             raise InscriptionError(
                 f"let {stmt.name} must have type {format_type(resolved_declared_type)}, got {format_type(actual)}", stmt.line
             )
-        bindings[stmt.name] = Binding(resolved_declared_type, "let", stmt.line)
+        bindings[stmt.name] = Binding(resolved_declared_type, "let", stmt.line, scope_depth=scope_depth)
         return
     if isinstance(stmt.expr, Variable):
         source_type = _env_types(bindings).get(stmt.expr.name)
@@ -1104,11 +1205,10 @@ def _declare_let(
     if isinstance(stmt.expr, Call):
         target = _lookup_phrase(stmt.expr.name, stmt.expr.line, functions)
         if isinstance(target.return_type, OwnedBufferType):
-            _check_call_argument_types(stmt.expr, target, _env_types(bindings), functions, records, constants)
-            bindings[stmt.name] = Binding(target.return_type, "owned_buffer", stmt.line, root=stmt.name)
+            bindings[stmt.name] = Binding(target.return_type, "owned_buffer", stmt.line, root=stmt.name, scope_depth=scope_depth)
             return
     type_name = infer_expr_type(stmt.expr, _env_types(bindings), functions, records, constants=constants)
-    bindings[stmt.name] = Binding(type_name, "let", stmt.line)
+    bindings[stmt.name] = Binding(type_name, "let", stmt.line, scope_depth=scope_depth)
 
 
 def expand_storage_values(
@@ -1138,6 +1238,8 @@ def _declare_buffer(
     functions: dict[str, Function],
     records: dict[str, RecordDecl],
     constants: dict[str, ConstValue],
+    *,
+    scope_depth: int,
 ) -> None:
     _check_no_shadow(stmt.name, stmt.line, bindings, kind="buffer")
     buffer_type = resolve_buffer_type(stmt.buffer_type, stmt.line, records, constants, functions, _env_types(bindings))
@@ -1147,6 +1249,7 @@ def _declare_buffer(
         if len(values) != buffer_type.length:
             raise InscriptionError(f"buffer {stmt.name} expects {buffer_type.length} elements, got {len(values)}", stmt.line)
         for index, value in enumerate(values):
+            _check_expr_ownership(value, bindings, functions, records, constants, scope_depth=scope_depth)
             actual = _infer_declared_type(value, buffer_type.element_type, _env_types(bindings), functions, records, constants)
             if actual != buffer_type.element_type:
                 raise InscriptionError(
@@ -1155,12 +1258,13 @@ def _declare_buffer(
                 )
     else:
         assert stmt.fill is not None
+        _check_expr_ownership(stmt.fill, bindings, functions, records, constants, scope_depth=scope_depth)
         actual = _infer_declared_type(stmt.fill, buffer_type.element_type, _env_types(bindings), functions, records, constants)
         if actual != buffer_type.element_type:
             raise InscriptionError(
                 f"buffer {stmt.name} fill must have type {format_type(buffer_type.element_type)}, got {format_type(actual)}", stmt.line
             )
-    bindings[stmt.name] = Binding(buffer_type, "buffer", stmt.line, root=stmt.name)
+    bindings[stmt.name] = Binding(buffer_type, "buffer", stmt.line, root=stmt.name, scope_depth=scope_depth)
 
 
 def _declare_array(
@@ -1169,6 +1273,8 @@ def _declare_array(
     functions: dict[str, Function],
     records: dict[str, RecordDecl],
     constants: dict[str, ConstValue],
+    *,
+    scope_depth: int,
 ) -> None:
     _check_no_shadow(stmt.name, stmt.line, bindings, kind="array")
     array_type = resolve_array_type(stmt.array_type, stmt.line, records, constants, functions, _env_types(bindings))
@@ -1178,6 +1284,7 @@ def _declare_array(
         if len(values) != array_type.length:
             raise InscriptionError(f"array {stmt.name} expects {array_type.length} elements, got {len(values)}", stmt.line)
         for index, value in enumerate(values):
+            _check_expr_ownership(value, bindings, functions, records, constants, scope_depth=scope_depth)
             actual = _infer_declared_type(value, array_type.element_type, _env_types(bindings), functions, records, constants)
             if actual != array_type.element_type:
                 raise InscriptionError(
@@ -1186,12 +1293,13 @@ def _declare_array(
                 )
     else:
         assert stmt.fill is not None
+        _check_expr_ownership(stmt.fill, bindings, functions, records, constants, scope_depth=scope_depth)
         actual = _infer_declared_type(stmt.fill, array_type.element_type, _env_types(bindings), functions, records, constants)
         if actual != array_type.element_type:
             raise InscriptionError(
                 f"array {stmt.name} fill must have type {format_type(array_type.element_type)}, got {format_type(actual)}", stmt.line
             )
-    bindings[stmt.name] = Binding(array_type, "array", stmt.line, writable=False, root=stmt.name)
+    bindings[stmt.name] = Binding(array_type, "array", stmt.line, writable=False, root=stmt.name, scope_depth=scope_depth)
 
 
 def _declare_owned_buffer(
@@ -1200,9 +1308,13 @@ def _declare_owned_buffer(
     functions: dict[str, Function],
     records: dict[str, RecordDecl],
     constants: dict[str, ConstValue],
+    *,
+    scope_depth: int,
 ) -> None:
     _check_no_shadow(stmt.name, stmt.line, bindings, kind="owned buffer")
     env = _env_types(bindings)
+    _check_expr_ownership(stmt.length, bindings, functions, records, constants, scope_depth=scope_depth)
+    _check_expr_ownership(stmt.fill, bindings, functions, records, constants, scope_depth=scope_depth)
     length_type = _infer_declared_type(stmt.length, "i32", env, functions, records, constants)
     if length_type != "i32":
         raise InscriptionError(f"owned buffer length must have type i32, got {format_type(length_type)}", stmt.line)
@@ -1217,7 +1329,7 @@ def _declare_owned_buffer(
             f"owned buffer {stmt.name} fill value must have type {format_type(element_type)}, got {format_type(actual)}",
             stmt.line,
         )
-    bindings[stmt.name] = Binding(OwnedBufferType(element_type, static_length), "owned_buffer", stmt.line, root=stmt.name)
+    bindings[stmt.name] = Binding(OwnedBufferType(element_type, static_length), "owned_buffer", stmt.line, root=stmt.name, scope_depth=scope_depth)
 
 
 def _owned_buffer_return_matches(actual: ValueType, expected: OwnedBufferType) -> bool:
@@ -1273,6 +1385,8 @@ def _declare_storage_alias(
     functions: dict[str, Function],
     records: dict[str, RecordDecl],
     constants: dict[str, ConstValue],
+    *,
+    scope_depth: int,
 ) -> None:
     resolved = resolve_value_type(stmt.alias_type, stmt.line, records, constants, functions, _env_types(bindings))
     if isinstance(resolved, BufferType):
@@ -1282,6 +1396,7 @@ def _declare_storage_alias(
             functions,
             records,
             constants,
+            scope_depth=scope_depth,
         )
         return
     if isinstance(resolved, ArrayType):
@@ -1291,6 +1406,7 @@ def _declare_storage_alias(
             functions,
             records,
             constants,
+            scope_depth=scope_depth,
         )
         return
     raise InscriptionError(
@@ -1305,16 +1421,22 @@ def _declare_view(
     functions: dict[str, Function],
     records: dict[str, RecordDecl],
     constants: dict[str, ConstValue],
+    *,
+    scope_depth: int,
 ) -> None:
     _check_no_shadow(stmt.name, stmt.line, bindings, kind="view")
     source = bindings.get(stmt.source_name)
     if source is None:
         raise InscriptionError(f"unknown binding {stmt.source_name}", stmt.line)
+    if source.moved:
+        raise InscriptionError(f"owned buffer {stmt.source_name} was moved and cannot be used", stmt.line)
     if not isinstance(source.type_name, BufferType | ArrayType | ViewType | OwnedBufferType):
         raise InscriptionError(
             f"view source {stmt.source_name} must be a buffer or view, got {format_type(source.type_name)}",
             stmt.line,
         )
+    _check_expr_ownership(stmt.start, bindings, functions, records, constants, scope_depth=scope_depth)
+    _check_expr_ownership(stmt.count, bindings, functions, records, constants, scope_depth=scope_depth)
     start_type = infer_expr_type(stmt.start, _env_types(bindings), functions, records, constants=constants)
     if start_type != "i32":
         raise InscriptionError(f"view start must have type i32, got {format_type(start_type)}", stmt.line)
@@ -1343,6 +1465,7 @@ def _declare_view(
         stmt.line,
         writable=source.writable,
         root=source.root or stmt.source_name,
+        scope_depth=scope_depth,
     )
 
 
@@ -1352,10 +1475,14 @@ def _check_assignment(
     functions: dict[str, Function],
     records: dict[str, RecordDecl],
     constants: dict[str, ConstValue],
+    *,
+    scope_depth: int,
 ) -> None:
     binding = bindings.get(stmt.name)
     if binding is None:
         raise InscriptionError(f"unknown binding {stmt.name}", stmt.line)
+    if binding.moved:
+        raise InscriptionError(f"owned buffer {stmt.name} was moved and cannot be used", stmt.line)
     if isinstance(binding.type_name, BufferType):
         raise InscriptionError(
             f"cannot rebind buffer {stmt.name}; use `{stmt.name} at index becomes value`", stmt.line
@@ -1372,6 +1499,7 @@ def _check_assignment(
         if binding.kind == "index":
             raise InscriptionError(f"cannot rebind for-loop index {stmt.name}", stmt.line)
         raise InscriptionError(f"cannot rebind {stmt.name}", stmt.line)
+    _check_expr_ownership(stmt.expr, bindings, functions, records, constants, scope_depth=scope_depth)
     actual = _infer_declared_type(stmt.expr, binding.type_name, _env_types(bindings), functions, records, constants)
     if actual != binding.type_name:
         raise InscriptionError(
@@ -1385,6 +1513,8 @@ def _check_buffer_store(
     functions: dict[str, Function],
     records: dict[str, RecordDecl],
     constants: dict[str, ConstValue],
+    *,
+    scope_depth: int,
 ) -> None:
     binding = _require_indexable_binding(stmt.name, stmt.line, bindings)
     storage_type = binding.type_name
@@ -1394,6 +1524,8 @@ def _check_buffer_store(
         if isinstance(storage_type, ViewType):
             raise InscriptionError(f"cannot store through read-only view {stmt.name}", stmt.line)
         raise InscriptionError(f"cannot store to read-only buffer parameter {stmt.name}", stmt.line)
+    _check_expr_ownership(stmt.index, bindings, functions, records, constants, scope_depth=scope_depth)
+    _check_expr_ownership(stmt.value, bindings, functions, records, constants, scope_depth=scope_depth)
     _check_storage_index(stmt.name, storage_type, stmt.index, _env_types(bindings), functions, records, constants)
     actual = _infer_declared_type(stmt.value, storage_type.element_type, _env_types(bindings), functions, records, constants)
     if actual != storage_type.element_type:
@@ -1408,7 +1540,11 @@ def _check_field_assignment(
     functions: dict[str, Function],
     records: dict[str, RecordDecl],
     constants: dict[str, ConstValue],
+    *,
+    scope_depth: int,
 ) -> None:
+    _require_live_binding(stmt.name, stmt.line, bindings)
+    _check_expr_ownership(stmt.expr, bindings, functions, records, constants, scope_depth=scope_depth)
     record_type = _require_record_type(stmt.name, stmt.line, _env_types(bindings))
     field_type = _require_record_field(record_type, stmt.field, stmt.line, records)
     actual = _infer_declared_type(stmt.expr, field_type, _env_types(bindings), functions, records, constants)
@@ -1424,7 +1560,11 @@ def _check_layout_write(
     functions: dict[str, Function],
     records: dict[str, RecordDecl],
     constants: dict[str, ConstValue],
+    *,
+    scope_depth: int,
 ) -> None:
+    _require_live_binding(stmt.record_name, stmt.line, bindings)
+    _check_expr_ownership(stmt.index, bindings, functions, records, constants, scope_depth=scope_depth)
     record_type = _require_record_type(stmt.record_name, stmt.line, _env_types(bindings))
     record = _record_decl(record_type, stmt.line, records)
     if record.layout_kind == "value":
@@ -1463,13 +1603,15 @@ def _check_call_stmt(
     functions: dict[str, Function],
     records: dict[str, RecordDecl],
     constants: dict[str, ConstValue],
+    *,
+    scope_depth: int,
 ) -> None:
     target = _lookup_phrase(stmt.call.name, stmt.line, functions)
     if target.return_type is not None:
         raise InscriptionError(
             f"phrase `{target.display_name}` returns {format_type(target.return_type)} and cannot be used as a step", stmt.line
         )
-    _check_call_arguments(stmt.call, target, bindings, functions, records, constants, effectful=True)
+    _check_call_arguments(stmt.call, target, bindings, functions, records, constants, effectful=True, scope_depth=scope_depth)
 
 
 def _check_while(
@@ -1478,7 +1620,10 @@ def _check_while(
     functions: dict[str, Function],
     records: dict[str, RecordDecl],
     constants: dict[str, ConstValue],
+    *,
+    scope_depth: int,
 ) -> None:
+    _check_expr_ownership(stmt.condition, bindings, functions, records, constants, scope_depth=scope_depth)
     condition_type = infer_expr_type(stmt.condition, _env_types(bindings), functions, records)
     if condition_type != "i1":
         raise InscriptionError(f"while condition must be i1, got {format_type(condition_type)}", stmt.line)
@@ -1486,7 +1631,7 @@ def _check_while(
         raise InscriptionError("while loop requires at least one body step", stmt.line)
     scoped = dict(bindings)
     for body_stmt in stmt.body:
-        _check_body_stmt(body_stmt, scoped, functions, records, constants)
+        _check_body_stmt(body_stmt, scoped, functions, records, constants, scope_depth=scope_depth + 1)
 
 
 def _check_for(
@@ -1495,7 +1640,11 @@ def _check_for(
     functions: dict[str, Function],
     records: dict[str, RecordDecl],
     constants: dict[str, ConstValue],
+    *,
+    scope_depth: int,
 ) -> None:
+    _check_expr_ownership(stmt.start, bindings, functions, records, constants, scope_depth=scope_depth)
+    _check_expr_ownership(stmt.end, bindings, functions, records, constants, scope_depth=scope_depth)
     start_type = infer_expr_type(stmt.start, _env_types(bindings), functions, records)
     end_type = infer_expr_type(stmt.end, _env_types(bindings), functions, records)
     if not is_integer_type(start_type) or not is_integer_type(end_type):
@@ -1513,9 +1662,9 @@ def _check_for(
         raise InscriptionError("for loop body must contain at least one step", stmt.line)
     _check_index_shadow(stmt.name, stmt.line, bindings)
     scoped = dict(bindings)
-    scoped[stmt.name] = Binding(start_type, "index", stmt.line, writable=False)
+    scoped[stmt.name] = Binding(start_type, "index", stmt.line, writable=False, scope_depth=scope_depth + 1)
     for body_stmt in stmt.body:
-        _check_body_stmt(body_stmt, scoped, functions, records, constants)
+        _check_body_stmt(body_stmt, scoped, functions, records, constants, scope_depth=scope_depth + 1)
 
 
 def _check_for_each(
@@ -1524,19 +1673,19 @@ def _check_for_each(
     functions: dict[str, Function],
     records: dict[str, RecordDecl],
     constants: dict[str, ConstValue],
+    *,
+    scope_depth: int,
 ) -> None:
-    binding = bindings.get(stmt.buffer_name)
-    if binding is None:
-        raise InscriptionError(f"unknown binding {stmt.buffer_name}", stmt.line)
+    binding = _require_live_binding(stmt.buffer_name, stmt.line, bindings)
     if not isinstance(binding.type_name, BufferType | ArrayType | ViewType | OwnedBufferType):
         raise InscriptionError(f"for each index requires a buffer, got {format_type(binding.type_name)}", stmt.line)
     if not stmt.body:
         raise InscriptionError("for loop body must contain at least one step", stmt.line)
     _check_index_shadow(stmt.name, stmt.line, bindings)
     scoped = dict(bindings)
-    scoped[stmt.name] = Binding("i32", "index", stmt.line, writable=False)
+    scoped[stmt.name] = Binding("i32", "index", stmt.line, writable=False, scope_depth=scope_depth + 1)
     for body_stmt in stmt.body:
-        _check_body_stmt(body_stmt, scoped, functions, records, constants)
+        _check_body_stmt(body_stmt, scoped, functions, records, constants, scope_depth=scope_depth + 1)
 
 
 def _check_index_shadow(name: str, line: int, bindings: dict[str, Binding]) -> None:
@@ -1550,7 +1699,10 @@ def _check_if(
     functions: dict[str, Function],
     records: dict[str, RecordDecl],
     constants: dict[str, ConstValue],
+    *,
+    scope_depth: int,
 ) -> None:
+    _check_expr_ownership(stmt.condition, bindings, functions, records, constants, scope_depth=scope_depth)
     condition_type = infer_expr_type(stmt.condition, _env_types(bindings), functions, records)
     if condition_type != "i1":
         raise InscriptionError(f"if condition must be i1, got {format_type(condition_type)}", stmt.line)
@@ -1561,11 +1713,11 @@ def _check_if(
 
     then_scope = dict(bindings)
     for body_stmt in stmt.then_body:
-        _check_body_stmt(body_stmt, then_scope, functions, records, constants)
+        _check_body_stmt(body_stmt, then_scope, functions, records, constants, scope_depth=scope_depth + 1)
 
     else_scope = dict(bindings)
     for body_stmt in stmt.else_body:
-        _check_body_stmt(body_stmt, else_scope, functions, records, constants)
+        _check_body_stmt(body_stmt, else_scope, functions, records, constants, scope_depth=scope_depth + 1)
 
 
 def _check_match_step(
@@ -1574,8 +1726,11 @@ def _check_match_step(
     functions: dict[str, Function],
     records: dict[str, RecordDecl],
     constants: dict[str, ConstValue],
+    *,
+    scope_depth: int,
 ) -> None:
     env = {**_constant_env_types(constants), **_env_types(bindings)}
+    _check_expr_ownership(stmt.scrutinee, bindings, functions, records, constants, scope_depth=scope_depth)
     scrutinee_type = infer_match_scrutinee_type(stmt.scrutinee, env, functions, records, constants=constants)
     _require_match_scrutinee_type(scrutinee_type, stmt.line)
     if not stmt.arms:
@@ -1587,13 +1742,13 @@ def _check_match_step(
             raise InscriptionError("match arm must contain at least one step", arm.line)
         arm_scope = _bindings_with_match_payload(arm.pattern, scrutinee_type, bindings, constants)
         for body_stmt in arm.body:
-            _check_body_stmt(body_stmt, arm_scope, functions, records, constants)
+            _check_body_stmt(body_stmt, arm_scope, functions, records, constants, scope_depth=scope_depth + 1)
 
     if not stmt.otherwise_body:
         raise InscriptionError("match arm must contain at least one step", stmt.line)
     otherwise_scope = dict(bindings)
     for body_stmt in stmt.otherwise_body:
-        _check_body_stmt(body_stmt, otherwise_scope, functions, records, constants)
+        _check_body_stmt(body_stmt, otherwise_scope, functions, records, constants, scope_depth=scope_depth + 1)
 
 
 def _lookup_phrase(name: str, line: int, functions: dict[str, Function]) -> Function:
@@ -1612,12 +1767,18 @@ def _check_call_arguments(
     constants: dict[str, ConstValue],
     *,
     effectful: bool,
+    scope_depth: int,
 ) -> None:
     _check_call_arity(call, target)
     seen_roots: dict[str, str] = {}
     env = _env_types(bindings)
     for arg, param in zip(call.args, target.params, strict=True):
         expected = resolve_value_type(param.type_name, call.line, records, constants, functions, {})
+        if isinstance(expected, OwnedBufferType):
+            _require_owned_move_argument(arg, expected, param.name, bindings, functions, records, constants, call.line, scope_depth)
+            continue
+        if isinstance(arg, MoveArg):
+            raise InscriptionError("move may only be used as an argument to an owned buffer parameter", arg.line)
         if isinstance(expected, BufferType):
             name, binding = _require_buffer_argument(arg, expected, env, getattr(arg, "line", call.line), records)
             root = bindings[name].root or name
@@ -1679,6 +1840,11 @@ def _check_call_argument_types(
     seen_storage_names: set[str] = set()
     for arg, param in zip(call.args, target.params, strict=True):
         expected = resolve_value_type(param.type_name, call.line, records, constants, functions, {})
+        if isinstance(expected, OwnedBufferType):
+            _require_owned_move_argument_type(arg, expected, param.name, env, functions, records, constants, call.line)
+            continue
+        if isinstance(arg, MoveArg):
+            raise InscriptionError("move may only be used as an argument to an owned buffer parameter", arg.line)
         if isinstance(expected, BufferType):
             name, _binding_type = _require_buffer_argument(arg, expected, env, getattr(arg, "line", call.line), records)
             if name in seen_storage_names:
@@ -1704,6 +1870,102 @@ def _check_call_argument_types(
                 f"argument {argument_name} must have type {format_type(expected)}, got {format_type(actual)}",
                 getattr(arg, "line", call.line),
             )
+
+
+def _move_source_name(source: Expr) -> str | None:
+    return source.name if isinstance(source, Variable) else None
+
+
+def _owned_returning_call_message(source: Expr, functions: dict[str, Function]) -> str | None:
+    if not isinstance(source, Call):
+        return None
+    target = _lookup_phrase(source.name, source.line, functions)
+    if isinstance(target.return_type, OwnedBufferType):
+        return f"owned buffer result from `{target.display_name}` must be bound before it can be moved"
+    return None
+
+
+def _require_owned_move_argument(
+    arg: Expr | MoveArg,
+    expected: OwnedBufferType,
+    param_name: str,
+    bindings: dict[str, Binding],
+    functions: dict[str, Function],
+    records: dict[str, RecordDecl],
+    constants: dict[str, ConstValue],
+    call_line: int,
+    scope_depth: int,
+) -> None:
+    if not isinstance(arg, MoveArg):
+        if isinstance(arg, Variable):
+            actual_binding = bindings.get(arg.name)
+            if actual_binding is not None and actual_binding.moved:
+                raise InscriptionError(f"owned buffer {arg.name} was moved and cannot be used", arg.line)
+            if actual_binding is not None and isinstance(actual_binding.type_name, OwnedBufferType):
+                raise InscriptionError(f"argument {arg.name} for owned buffer parameter must be passed with move", arg.line)
+        actual = _infer_call_scalar_argument_type(arg, expected, _env_types(bindings), functions, records)
+        raise InscriptionError(
+            f"argument {_argument_name(arg)} must have type {format_type(expected)}, got {format_type(actual)}",
+            getattr(arg, "line", call_line),
+        )
+
+    direct_message = _owned_returning_call_message(arg.source, functions)
+    if direct_message is not None:
+        raise InscriptionError(direct_message, arg.line)
+    name = _move_source_name(arg.source)
+    if name is None:
+        raise InscriptionError("move requires an owned buffer", arg.line)
+    binding = bindings.get(name)
+    if binding is None:
+        raise InscriptionError(f"unknown binding {name}", arg.line)
+    if binding.moved:
+        raise InscriptionError(f"owned buffer {name} was moved and cannot be used", arg.line)
+    if not isinstance(binding.type_name, OwnedBufferType):
+        raise InscriptionError(f"move requires an owned buffer, got {format_type(binding.type_name)}", arg.line)
+    if binding.scope_depth < scope_depth:
+        raise InscriptionError(f"owned buffer {name} may be moved only in unconditional flow in v0.36", arg.line)
+    if binding.type_name.element_type != expected.element_type:
+        raise InscriptionError(
+            f"argument {name} must have type {format_type(expected)}, got {format_type(binding.type_name)}",
+            arg.line,
+        )
+    bindings[name] = replace(binding, moved=True)
+
+
+def _require_owned_move_argument_type(
+    arg: Expr | MoveArg,
+    expected: OwnedBufferType,
+    param_name: str,
+    env: dict[str, ValueType],
+    functions: dict[str, Function],
+    records: dict[str, RecordDecl],
+    constants: dict[str, ConstValue],
+    call_line: int,
+) -> None:
+    if not isinstance(arg, MoveArg):
+        if isinstance(arg, Variable) and isinstance(env.get(arg.name), OwnedBufferType):
+            raise InscriptionError(f"argument {arg.name} for owned buffer parameter must be passed with move", arg.line)
+        actual = _infer_call_scalar_argument_type(arg, expected, env, functions, records)
+        raise InscriptionError(
+            f"argument {_argument_name(arg)} must have type {format_type(expected)}, got {format_type(actual)}",
+            getattr(arg, "line", call_line),
+        )
+    direct_message = _owned_returning_call_message(arg.source, functions)
+    if direct_message is not None:
+        raise InscriptionError(direct_message, arg.line)
+    name = _move_source_name(arg.source)
+    if name is None:
+        raise InscriptionError("move requires an owned buffer", arg.line)
+    actual = env.get(name)
+    if actual is None:
+        raise InscriptionError(f"unknown binding {name}", arg.line)
+    if not isinstance(actual, OwnedBufferType):
+        raise InscriptionError(f"move requires an owned buffer, got {format_type(actual)}", arg.line)
+    if actual.element_type != expected.element_type:
+        raise InscriptionError(
+            f"argument {name} must have type {format_type(expected)}, got {format_type(actual)}",
+            arg.line,
+        )
 
 
 def _reject_unbound_owned_buffer_result(arg: Expr, functions: dict[str, Function]) -> None:
@@ -1835,9 +2097,11 @@ def _infer_call_scalar_argument_type(
     return _infer_declared_type(arg, expected, env, functions, records)
 
 
-def _argument_name(arg: Expr) -> str:
+def _argument_name(arg: Expr | MoveArg) -> str:
     if isinstance(arg, Variable):
         return arg.name
+    if isinstance(arg, MoveArg) and isinstance(arg.source, Variable):
+        return arg.source.name
     return "argument"
 
 
@@ -3074,18 +3338,14 @@ def _lookup_binding_type(name: str, line: int, env: dict[str, ValueType]) -> Val
 
 
 def _require_buffer_binding(name: str, line: int, bindings: dict[str, Binding]) -> Binding:
-    binding = bindings.get(name)
-    if binding is None:
-        raise InscriptionError(f"unknown binding {name}", line)
+    binding = _require_live_binding(name, line, bindings)
     if not isinstance(binding.type_name, BufferType):
         raise InscriptionError(f"{name} is not a buffer", line)
     return binding
 
 
 def _require_indexable_binding(name: str, line: int, bindings: dict[str, Binding]) -> Binding:
-    binding = bindings.get(name)
-    if binding is None:
-        raise InscriptionError(f"unknown binding {name}", line)
+    binding = _require_live_binding(name, line, bindings)
     if not isinstance(binding.type_name, BufferType | ArrayType | ViewType | OwnedBufferType):
         raise InscriptionError(f"{name} is not a buffer", line)
     return binding

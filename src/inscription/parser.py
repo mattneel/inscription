@@ -44,6 +44,7 @@ from .ast import (
     MatchExprArm,
     MatchStep,
     MatchStepArm,
+    MoveArg,
     OffsetOfField,
     OwnedBufferBinding,
     OwnedBufferType,
@@ -91,7 +92,7 @@ RESERVED = {
     "address", "alignment", "and", "arguments", "array", "as", "at", "be", "becomes", "bitwise", "buffer", "by", "call",
     "check", "constant", "containing", "divided", "do", "does", "each", "else", "equal", "export", "extern", "false", "filled", "float", "for", "from",
     "enum", "function", "gives", "greater", "f32", "f64", "i1", "i32", "i64", "if", "in", "index", "input", "into", "import",
-    "i8", "i16", "is", "layout", "length", "less", "let", "match", "memref", "minus", "module", "no", "not", "or", "otherwise", "output", "packed", "parameters",
+    "i8", "i16", "is", "layout", "length", "less", "let", "match", "memref", "minus", "module", "move", "no", "not", "or", "otherwise", "output", "packed", "parameters",
     "pointer", "plus", "print", "read", "remainder", "require", "return", "set", "shifted", "size", "takes", "than", "then", "times", "to",
     "track", "true", "type", "u8", "u16", "u32", "u64", "union", "up", "record", "view", "when", "while", "with", "write", "xor", "zero",
 }
@@ -109,6 +110,7 @@ BUFFER_LENGTH_PATTERN = r"(?:-?\d+|[a-z][a-z0-9_]*|\([^)]*\))"
 TYPE_REF_PATTERN = r"(?:(?:[A-Za-z][A-Za-z0-9_]*\.)*[A-Z][A-Za-z0-9_]*|[a-z][a-z0-9_]*)"
 TYPE_PATTERN = rf"(?:buffer\s+of\s+{BUFFER_LENGTH_PATTERN}\s+{TYPE_REF_PATTERN}|array\s+of\s+{BUFFER_LENGTH_PATTERN}\s+{TYPE_REF_PATTERN}|view\s+of\s+{TYPE_REF_PATTERN}|(?:[A-Za-z][A-Za-z0-9_]*\.)*[A-Z][A-Za-z0-9_]*|[a-z][a-z0-9_]*)"
 OWNED_BUFFER_RETURN_PATTERN = rf"owned\s+buffer\s+of\s+{TYPE_REF_PATTERN}"
+PHRASE_HOLE_TYPE_PATTERN = rf"(?:{OWNED_BUFFER_RETURN_PATTERN}|{TYPE_PATTERN})"
 MODULE_RE = re.compile(r"[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z][A-Za-z0-9_]*)*")
 EXTERNAL_SYMBOL_PATTERN = r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*"
 
@@ -1400,7 +1402,7 @@ class Parser:
         if line.is_header:
             raise InscriptionError("extern phrase declarations cannot have bodies", line.number)
         gives_match = re.fullmatch(
-            rf"extern (.+?) gives ({TYPE_PATTERN}|{OWNED_BUFFER_RETURN_PATTERN}) as ({EXTERNAL_SYMBOL_PATTERN})",
+                rf"extern (.+?) gives ({PHRASE_HOLE_TYPE_PATTERN}) as ({EXTERNAL_SYMBOL_PATTERN})",
             line.text,
         )
         if gives_match is not None:
@@ -1421,7 +1423,7 @@ class Parser:
         if not line.is_header:
             raise InscriptionError("exported phrase definitions require a body", line.number)
         gives_match = re.fullmatch(
-            rf"export (.+?) gives ({TYPE_PATTERN}|{OWNED_BUFFER_RETURN_PATTERN}) as ({EXTERNAL_SYMBOL_PATTERN})",
+                rf"export (.+?) gives ({PHRASE_HOLE_TYPE_PATTERN}) as ({EXTERNAL_SYMBOL_PATTERN})",
             line.text,
         )
         if gives_match is not None:
@@ -1444,7 +1446,7 @@ class Parser:
         pos = 0
         holes = list(
             re.finditer(
-                rf"\b([a-z][a-z0-9_]*):\s*({TYPE_PATTERN})\b",
+                rf"\b([a-z][a-z0-9_]*):\s*({PHRASE_HOLE_TYPE_PATTERN})\b",
                 text,
             )
         )
@@ -2242,6 +2244,11 @@ class Parser:
 
     def _value_type(self, value: str, line: int) -> ValueType:
         value = " ".join(value.split())
+        if value.startswith("owned buffer of "):
+            element = value[len("owned buffer of ") :].strip()
+            if not re.fullmatch(TYPE_REF_PATTERN, element):
+                raise InscriptionError("malformed owned buffer type", line)
+            return OwnedBufferType(self._return_type(element, line))
         buffer_match = re.fullmatch(rf"buffer of ({BUFFER_LENGTH_PATTERN}) ({TYPE_REF_PATTERN})", value)
         if buffer_match is not None:
             return BufferType(self._buffer_length(buffer_match.group(1), line), self._return_type(buffer_match.group(2), line))
@@ -2593,6 +2600,8 @@ class ExpressionParser:
             raise InscriptionError("require is a step and cannot be used as an expression", self.line)
         if token == "write":
             raise InscriptionError("write is a step and cannot be used as an expression", self.line)
+        if token == "move":
+            raise InscriptionError("move may only be used as an argument to an owned buffer parameter", self.line)
         if token == "(":
             inner = self.parse_expression(stop={")"})
             if self.at_end() or self.pop() != ")":
@@ -2789,8 +2798,8 @@ class ExpressionParser:
             self.pos = saved
         return None
 
-    def _match_phrase_template(self, template: PhraseTemplate, stop: set[str]) -> list[Expr] | None:
-        args: list[Expr] = []
+    def _match_phrase_template(self, template: PhraseTemplate, stop: set[str]) -> list[Expr | MoveArg] | None:
+        args: list[Expr | MoveArg] = []
         parts = template.parts
         part_index = 0
         while part_index < len(parts):
@@ -2829,9 +2838,17 @@ class ExpressionParser:
                 self.pos = end
             if not arg_tokens:
                 raise InscriptionError("phrase call is missing an argument", self.line)
-            args.append(parse_expression_tokens(arg_tokens, self.line, self.phrases))
+            args.append(self._parse_call_actual(arg_tokens))
             part_index += 1
         return args
+
+    def _parse_call_actual(self, arg_tokens: list[str]) -> Expr | MoveArg:
+        if arg_tokens and arg_tokens[0] == "move":
+            if len(arg_tokens) == 1:
+                raise InscriptionError("move must name an owned buffer binding", self.line)
+            source = parse_expression_tokens(arg_tokens[1:], self.line, self.phrases)
+            return MoveArg(source, self.line)
+        return parse_expression_tokens(arg_tokens, self.line, self.phrases)
 
     def _next_literal_sequence(self, parts: tuple[PhrasePart, ...], start: int) -> tuple[str, ...]:
         literals: list[str] = []

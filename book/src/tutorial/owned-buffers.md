@@ -25,4 +25,18 @@ Let cells be make cells 4.
 Give length of cells.
 ```
 
-Owned buffers cannot be copied, rebound, passed as owned parameters, or exposed through extern/export ABI. Pass them to reusable code through `view of TYPE` parameters.
+Reusable code can either borrow owned buffers through `view of TYPE` parameters or consume them through `owned buffer of TYPE` parameters. Consuming calls require explicit `move`, and the source binding cannot be used afterward. Owned buffers still cannot be copied, rebound, or exposed through extern/export ABI.
+
+
+Consuming calls are useful when a helper should take responsibility for cleanup or return the buffer onward:
+
+```inscription,check
+To sum and drop cells cells: owned buffer of i32, giving i32.
+Let total be 0.
+For each index i of cells: total becomes total plus cells at i.
+Give total.
+
+To main, giving i32.
+Let cells be owned buffer of 4 i32 filled with 3.
+Give sum and drop cells move cells.
+```

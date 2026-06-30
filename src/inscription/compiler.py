@@ -43,6 +43,7 @@ from .ast import (
     MatchExprArm,
     MatchStep,
     MatchStepArm,
+    MoveArg,
     OffsetOfField,
     OwnedBufferBinding,
     OwnedBufferType,
@@ -522,6 +523,12 @@ def qualify_storage_element(
     return qualify_expr(element, module_name, record_names, constant_names)
 
 
+def qualify_call_actual(expr: Expr | MoveArg, module_name: str, record_names: set[str], constant_names: set[str]) -> Expr | MoveArg:
+    if isinstance(expr, MoveArg):
+        return MoveArg(qualify_expr(expr.source, module_name, record_names, constant_names), expr.line)
+    return qualify_expr(expr, module_name, record_names, constant_names)
+
+
 def qualify_expr(expr: Expr, module_name: str, record_names: set[str], constant_names: set[str]) -> Expr:
     if isinstance(expr, Integer | Float | ByteLiteral | Boolean | LengthOfBytes):
         return expr
@@ -577,7 +584,7 @@ def qualify_expr(expr: Expr, module_name: str, record_names: set[str], constant_
     if isinstance(expr, Cast):
         return Cast(qualify_expr(expr.expr, module_name, record_names, constant_names), qualify_type(expr.target_type, module_name, record_names, constant_names), expr.line)
     if isinstance(expr, Call):
-        return Call(expr.name, tuple(qualify_expr(arg, module_name, record_names, constant_names) for arg in expr.args), expr.line)
+        return Call(expr.name, tuple(qualify_call_actual(arg, module_name, record_names, constant_names) for arg in expr.args), expr.line)
     if isinstance(expr, Comparison):
         return Comparison(expr.pred, qualify_expr(expr.left, module_name, record_names, constant_names), qualify_expr(expr.right, module_name, record_names, constant_names), expr.line)
     if isinstance(expr, WhenExpr):

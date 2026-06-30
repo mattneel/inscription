@@ -2220,6 +2220,7 @@ class CompilerTests(unittest.TestCase):
                 "union HighlightToken:\n  eof\n  operator symbol: u8 and precedence: u8\n\nhighlight token gives i32:\n  match HighlightToken.operator with symbol be 1 and precedence be 2:\n    HighlightToken.operator with symbol as op and precedence as prec gives (op as i32) plus (prec as i32)\n    otherwise gives 0\n",
                 "highlight bytes gives i32:\n  let text be array of bytes \"A\\n\"\n  match text at 0:\n    byte \"A\" gives length of bytes \"A\\n\"\n    otherwise gives 0\n",
                 "highlight owned n: i32 gives i32:\n  let cells be owned buffer of n i32 filled with 1\n  length of cells\n",
+                "To highlight move cells: owned buffer of i32, giving i32.\nGive length of cells.\n\nTo highlight move main, giving i32.\nLet cells be owned buffer of 1 i32 filled with 0.\nGive highlight move move cells.\n",
                 "To highlight then, giving i32.\nFor i from 0 up to 1: For j from 0 up to 1: i becomes i; then i becomes i.\nGive 0.\n",
             ]
         )
@@ -4163,6 +4164,154 @@ Give result plus seen.
             run = subprocess.run([str(executable)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False)
             self.assertEqual(run.returncode, 7, run.stderr)
 
+    def test_v036_owned_buffer_parameters_and_explicit_move(self):
+        consume = compile_source(self.fixture("owned_buffer_param_consume.ins"))
+        self.assertIn("func.func @consume_cells(%cells: memref<?xi32>, %cells_length: i32) -> i32", consume)
+        self.assertIn("memref.dealloc %cells : memref<?xi32>", consume)
+        self.assertIn("func.call @consume_cells", consume)
+
+        returned = compile_source(self.fixture("owned_buffer_param_return.ins"))
+        self.assertIn("func.func @forward_cells(%cells: memref<?xi32>, %cells_length: i32) -> (memref<?xi32>, i32)", returned)
+        self.assertIn("return %cells, %cells_length : memref<?xi32>, i32", returned)
+        self.assertRegex(returned, r"memref\.dealloc %\d+#0 : memref<\?xi32>")
+
+        chained = compile_source(self.fixture("owned_buffer_param_chain.ins"))
+        self.assertIn("func.func @fill_cells(%cells: memref<?xi32>, %cells_length: i32, %value: i32) -> (memref<?xi32>, i32)", chained)
+        self.assertIn("func.func @sum_and_drop_cells(%cells: memref<?xi32>, %cells_length: i32) -> i32", chained)
+        self.assertIn("memref.dealloc %cells : memref<?xi32>", chained)
+
+        borrow = compile_source(self.fixture("owned_buffer_param_borrow.ins"))
+        self.assertIn("func.call @sum_view", borrow)
+        self.assertIn("memref.dealloc %cells : memref<?xi32>", borrow)
+
+        does = compile_source(self.fixture("owned_buffer_param_does.ins"))
+        self.assertIn("func.func @fill_and_drop(%cells: memref<?xi32>, %cells_length: i32, %value: i32)", does)
+        self.assertIn("memref.dealloc %cells : memref<?xi32>", does)
+
+        self.assertCompileError(
+            "To consume cells cells: owned buffer of i32, giving i32.\n"
+            "Give length of cells.\n\n"
+            "To bad, giving i32.\n"
+            "Let cells be owned buffer of 4 i32 filled with 1.\n"
+            "Give consume cells cells.\n",
+            "argument cells for owned buffer parameter must be passed with move",
+        )
+        self.assertCompileError(
+            "To consume cells cells: owned buffer of i32, giving i32.\n"
+            "Give length of cells.\n\n"
+            "To bad, giving i32.\n"
+            "Let cells be owned buffer of 4 i32 filled with 1.\n"
+            "Let n be consume cells move cells.\n"
+            "Give length of cells.\n",
+            "owned buffer cells was moved and cannot be used",
+        )
+        self.assertCompileError(
+            "To consume cells cells: owned buffer of i32, giving i32.\n"
+            "Give length of cells.\n\n"
+            "To bad flag: i1, giving i32.\n"
+            "Let cells be owned buffer of 4 i32 filled with 1.\n"
+            "Let result be 0.\n"
+            "When flag, result becomes consume cells move cells.\n"
+            "Otherwise, result becomes 0.\n"
+            "Give result.\n",
+            "owned buffer cells may be moved only in unconditional flow in v0.36",
+        )
+        self.assertCompileError(
+            "To make cells count: i32, giving owned buffer of i32.\n"
+            "Let cells be owned buffer of count i32 filled with 1.\n"
+            "Give cells.\n\n"
+            "To consume cells cells: owned buffer of i32, giving i32.\n"
+            "Give length of cells.\n\n"
+            "To bad, giving i32.\n"
+            "Give consume cells move make cells 4.\n",
+            "owned buffer result from `make cells _` must be bound before it can be moved",
+        )
+
+    def test_v036_owned_buffer_parameter_artifacts_and_runtime_checks(self):
+        try:
+            resolve_toolchain()
+        except ToolchainError:
+            return
+
+        env = {**os.environ, "PYTHONPATH": str(SRC)}
+        for fixture, status in [
+            ("checked_owned_param_index.ins", 3),
+            ("checked_owned_param_view.ins", 7),
+        ]:
+            with self.subTest(runtime_checked=fixture):
+                checked = subprocess.run(
+                    [
+                        sys.executable,
+                        "-m",
+                        "inscription",
+                        "run",
+                        str(FIXTURES / fixture),
+                        "--runtime-checks",
+                    ],
+                    cwd=ROOT,
+                    env=env,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    check=False,
+                )
+                self.assertEqual(checked.returncode, status, checked.stderr)
+                self.assertEqual(checked.stdout, "")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            llvm_ir = tmp_path / "owned_buffer_param_consume.ll"
+            llvm_proc = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "inscription",
+                    "compile",
+                    str(FIXTURES / "owned_buffer_param_consume.ins"),
+                    "--emit",
+                    "llvm-ir",
+                    "--verify",
+                    "-o",
+                    str(llvm_ir),
+                ],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(llvm_proc.returncode, 0, llvm_proc.stderr)
+            self.assertIn("define i32 @main", llvm_ir.read_text())
+
+            try:
+                resolve_toolchain(require_static_library=True)
+            except ToolchainError:
+                pass
+            else:
+                archive = tmp_path / "libowned_buffer_param_consume.a"
+                archive_proc = subprocess.run(
+                    [
+                        sys.executable,
+                        "-m",
+                        "inscription",
+                        "compile",
+                        str(FIXTURES / "owned_buffer_param_consume.ins"),
+                        "--emit",
+                        "static-library",
+                        "-o",
+                        str(archive),
+                    ],
+                    cwd=ROOT,
+                    env=env,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    check=False,
+                )
+                self.assertEqual(archive_proc.returncode, 0, archive_proc.stderr)
+                self.assertGreater(archive.stat().st_size, 0)
+
     def test_negative_diagnostics(self):
         cases = {
             "malformed top level": ("Please add two numbers\n", "missing period at end of sentence"),
@@ -5321,7 +5470,7 @@ Give result plus seen.
             ),
             "owned buffer union element unsupported": (
                 "union MaybeI32:\n  none\n\nbad n: i32 gives i32:\n  let values be owned buffer of n MaybeI32 filled with MaybeI32.none\n  0\n",
-                "owned buffer element type may not be a union type in v0.31",
+                "owned buffer element type may not be a union type in v0.36",
             ),
             "owned buffer fill type mismatch": (
                 "bad n: i32 gives i32:\n  let cells be owned buffer of n i32 filled with true\n  0\n",
@@ -5389,7 +5538,7 @@ Give result plus seen.
             ),
             "owned buffer return union element unsupported": (
                 "union MaybeI32:\n  none\n\nbad gives owned buffer of MaybeI32:\n  0\n",
-                "owned buffer element type may not be a union type in v0.31",
+                "owned buffer element type may not be a union type in v0.36",
             ),
             "owned buffer return scalar invalid": (
                 "bad gives owned buffer of i32:\n  0\n",
@@ -5442,6 +5591,66 @@ Give result plus seen.
             "returned owned buffer copy invalid": (
                 "make cells count: i32 gives owned buffer of i32:\n  let cells be owned buffer of count i32 filled with 0\n  cells\n\nbad gives i32:\n  let cells be make cells 4\n  let copy be cells\n  0\n",
                 "owned buffer cells cannot be used as a value",
+            ),
+            "owned buffer parameter exported unsupported": (
+                "To consume cells cells: owned buffer of i32, giving i32, exported as ins_consume.\nGive length of cells.\n",
+                "exported phrase parameters must be primitive scalar types, got owned buffer of i32",
+            ),
+            "owned buffer parameter extern unsupported": (
+                "External consume cells cells: owned buffer of i32, giving i32, as host_consume.\n",
+                "extern phrase parameters must be primitive scalar types, got owned buffer of i32",
+            ),
+            "owned buffer parameter missing move": (
+                "To consume cells cells: owned buffer of i32, giving i32.\nGive length of cells.\n\nTo bad, giving i32.\nLet cells be owned buffer of 4 i32 filled with 1.\nGive consume cells cells.\n",
+                "argument cells for owned buffer parameter must be passed with move",
+            ),
+            "move to view parameter invalid": (
+                "To sum view cells: view of i32, giving i32.\nGive length of cells.\n\nTo bad, giving i32.\nLet cells be owned buffer of 4 i32 filled with 1.\nGive sum view move cells.\n",
+                "move may only be used as an argument to an owned buffer parameter",
+            ),
+            "move non owned fixed buffer invalid": (
+                "To consume cells cells: owned buffer of i32, giving i32.\nGive length of cells.\n\nTo bad, giving i32.\nLet cells be buffer of 4 i32 filled with 1.\nGive consume cells move cells.\n",
+                "move requires an owned buffer, got buffer of 4 i32",
+            ),
+            "owned buffer use after move invalid": (
+                "To consume cells cells: owned buffer of i32, giving i32.\nGive length of cells.\n\nTo bad, giving i32.\nLet cells be owned buffer of 4 i32 filled with 1.\nLet n be consume cells move cells.\nGive length of cells.\n",
+                "owned buffer cells was moved and cannot be used",
+            ),
+            "owned buffer double move invalid": (
+                "To consume cells cells: owned buffer of i32, giving i32.\nGive length of cells.\n\nTo bad, giving i32.\nLet cells be owned buffer of 4 i32 filled with 1.\nLet a be consume cells move cells.\nLet b be consume cells move cells.\nGive a plus b.\n",
+                "owned buffer cells was moved and cannot be used",
+            ),
+            "owned buffer moved store invalid": (
+                "To consume cells cells: owned buffer of i32, giving i32.\nGive length of cells.\n\nTo bad, giving i32.\nLet cells be owned buffer of 4 i32 filled with 1.\nLet n be consume cells move cells.\ncells at 0 becomes 7.\nGive n.\n",
+                "owned buffer cells was moved and cannot be used",
+            ),
+            "move outer owned buffer inside branch invalid": (
+                "To consume cells cells: owned buffer of i32, giving i32.\nGive length of cells.\n\nTo bad flag: i1, giving i32.\nLet cells be owned buffer of 4 i32 filled with 1.\nLet result be 0.\nWhen flag, result becomes consume cells move cells.\nOtherwise, result becomes 0.\nGive result.\n",
+                "owned buffer cells may be moved only in unconditional flow in v0.36",
+            ),
+            "move outer owned buffer inside loop invalid": (
+                "To consume cells cells: owned buffer of i32, giving i32.\nGive length of cells.\n\nTo bad, giving i32.\nLet cells be owned buffer of 4 i32 filled with 1.\nLet total be 0.\nFor i from 0 up to 3: total becomes total plus consume cells move cells.\nGive total.\n",
+                "owned buffer cells may be moved only in unconditional flow in v0.36",
+            ),
+            "move outer owned buffer inside match arm invalid": (
+                "Enum Mode backed by u8 has active be 0.\n\nTo consume cells cells: owned buffer of i32, giving i32.\nGive length of cells.\n\nTo bad mode: Mode, giving i32.\nLet cells be owned buffer of 4 i32 filled with 1.\nLet result be 0.\nMatch mode:\nMode.active: result becomes consume cells move cells;\notherwise: result becomes 0.\nGive result.\n",
+                "owned buffer cells may be moved only in unconditional flow in v0.36",
+            ),
+            "move direct owned return call invalid": (
+                "To make cells count: i32, giving owned buffer of i32.\nLet cells be owned buffer of count i32 filled with 1.\nGive cells.\n\nTo consume cells cells: owned buffer of i32, giving i32.\nGive length of cells.\n\nTo bad, giving i32.\nGive consume cells move make cells 4.\n",
+                "owned buffer result from `make cells _` must be bound before it can be moved",
+            ),
+            "owned buffer parameter i1 element unsupported": (
+                "To bad cells: owned buffer of i1, giving i32.\nGive 0.\n",
+                "owned buffer element type must be numeric or enum, got i1",
+            ),
+            "owned buffer parameter union element unsupported": (
+                "Union MaybeI32 has none.\n\nTo bad cells: owned buffer of MaybeI32, giving i32.\nGive 0.\n",
+                "owned buffer element type may not be a union type in v0.36",
+            ),
+            "move as scalar expression invalid": (
+                "To bad, giving i32.\nLet cells be owned buffer of 4 i32 filled with 1.\nLet x be move cells.\nGive x.\n",
+                "move may only be used as an argument to an owned buffer parameter",
             ),
         }
         for name, (source, contains) in cases.items():

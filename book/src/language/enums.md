@@ -9,4 +9,4 @@ To main, giving i32.
 Give 7 when Mode.active is equal to Mode.active; otherwise 0.
 ```
 
-Enums support equality, constants, buffers, arrays, views, records, layout fields, and explicit casts to/from their underlying integer. They do not support arithmetic or extern/export ABI in v0.34.
+Enums support equality, constants, buffers, arrays, views, records, layout fields, and explicit casts to/from their underlying integer. They do not support arithmetic or extern/export ABI in v0.36.

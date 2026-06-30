@@ -12,4 +12,6 @@ Recent milestones:
 - v0.29-v0.31: owned dynamic buffers, lexical cleanup, and owned-buffer returns.
 - v0.32: prose-punctuation syntax.
 - v0.33: canonical formatter.
-- v0.34: The Inscription Book and explicit `then` parent-continuation clauses for nested punctuation control flow.
+- v0.34: explicit `then` parent-continuation clauses for nested punctuation control flow.
+- v0.35: mdBook documentation site and GitHub Pages workflow.
+- v0.36: explicit `move` and consuming owned-buffer parameters.

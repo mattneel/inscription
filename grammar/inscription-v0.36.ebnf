@@ -1,0 +1,71 @@
+(* Inscription v0.36 grammar mirror. v0.36 extends v0.34 with consuming owned-buffer parameters and explicit `move` phrase actuals. *)
+
+program                 ::= module_decl? import_decl* top_level_decl* ;
+module_decl             ::= "Module" qualified_name "." ;
+import_decl             ::= "Import" qualified_name ("as" identifier)? "." ;
+
+top_level_decl          ::= type_alias_decl | constant_decl | check_decl | record_decl | layout_record_decl
+                          | enum_decl | union_decl | external_decl | phrase_decl ;
+type_alias_decl         ::= "Type" type_name "be" type_expr "." ;
+constant_decl           ::= "Constant" identifier ":" type_expr "be" expression "." ;
+check_decl              ::= "Check" expression "." ;
+record_decl             ::= "Record" type_name "has" field_list? "." ;
+layout_record_decl      ::= ("Layout" "record" | "Packed" "layout" "record") type_name "has" field_list? "." ;
+field_list              ::= field (";" field)* ;
+field                   ::= identifier ":" type_expr ;
+enum_decl               ::= "Enum" type_name "backed" "by" type_expr "has" enum_case_list? "." ;
+enum_case_list          ::= enum_case (";" enum_case)* ;
+enum_case               ::= identifier "be" expression ;
+union_decl              ::= "Union" type_name "has" union_variant_list? "." ;
+union_variant_list      ::= union_variant (";" union_variant)* ;
+union_variant           ::= identifier (payload_field ("and" payload_field)*)? ;
+payload_field           ::= identifier ":" type_expr ;
+external_decl           ::= "External" phrase_template ("," "giving" return_type)? "," "as" external_symbol "." ;
+phrase_decl             ::= "To" phrase_template ("," "giving" return_type)? ("," "exported" "as" external_symbol)? "." phrase_sentence* ;
+phrase_template         ::= phrase_word_or_hole+ ;
+phrase_word_or_hole     ::= identifier | connector | phrase_hole ;
+phrase_hole             ::= identifier ":" parameter_type ;
+parameter_type          ::= type_expr | "owned" "buffer" "of" type_expr ;
+connector               ::= "and" | "with" | "of" | "from" | "for" | "at" | "by" | ? non-reserved phrase word ? ;
+
+phrase_sentence         ::= let_sentence | require_sentence | check_sentence | write_sentence | assignment_sentence
+                          | when_sentence otherwise_sentence | while_sentence | for_sentence | foreach_sentence
+                          | match_step_sentence | call_sentence | give_sentence ;
+let_sentence            ::= "Let" identifier (":" type_expr)? "be" expression "." ;
+require_sentence        ::= "Require" expression "." ;
+check_sentence          ::= "Check" expression "." ;
+write_sentence          ::= "Write" expression "into" identifier "at" expression "." ;
+assignment_sentence     ::= expression "becomes" expression "." ;
+give_sentence           ::= "Give" expression "." ;
+when_sentence           ::= "When" expression ("," phrase_sentence_body | ":" clause_list ".") ;
+otherwise_sentence      ::= "Otherwise" ("," phrase_sentence_body | ":" clause_list ".") ;
+while_sentence          ::= "While" expression ("," phrase_sentence_body | ":" clause_list ".") ;
+for_sentence            ::= "For" identifier "from" expression "up" "to" expression ("by" expression)? ":" clause_list "." ;
+foreach_sentence        ::= "For" "each" "index" identifier "of" identifier ":" clause_list "." ;
+match_step_sentence     ::= "Match" expression ":" match_step_arm (";" match_step_arm)* "." ;
+match_step_arm          ::= pattern ":" clause_list | "otherwise" ":" clause_list ;
+clause_list             ::= clause_item (";" clause_item)* ;
+clause_item             ::= phrase_sentence_body | "then" phrase_sentence_body ;
+phrase_sentence_body    ::= ? any non-Give body sentence without final period ? ;
+
+(* `then` is valid only when the immediately preceding clause item is a nested While, For, For each, or Match controller. It pops exactly one nested controller level and resumes the parent clause list. *)
+
+phrase_actual           ::= expression | "move" identifier ;
+
+expression              ::= scalar_expr | phrase_call | record_constructor | union_constructor | match_expr | byte_literal | length_expr | layout_read ;
+phrase_call             ::= phrase words with phrase_actual values in template order ;
+match_expr              ::= "match" expression ":" match_expr_arm (";" match_expr_arm)* "." ;
+match_expr_arm          ::= pattern "gives" expression | "otherwise" "gives" expression ;
+pattern                 ::= enum_case | union_variant_pattern | integer_literal | boolean_literal | byte_literal | constant_ref ;
+
+type_expr               ::= scalar_type | qualified_name | "buffer" "of" length_expr type_expr | "array" "of" length_expr type_expr | "view" "of" type_expr ;
+return_type             ::= type_expr | "owned" "buffer" "of" type_expr ;
+scalar_type             ::= "i1" | "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" | "f32" | "f64" ;
+identifier              ::= ? lower-case identifier ? ;
+type_name               ::= ? upper-case identifier ? ;
+qualified_name          ::= type_name ("." type_name)* ;
+external_symbol         ::= ? C/LLVM symbol accepted by the compiler ? ;
+
+(* `move` is valid only as an actual for an owned-buffer parameter. External/exported phrase parameters remain primitive-scalar-only and cannot use owned buffers. Direct owned-returning call temporaries must be bound before they can be moved. *)
+
+(* Canonical formatter style: one blank line between top-level declarations, compact import groups, no indentation semantics, multiline match expression and Match step arms, exactly one trailing newline. `then` is preserved for parent continuation after nested control; `move` is preserved in consuming owned-buffer calls. *)

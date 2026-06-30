@@ -166,6 +166,12 @@ class Variable:
 
 
 @dataclass(frozen=True)
+class MoveArg:
+    source: "Expr"
+    line: int
+
+
+@dataclass(frozen=True)
 class BufferType:
     length: "BufferLength"
     element_type: "ValueType"
@@ -349,7 +355,7 @@ class Cast:
 @dataclass(frozen=True)
 class Call:
     name: str
-    args: tuple["Expr", ...]
+    args: tuple["CallActual", ...]
     line: int
 
 
@@ -415,6 +421,8 @@ Expr = (
     | WhenExpr
     | MatchExpr
 )
+
+CallActual = Expr | MoveArg
 
 BufferLength = int | Expr
 StorageElement = Expr | ByteString
