@@ -4,8 +4,9 @@ import argparse
 import sys
 from pathlib import Path
 
-from .compiler import compile_file
+from .compiler import compile_file, load_program
 from .diagnostics import InscriptionError
+from .mlir import emit_mlir
 from .runner import (
     EMIT_MODES,
     LOWERING_PASSES,
@@ -15,6 +16,7 @@ from .runner import (
     resolve_toolchain,
     run_file,
     selected_artifact,
+    validate_executable_main,
 )
 
 
@@ -54,12 +56,13 @@ def main(argv: list[str] | None = None) -> int:
     compile_p = sub.add_parser("compile", help="emit compiler artifacts for an Inscription source file")
     compile_p.add_argument("source", type=Path)
     compile_p.add_argument("-o", "--output", type=Path)
-    compile_p.add_argument("--emit", default="mlir", help="artifact to emit: mlir, lowered-mlir, llvm-ir, or object")
+    compile_p.add_argument("--emit", default="mlir", help="artifact to emit: mlir, lowered-mlir, llvm-ir, object, or executable")
     compile_p.add_argument(
         "--save-temps",
         type=Path,
         help="directory for saved source MLIR, optimized MLIR when enabled, lowered MLIR, LLVM IR, and object intermediates",
     )
+    compile_p.add_argument("--link-object", action="append", type=Path, default=[], help="additional object file to link for executable emission")
     compile_p.add_argument("--verify", action="store_true", help="verify emitted artifacts with the LLVM/MLIR 22 toolchain")
     compile_p.add_argument("--module-root", type=Path, help="root directory for resolving imported modules")
     compile_p.add_argument("--runtime-checks", action="store_true", help="emit runtime assertions for dynamic storage bounds")
@@ -86,6 +89,7 @@ def main(argv: list[str] | None = None) -> int:
     tools_p = sub.add_parser("check-tools", help="verify LLVM 22 toolchain discovery")
     tools_p.add_argument("--show-pipeline", action="store_true", help="show optimization presets and the MLIR lowering pipeline")
     tools_p.add_argument("--require-object", action="store_true", help="require LLVM 22 llc for object emission")
+    tools_p.add_argument("--require-executable", action="store_true", help="require LLVM 22 llc and clang for executable emission")
 
     args = parser.parse_args(argv)
     try:
@@ -94,8 +98,22 @@ def main(argv: list[str] | None = None) -> int:
                 raise InscriptionError(f"invalid emit mode {args.emit}")
             if args.emit == "object" and args.output is None:
                 raise InscriptionError("object emission requires -o OUTPUT")
+            if args.emit == "executable" and args.output is None:
+                raise InscriptionError("executable emission requires -o OUTPUT")
+            if args.link_object and args.emit != "executable":
+                raise InscriptionError("--link-object is supported only with --emit executable")
+            link_objects = tuple(args.link_object)
+            for path in link_objects:
+                if not path.exists():
+                    raise InscriptionError(f"link object {path} does not exist")
             opt_level = _resolve_opt_level(args)
-            mlir = compile_file(args.source, module_root=args.module_root, runtime_checks=args.runtime_checks)
+            if args.emit == "executable":
+                source_path = args.source.resolve()
+                program = load_program(source_path.read_text(), source_path=source_path, module_root=args.module_root)
+                validate_executable_main(program)
+                mlir = emit_mlir(program, runtime_checks=args.runtime_checks)
+            else:
+                mlir = compile_file(args.source, module_root=args.module_root, runtime_checks=args.runtime_checks)
             artifacts = build_artifacts(
                 mlir,
                 emit=args.emit,
@@ -103,7 +121,11 @@ def main(argv: list[str] | None = None) -> int:
                 save_temps=args.save_temps,
                 stem=args.source.stem,
                 opt_level=opt_level,
+                executable_output=args.output if args.emit == "executable" else None,
+                link_objects=link_objects,
             )
+            if args.emit == "executable":
+                return 0
             output = selected_artifact(artifacts, args.emit)
             if isinstance(output, bytes):
                 assert args.output is not None
@@ -143,7 +165,7 @@ def main(argv: list[str] | None = None) -> int:
                 sys.stdout.write(highlighted)
             return 0
         if args.command == "check-tools":
-            toolchain = resolve_toolchain(require_object=args.require_object)
+            toolchain = resolve_toolchain(require_object=args.require_object, require_executable=args.require_executable)
             print(f"mlir-opt={toolchain.mlir_opt}")
             print(f"mlir-translate={toolchain.mlir_translate}")
             print(f"lli={toolchain.lli}")
@@ -151,6 +173,10 @@ def main(argv: list[str] | None = None) -> int:
                 print("llc=unavailable (optional)")
             else:
                 print(f"llc={toolchain.llc}")
+            if toolchain.clang is None:
+                print("clang=unavailable (optional)")
+            else:
+                print(f"clang={toolchain.clang}")
             if args.show_pipeline:
                 print("optimization presets:")
                 for name, passes in OPTIMIZATION_PRESETS.items():
@@ -158,7 +184,8 @@ def main(argv: list[str] | None = None) -> int:
                 print("mlir-opt input.mlir " + " ".join(LOWERING_PASSES) + " -o lowered.mlir")
                 print("mlir-translate --mlir-to-llvmir lowered.mlir -o output.ll")
                 print("lli output.ll")
-                print("llc -filetype=obj output.ll -o output.o")
+                print("object emission: llc -relocation-model=pic -filetype=obj output.ll -o output.o")
+                print("executable emission: clang output.o -o executable")
             return 0
     except (InscriptionError, ToolchainError, OSError) as exc:
         print(f"error: {exc}", file=sys.stderr)

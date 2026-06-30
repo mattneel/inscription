@@ -23,7 +23,7 @@ LOWERING_PASSES = [
     "--reconcile-unrealized-casts",
 ]
 
-EMIT_MODES = {"mlir", "lowered-mlir", "llvm-ir", "object"}
+EMIT_MODES = {"mlir", "lowered-mlir", "llvm-ir", "object", "executable"}
 OPTIMIZATION_PRESETS = {
     "none": (),
     "basic": (
@@ -55,6 +55,7 @@ class Toolchain:
     mlir_translate: Path
     lli: Path
     llc: Path | None = None
+    clang: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -64,6 +65,7 @@ class ArtifactResult:
     lowered_mlir: str | None = None
     llvm_ir: str | None = None
     object_bytes: bytes | None = None
+    executable_path: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -74,13 +76,14 @@ class RunResult:
     llvm_ir: str
 
 
-def resolve_toolchain(*, require_object: bool = False) -> Toolchain:
+def resolve_toolchain(*, require_object: bool = False, require_executable: bool = False) -> Toolchain:
     root = Path(os.environ.get("MLIR_TOOLCHAIN", "/usr/lib/llvm-22/bin"))
     tools = {name: root / name for name in ("mlir-opt", "mlir-translate", "lli")}
     for name, path in tools.items():
         _require_llvm22_tool(name, path)
-    llc = _resolve_optional_llc(root, require_object=require_object)
-    return Toolchain(root, tools["mlir-opt"], tools["mlir-translate"], tools["lli"], llc)
+    llc = _resolve_optional_llc(root, require_object=require_object, require_executable=require_executable)
+    clang = _resolve_optional_clang(root, require_executable=require_executable)
+    return Toolchain(root, tools["mlir-opt"], tools["mlir-translate"], tools["lli"], llc, clang)
 
 
 def _require_llvm22_tool(name: str, path: Path) -> None:
@@ -91,21 +94,43 @@ def _require_llvm22_tool(name: str, path: Path) -> None:
         raise ToolchainError(f"tool '{path}' does not report LLVM/MLIR 22.x")
 
 
-def _resolve_optional_llc(root: Path, *, require_object: bool) -> Path | None:
+def _resolve_optional_llc(root: Path, *, require_object: bool, require_executable: bool) -> Path | None:
     path = root / "llc"
+    context = "executable emission" if require_executable else "object emission"
+    required = require_object or require_executable
     if not path.exists() or not os.access(path, os.X_OK):
-        if require_object:
-            raise ToolchainError("object emission requires llc from LLVM 22, but llc was not found")
+        if required:
+            raise ToolchainError(f"{context} requires llc from LLVM 22, but llc was not found")
         return None
     version = _tool_version(path)
     if not _reports_llvm22(version):
-        if require_object:
+        if required:
             major = _llvm_major(version)
             if major is not None:
-                raise ToolchainError(f"object emission requires llc from LLVM 22, got LLVM {major}.x")
-            raise ToolchainError("object emission requires llc from LLVM 22, but llc does not report LLVM 22.x")
+                raise ToolchainError(f"{context} requires llc from LLVM 22, got LLVM {major}.x")
+            raise ToolchainError(f"{context} requires llc from LLVM 22, but llc does not report LLVM 22.x")
         return None
     return path
+
+
+def _resolve_optional_clang(root: Path, *, require_executable: bool) -> Path | None:
+    candidates = (root / "clang", root / "clang-22")
+    invalid_versions: list[str] = []
+    for path in candidates:
+        if not path.exists() or not os.access(path, os.X_OK):
+            continue
+        version = _tool_version(path)
+        if _reports_llvm22(version):
+            return path
+        invalid_versions.append(version)
+    if not require_executable:
+        return None
+    if invalid_versions:
+        major = _llvm_major(invalid_versions[0])
+        if major is not None:
+            raise ToolchainError(f"executable emission requires clang from LLVM 22, got LLVM {major}.x")
+        raise ToolchainError("executable emission requires clang from LLVM 22, but clang does not report LLVM 22.x")
+    raise ToolchainError("executable emission requires clang from LLVM 22, but clang was not found")
 
 
 def _tool_version(path: Path) -> str:
@@ -189,10 +214,26 @@ def compile_object(llvm_ir: str, toolchain: Toolchain | None = None) -> bytes:
         object_path = tmp_path / "output.o"
         llvm_path.write_text(llvm_ir)
         _run_checked(
-            [str(toolchain.llc), "-filetype=obj", str(llvm_path), "-o", str(object_path)],
+            [str(toolchain.llc), "-relocation-model=pic", "-filetype=obj", str(llvm_path), "-o", str(object_path)],
             "object emission failed",
         )
         return object_path.read_bytes()
+
+
+def link_executable(object_bytes: bytes, output_path: Path, link_objects: tuple[Path, ...], toolchain: Toolchain | None = None) -> None:
+    toolchain = toolchain or resolve_toolchain(require_executable=True)
+    if toolchain.clang is None:
+        raise ToolchainError("executable emission requires clang from LLVM 22, but clang was not found")
+    for path in link_objects:
+        if not path.exists():
+            raise InscriptionError(f"link object {path} does not exist")
+    with tempfile.TemporaryDirectory(prefix="inscription-link-") as tmp:
+        object_path = Path(tmp) / "input.o"
+        object_path.write_bytes(object_bytes)
+        _run_checked(
+            [str(toolchain.clang), str(object_path), *(str(path) for path in link_objects), "-o", str(output_path)],
+            "executable link failed",
+        )
 
 
 def build_artifacts(
@@ -204,14 +245,20 @@ def build_artifacts(
     stem: str = "input",
     toolchain: Toolchain | None = None,
     opt_level: str = "none",
+    executable_output: Path | None = None,
+    link_objects: tuple[Path, ...] = (),
 ) -> ArtifactResult:
     if emit not in EMIT_MODES:
         raise InscriptionError(f"invalid emit mode {emit}")
+    if emit == "executable" and executable_output is None:
+        raise InscriptionError("executable emission requires -o OUTPUT")
     if opt_level not in OPTIMIZATION_PRESETS:
         raise InscriptionError(f"invalid optimization level {opt_level}")
     needs_optimized = opt_level != "none" and (emit != "mlir" or verify or save_temps is not None)
     needs_toolchain = emit != "mlir" or verify or needs_optimized
-    if emit == "object":
+    if emit == "executable":
+        toolchain = toolchain or resolve_toolchain(require_executable=True)
+    elif emit == "object":
         toolchain = toolchain or resolve_toolchain(require_object=True)
     elif needs_toolchain:
         toolchain = toolchain or resolve_toolchain()
@@ -236,22 +283,26 @@ def build_artifacts(
     if emit != "mlir" or verify:
         assert toolchain is not None
         lowered = lower_mlir(lowering_input, toolchain)
-        if verify and emit in {"lowered-mlir", "llvm-ir", "object"}:
+        if verify and emit in {"lowered-mlir", "llvm-ir", "object", "executable"}:
             verify_mlir(lowered, toolchain)
 
-    if emit in {"llvm-ir", "object"}:
+    if emit in {"llvm-ir", "object", "executable"}:
         assert lowered is not None
         assert toolchain is not None
         llvm_ir = translate_to_llvm_ir(lowered, toolchain)
 
-    if emit == "object":
+    if emit in {"object", "executable"}:
         assert llvm_ir is not None
         assert toolchain is not None
         object_bytes = compile_object(llvm_ir, toolchain)
 
-    result = ArtifactResult(mlir, optimized, lowered, llvm_ir, object_bytes)
+    result = ArtifactResult(mlir, optimized, lowered, llvm_ir, object_bytes, executable_output if emit == "executable" else None)
     if save_temps is not None:
         _save_artifacts(result, save_temps, stem)
+    if emit == "executable":
+        assert object_bytes is not None
+        assert executable_output is not None
+        link_executable(object_bytes, executable_output, link_objects, toolchain)
     return result
 
 
@@ -267,6 +318,8 @@ def selected_artifact(result: ArtifactResult, emit: str) -> str | bytes:
     if emit == "object":
         assert result.object_bytes is not None
         return result.object_bytes
+    if emit == "executable":
+        raise InscriptionError("executable emission writes directly to -o OUTPUT")
     raise InscriptionError(f"invalid emit mode {emit}")
 
 
@@ -339,6 +392,14 @@ def run_file(
 
 
 def validate_runnable_main(program: Program) -> None:
+    _validate_main(program, require_no_hole_main=False)
+
+
+def validate_executable_main(program: Program) -> None:
+    _validate_main(program, require_no_hole_main=True)
+
+
+def _validate_main(program: Program, *, require_no_hole_main: bool) -> None:
     records = record_table(program)
     functions = function_table(program)
     constants = constant_table(program, records, functions)
@@ -346,8 +407,12 @@ def validate_runnable_main(program: Program) -> None:
     validate_external_symbols(functions)
     main = functions.get("main")
     if main is None:
+        if require_no_hole_main:
+            raise InscriptionError("program must define a no-hole main to emit an executable")
         return
     if main.params:
+        if require_no_hole_main:
+            raise InscriptionError("program must define a no-hole main to emit an executable", main.line)
         return
     if main.return_type not in INTEGER_TYPES:
         raise InscriptionError(f"program main must return an integer scalar, got {format_type(main.return_type)}", main.line)

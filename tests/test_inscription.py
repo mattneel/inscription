@@ -610,6 +610,337 @@ class CompilerTests(unittest.TestCase):
         self.assertIn("basic: canonicalize, cse", pipeline.stdout)
         self.assertIn("aggressive: canonicalize, cse, sccp", pipeline.stdout)
 
+    def test_v018_executable_emission_and_save_temps(self):
+        env = {**os.environ, "PYTHONPATH": str(SRC)}
+        source = FIXTURES / "phrase_max.ins"
+        no_output_executable = subprocess.run(
+            [sys.executable, "-m", "inscription", "compile", str(source), "--emit", "executable"],
+            cwd=ROOT,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(no_output_executable.returncode, 2)
+        self.assertIn("executable emission requires -o OUTPUT", no_output_executable.stderr)
+
+        try:
+            toolchain = resolve_toolchain(require_executable=True)
+        except ToolchainError as exc:
+            self.skipTest(str(exc))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+
+            cases = [
+                (
+                    FIXTURES / "phrase_max.ins",
+                    [],
+                    tmp_path / "phrase_max",
+                    7,
+                ),
+                (
+                    FIXTURES / "optimization_arithmetic.ins",
+                    ["-O2"],
+                    tmp_path / "optimization_arithmetic",
+                    42,
+                ),
+                (
+                    FIXTURES / "export_module_phrase" / "main.ins",
+                    ["-O1"],
+                    tmp_path / "export_module_phrase",
+                    81,
+                ),
+                (
+                    FIXTURES / "checked_dynamic_buffer_index.ins",
+                    ["--runtime-checks"],
+                    tmp_path / "checked_dynamic_buffer_index",
+                    3,
+                ),
+            ]
+            for fixture, options, executable, expected in cases:
+                with self.subTest(fixture=fixture):
+                    proc = subprocess.run(
+                        [
+                            sys.executable,
+                            "-m",
+                            "inscription",
+                            "compile",
+                            str(fixture),
+                            "--emit",
+                            "executable",
+                            *options,
+                            "-o",
+                            str(executable),
+                        ],
+                        cwd=ROOT,
+                        env=env,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        text=True,
+                        check=False,
+                    )
+                    self.assertEqual(proc.returncode, 0, proc.stderr)
+                    self.assertEqual(proc.stdout, "")
+                    self.assertTrue(executable.exists())
+                    self.assertGreater(executable.stat().st_size, 0)
+                    self.assertTrue(os.access(executable, os.X_OK))
+                    run = subprocess.run([str(executable)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False)
+                    self.assertEqual(run.returncode, expected, run.stderr)
+                    self.assertEqual(run.stdout, "")
+
+            temps = tmp_path / "exe-temps"
+            saved_exe = tmp_path / "saved_phrase_max"
+            save_proc = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "inscription",
+                    "compile",
+                    str(source),
+                    "--emit",
+                    "executable",
+                    "--save-temps",
+                    str(temps),
+                    "-o",
+                    str(saved_exe),
+                ],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(save_proc.returncode, 0, save_proc.stderr)
+            self.assertTrue((temps / "phrase_max.mlir").exists())
+            self.assertFalse((temps / "phrase_max.optimized.mlir").exists())
+            self.assertTrue((temps / "phrase_max.lowered.mlir").exists())
+            self.assertTrue((temps / "phrase_max.ll").exists())
+            self.assertTrue((temps / "phrase_max.o").exists())
+            self.assertTrue(saved_exe.exists())
+
+            opt_temps = tmp_path / "exe-opt-temps"
+            opt_save_proc = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "inscription",
+                    "compile",
+                    str(source),
+                    "--emit",
+                    "executable",
+                    "-O1",
+                    "--save-temps",
+                    str(opt_temps),
+                    "-o",
+                    str(tmp_path / "saved_phrase_max_o1"),
+                ],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(opt_save_proc.returncode, 0, opt_save_proc.stderr)
+            self.assertTrue((opt_temps / "phrase_max.mlir").exists())
+            self.assertTrue((opt_temps / "phrase_max.optimized.mlir").exists())
+            self.assertTrue((opt_temps / "phrase_max.lowered.mlir").exists())
+            self.assertTrue((opt_temps / "phrase_max.ll").exists())
+            self.assertTrue((opt_temps / "phrase_max.o").exists())
+
+            pipeline = subprocess.run(
+                [sys.executable, "-m", "inscription", "check-tools", "--require-executable", "--show-pipeline"],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(pipeline.returncode, 0, pipeline.stderr)
+            self.assertIn(f"clang={toolchain.clang}", pipeline.stdout)
+            self.assertIn("object emission: llc", pipeline.stdout)
+            self.assertIn("executable emission: clang", pipeline.stdout)
+
+    def test_v018_executable_diagnostics_and_link_objects(self):
+        env = {**os.environ, "PYTHONPATH": str(SRC)}
+        try:
+            toolchain = resolve_toolchain(require_executable=True)
+        except ToolchainError as exc:
+            self.skipTest(str(exc))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+
+            no_main = tmp_path / "no_main.ins"
+            no_main.write_text("helper gives i32:\n  0\n")
+            no_main_proc = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "inscription",
+                    "compile",
+                    str(no_main),
+                    "--emit",
+                    "executable",
+                    "-o",
+                    str(tmp_path / "no_main"),
+                ],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(no_main_proc.returncode, 2)
+            self.assertIn("program must define a no-hole main to emit an executable", no_main_proc.stderr)
+
+            missing = tmp_path / "missing_extern.ins"
+            missing.write_text("extern missing call gives i32 as definitely_missing_symbol\n\nmain gives i32:\n  missing call\n")
+            missing_object = tmp_path / "missing_extern.o"
+            object_proc = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "inscription",
+                    "compile",
+                    str(missing),
+                    "--emit",
+                    "object",
+                    "-o",
+                    str(missing_object),
+                ],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(object_proc.returncode, 0, object_proc.stderr)
+            self.assertGreater(missing_object.stat().st_size, 0)
+
+            link_fail = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "inscription",
+                    "compile",
+                    str(missing),
+                    "--emit",
+                    "executable",
+                    "-o",
+                    str(tmp_path / "missing_extern"),
+                ],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(link_fail.returncode, 2)
+            self.assertIn("executable link failed", link_fail.stderr)
+
+            bad_link_object = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "inscription",
+                    "compile",
+                    str(FIXTURES / "phrase_max.ins"),
+                    "--emit",
+                    "executable",
+                    "--link-object",
+                    str(tmp_path / "missing_host.o"),
+                    "-o",
+                    str(tmp_path / "bad_link_object"),
+                ],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(bad_link_object.returncode, 2)
+            self.assertIn("link object", bad_link_object.stderr)
+
+            unsupported_link_object = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "inscription",
+                    "compile",
+                    str(FIXTURES / "phrase_max.ins"),
+                    "--emit",
+                    "object",
+                    "--link-object",
+                    str(missing_object),
+                    "-o",
+                    str(tmp_path / "phrase_max.o"),
+                ],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(unsupported_link_object.returncode, 2)
+            self.assertIn("--link-object is supported only with --emit executable", unsupported_link_object.stderr)
+
+            host_ll = tmp_path / "host_double.ll"
+            host_ll.write_text(
+                "define i32 @host_double(i32 %x) {\n"
+                "entry:\n"
+                "  %y = mul i32 %x, 2\n"
+                "  ret i32 %y\n"
+                "}\n"
+            )
+            host_object = tmp_path / "host_double.o"
+            host_object_proc = subprocess.run(
+                [str(toolchain.llc), "-filetype=obj", str(host_ll), "-o", str(host_object)],
+                cwd=ROOT,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(host_object_proc.returncode, 0, host_object_proc.stderr)
+
+            host_source = tmp_path / "host_extern.ins"
+            host_source.write_text("extern host double x: i32 gives i32 as host_double\n\nmain gives i32:\n  host double 21\n")
+            host_executable = tmp_path / "host_extern"
+            host_proc = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "inscription",
+                    "compile",
+                    str(host_source),
+                    "--emit",
+                    "executable",
+                    "--link-object",
+                    str(host_object),
+                    "-o",
+                    str(host_executable),
+                ],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(host_proc.returncode, 0, host_proc.stderr)
+            run = subprocess.run([str(host_executable)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False)
+            self.assertEqual(run.returncode, 42, run.stderr)
+
     @unittest.skipUnless(importlib.util.find_spec("pygments"), "Pygments is not installed")
     def test_cli_highlight_outputs_terminal_ansi(self):
         proc = subprocess.run(
