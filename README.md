@@ -6,12 +6,14 @@ The language is readable, but it is **not** natural-language interpretation: eve
 
 ## Status
 
-This repository currently implements **Inscription v0.15**:
+This repository currently implements **Inscription v0.16**:
 
 - source-visible scalar types: `i1`, signed integers `i8`/`i16`/`i32`/`i64`, and unsigned integers `u8`/`u16`/`u32`/`u64`
 - phrase-shaped function definitions and phrase-shaped calls
 - scalar-only extern phrase declarations such as `extern population count of x: i32 gives i32 as llvm.ctpop.i32`
 - scalar-only exported phrase definitions such as `export add x: i32 and y: i32 gives i32 as ins_add:`
+- deterministic artifact emission with `compile --emit mlir|lowered-mlir|llvm-ir|object`
+- saved compiler intermediates with `compile/run --save-temps DIR`
 - value blocks with `expression when condition` and `otherwise expression`
 - implicit returns: the block value is the phrase result
 - local scalar bindings with `let name be expression` and `let name: type be expression`
@@ -53,10 +55,11 @@ This repository currently implements **Inscription v0.15**:
 - deterministic parsing and semantic checks
 - exact MLIR golden conformance tests in [`tests/goldens`](tests/goldens)
 - MLIR emission using `func`, `arith`, `scf.if`, `scf.for`, `scf.while`, flattened scalar SSA and flattened scalar function results for records, local `memref.alloca`/`memref.load`/`memref.store` for buffers, private `func.func` declarations for scalar extern phrases, public stable-symbol definitions for exported phrases, and `cf.assert` when runtime assertions are emitted
+- tooling output for frontend source MLIR, lowered MLIR, LLVM IR, and optional single-object output through LLVM 22 `llc`
 - LLVM 22 lowering and execution through `mlir-opt`, `mlir-translate`, and `lli`
-- no source-level I/O, heap allocation, pointers, dynamic-size buffers, buffer/view return values, buffer/view aliasing beyond conservative same-root rejection, slices, LLVM/C ABI structs, C ABI annotations, linker flags, extern/exported buffer/view/record parameters, extern/exported record returns, object-file packaging, floats, strings, statement-level `return`, `break`, `continue`, macros, import aliases, wildcard imports, generics, global storage, exceptions, result/error values, source strings, source-level runtime assertion messages, overloading, type coercions, or natural-language inference
+- no source-level I/O, heap allocation, pointers, dynamic-size buffers, buffer/view return values, buffer/view aliasing beyond conservative same-root rejection, slices, LLVM/C ABI structs, C ABI annotations, linker flags, extern/exported buffer/view/record parameters, extern/exported record returns, executable output, static/shared libraries, C headers, floats, strings, statement-level `return`, `break`, `continue`, macros, import aliases, wildcard imports, generics, global storage, exceptions, result/error values, source strings, source-level runtime assertion messages, overloading, type coercions, or natural-language inference
 
-See [`docs/inscription-v0.15-spec.md`](docs/inscription-v0.15-spec.md) and [`grammar/inscription-v0.15.ebnf`](grammar/inscription-v0.15.ebnf) for the exact current language contract. The immutable previous contracts remain in [`docs/`](docs) and [`grammar/`](grammar), including the v0.14 extern-phrase contract.
+See [`docs/inscription-v0.16-spec.md`](docs/inscription-v0.16-spec.md) and [`grammar/inscription-v0.16.ebnf`](grammar/inscription-v0.16.ebnf) for the exact current language and tooling contract. The immutable previous contracts remain in [`docs/`](docs) and [`grammar/`](grammar), including the v0.15 exported-phrase contract.
 
 ## Requirements
 
@@ -67,7 +70,7 @@ See [`docs/inscription-v0.15-spec.md`](docs/inscription-v0.15-spec.md) and [`gra
   - `mlir-translate`
   - `lli`
 
-Tool discovery is intentionally strict. The CLI uses `MLIR_TOOLCHAIN` when set; otherwise it checks `/usr/lib/llvm-22/bin`. All required tools must report LLVM/MLIR `22.x`.
+Tool discovery is intentionally strict. The CLI uses `MLIR_TOOLCHAIN` when set; otherwise it checks `/usr/lib/llvm-22/bin`. Required tools `mlir-opt`, `mlir-translate`, and `lli` must report LLVM/MLIR `22.x`; optional object emission additionally requires LLVM 22 `llc`.
 
 ```sh
 export MLIR_TOOLCHAIN=/usr/lib/llvm-22/bin
@@ -148,13 +151,15 @@ echo $?
 ## CLI
 
 ```sh
-python -m inscription compile SOURCE [-o OUTPUT] [--verify] [--module-root ROOT] [--runtime-checks]
+python -m inscription compile SOURCE [-o OUTPUT] [--emit mlir|lowered-mlir|llvm-ir|object] [--save-temps DIR] [--verify] [--module-root ROOT] [--runtime-checks]
 python -m inscription highlight SOURCE [-o OUTPUT] [--format terminal|html] [--style STYLE] [--full]
-python -m inscription run SOURCE [--module-root ROOT] [--runtime-checks]
-python -m inscription check-tools [--show-pipeline]
+python -m inscription run SOURCE [--module-root ROOT] [--runtime-checks] [--save-temps DIR]
+python -m inscription check-tools [--show-pipeline] [--require-object]
 ```
 
 Commands return `2` for compiler, diagnostic, toolchain, or filesystem errors. Imports resolve relative to the root source file directory by default; pass `--module-root ROOT` to resolve module paths from another directory.
+
+`compile --emit mlir` emits the frontend source MLIR and is the default exact-golden artifact. `--emit lowered-mlir` emits MLIR after the configured lowering pipeline. `--emit llvm-ir` emits LLVM IR from `mlir-translate`. `--emit object -o file.o` emits a single native object with LLVM 22 `llc`; it does not link or resolve extern symbols. `--save-temps DIR` writes deterministic `<stem>.mlir`, `<stem>.lowered.mlir`, `<stem>.ll`, and, for object emission, `<stem>.o` intermediates. `run --save-temps DIR` saves the stages used before execution through `lli`.
 
 `highlight` uses Pygments with a built-in Inscription lexer. The default output is ANSI-colored terminal text. Use `--format html --full -o file.html` to emit a complete HTML document.
 
@@ -220,7 +225,7 @@ main gives i32:
   add 40 and 2
 ```
 
-The source call still uses the phrase-shaped name (`add 40 and 2`), while MLIR defines and calls `@ins_add`. Imported exported phrases are still source-qualified by module name. v0.15 exports are scalar-only at the ABI boundary, but their bodies may use local records, buffers, views, `require`, helper phrases, and extern calls. Inscription does not yet provide object-file packaging, headers, linker flags, pointer parameters, buffer/view ABI, or record ABI lowering.
+The source call still uses the phrase-shaped name (`add 40 and 2`), while MLIR defines and calls `@ins_add`. Imported exported phrases are still source-qualified by module name. v0.15 exports are scalar-only at the ABI boundary, but their bodies may use local records, buffers, views, `require`, helper phrases, and extern calls. Inscription does not yet provide linking, executable packaging, headers, linker flags, pointer parameters, buffer/view ABI, or record ABI lowering.
 
 A scalar type is one of `i1`, `i8`, `i16`, `i32`, `i64`, `u8`, `u16`, `u32`, or `u64`. A record type is a nominal top-level name declared with scalar fields. A buffer parameter type is written `buffer of LENGTH TYPE`, where `TYPE` is an integer numeric scalar type, not `i1`, and `LENGTH` is a compile-time integer length. A borrowed view parameter type is written `view of TYPE`, where `TYPE` is an integer numeric scalar type, not `i1`. `i1` is boolean only; all other scalar types are integer numeric types. Signedness is source-semantic: MLIR integers are signless, but Inscription signedness selects division, remainder, ordered comparison, right-shift, widening cast, and dynamic buffer-index conversion operations. A scalar typed hole is written `name: type`; a buffer typed hole is written `name: buffer of LENGTH type`; a view typed hole is written `name: view of type`. The call site mirrors the definition by filling the holes:
 
@@ -444,8 +449,12 @@ left is greater than right
 left is greater than or equal to right
 ```
 
-Important v0.15 rules:
+Important v0.16 rules:
 
+- `compile --emit mlir` is the default and preserves exact source MLIR output
+- `compile --emit lowered-mlir` and `compile --emit llvm-ir` expose deterministic downstream textual artifacts
+- `compile --emit object -o file.o` requires optional LLVM 22 `llc`, emits one object file, and does not link
+- `compile/run --save-temps DIR` saves produced compiler intermediates under deterministic filenames
 - function names are generated from the leading literal words in a phrase definition
 - extern phrase declarations have no body and emit external `func.func private` declarations
 - exported phrase definitions have bodies and emit public definitions with the symbol named after `as`
@@ -528,7 +537,7 @@ Run the full test suite:
 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python -m unittest discover -s tests -v
 ```
 
-The suite includes exact MLIR golden conformance files under [`tests/goldens`](tests/goldens). Each `*.ins` source must compile byte-for-byte to its sibling `*.mlir`.
+The suite includes exact source-MLIR golden conformance files under [`tests/goldens`](tests/goldens). Each `*.ins` source must compile byte-for-byte to its sibling `*.mlir`. v0.16 artifact tests also exercise lowered MLIR, LLVM IR, object emission when `llc` is available, and saved intermediates without making lowered tool output byte-for-byte golden-stable.
 
 With LLVM/MLIR 22 available, verify the toolchain and fixture exit codes:
 
@@ -612,7 +621,7 @@ docs/inscription-v0.11-spec.md v0.11 language and toolchain specification
 docs/inscription-v0.12-spec.md v0.12 language and toolchain specification
 docs/inscription-v0.13-spec.md v0.13 language and toolchain specification
 docs/inscription-v0.14-spec.md v0.14 language and toolchain specification
-docs/inscription-v0.15-spec.md current v0.15 language and toolchain specification
+docs/inscription-v0.16-spec.md current v0.16 language and toolchain specification
 grammar/inscription-v0.ebnf   original v0 grammar
 grammar/inscription-v0.1.ebnf v0.1 grammar
 grammar/inscription-v0.2.ebnf v0.2 grammar
@@ -628,7 +637,7 @@ grammar/inscription-v0.11.ebnf v0.11 grammar
 grammar/inscription-v0.12.ebnf v0.12 grammar
 grammar/inscription-v0.13.ebnf v0.13 grammar
 grammar/inscription-v0.14.ebnf v0.14 grammar
-grammar/inscription-v0.15.ebnf current v0.15 grammar
+grammar/inscription-v0.16.ebnf current v0.16 grammar
 tests/goldens/                exact MLIR conformance goldens
 tests/                        unit tests and executable fixtures
 ```

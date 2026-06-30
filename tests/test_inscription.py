@@ -116,6 +116,238 @@ class CompilerTests(unittest.TestCase):
         self.assertEqual(proc.returncode, 3, proc.stderr)
         self.assertEqual(proc.stdout, "")
 
+    def test_v016_cli_artifact_emission_and_save_temps(self):
+        try:
+            toolchain = resolve_toolchain()
+        except ToolchainError as exc:
+            self.skipTest(str(exc))
+
+        env = {**os.environ, "PYTHONPATH": str(SRC)}
+        source = FIXTURES / "phrase_max.ins"
+        expected_mlir = (GOLDENS / "04_main_calls_max.mlir").read_text()
+
+        mlir_proc = subprocess.run(
+            [sys.executable, "-m", "inscription", "compile", str(source), "--emit", "mlir", "--verify"],
+            cwd=ROOT,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(mlir_proc.returncode, 0, mlir_proc.stderr)
+        self.assertEqual(mlir_proc.stdout, expected_mlir)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            lowered_path = tmp_path / "phrase_max.lowered.mlir"
+            llvm_path = tmp_path / "phrase_max.ll"
+            object_path = tmp_path / "export_scalar_gives.o"
+            temps = tmp_path / "temps"
+            run_temps = tmp_path / "run-temps"
+
+            lowered_proc = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "inscription",
+                    "compile",
+                    str(source),
+                    "--emit",
+                    "lowered-mlir",
+                    "--verify",
+                    "-o",
+                    str(lowered_path),
+                ],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(lowered_proc.returncode, 0, lowered_proc.stderr)
+            self.assertEqual(lowered_proc.stdout, "")
+            lowered = lowered_path.read_text()
+            self.assertIn("llvm.func @main", lowered)
+
+            llvm_proc = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "inscription",
+                    "compile",
+                    str(source),
+                    "--emit",
+                    "llvm-ir",
+                    "--verify",
+                    "-o",
+                    str(llvm_path),
+                ],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(llvm_proc.returncode, 0, llvm_proc.stderr)
+            self.assertEqual(llvm_proc.stdout, "")
+            llvm_ir = llvm_path.read_text()
+            self.assertIn("define i32 @main", llvm_ir)
+
+            no_output_object = subprocess.run(
+                [sys.executable, "-m", "inscription", "compile", str(source), "--emit", "object"],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(no_output_object.returncode, 2)
+            self.assertIn("object emission requires -o OUTPUT", no_output_object.stderr)
+
+            invalid_emit = subprocess.run(
+                [sys.executable, "-m", "inscription", "compile", str(source), "--emit", "nonsense"],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(invalid_emit.returncode, 2)
+            self.assertIn("invalid emit mode nonsense", invalid_emit.stderr)
+
+            if toolchain.llc is not None:
+                object_proc = subprocess.run(
+                    [
+                        sys.executable,
+                        "-m",
+                        "inscription",
+                        "compile",
+                        str(FIXTURES / "export_scalar_gives.ins"),
+                        "--emit",
+                        "object",
+                        "--verify",
+                        "-o",
+                        str(object_path),
+                    ],
+                    cwd=ROOT,
+                    env=env,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    check=False,
+                )
+                self.assertEqual(object_proc.returncode, 0, object_proc.stderr)
+                self.assertEqual(object_proc.stdout, "")
+                self.assertGreater(object_path.stat().st_size, 0)
+
+            save_proc = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "inscription",
+                    "compile",
+                    str(source),
+                    "--emit",
+                    "llvm-ir",
+                    "--save-temps",
+                    str(temps),
+                    "-o",
+                    str(tmp_path / "saved.ll"),
+                ],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(save_proc.returncode, 0, save_proc.stderr)
+            self.assertTrue((temps / "phrase_max.mlir").exists())
+            self.assertTrue((temps / "phrase_max.lowered.mlir").exists())
+            self.assertTrue((temps / "phrase_max.ll").exists())
+
+            run_proc = subprocess.run(
+                [sys.executable, "-m", "inscription", "run", str(source), "--save-temps", str(run_temps)],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(run_proc.returncode, 7, run_proc.stderr)
+            self.assertEqual(run_proc.stdout, "")
+            self.assertTrue((run_temps / "phrase_max.mlir").exists())
+            self.assertTrue((run_temps / "phrase_max.lowered.mlir").exists())
+            self.assertTrue((run_temps / "phrase_max.ll").exists())
+
+    def test_v016_emit_llvm_ir_supports_runtime_checks_and_modules(self):
+        try:
+            resolve_toolchain()
+        except ToolchainError as exc:
+            self.skipTest(str(exc))
+
+        env = {**os.environ, "PYTHONPATH": str(SRC)}
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            checked_ll = tmp_path / "checked.ll"
+            checked_proc = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "inscription",
+                    "compile",
+                    str(FIXTURES / "checked_dynamic_buffer_index.ins"),
+                    "--runtime-checks",
+                    "--emit",
+                    "llvm-ir",
+                    "--verify",
+                    "-o",
+                    str(checked_ll),
+                ],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(checked_proc.returncode, 0, checked_proc.stderr)
+            checked_ir = checked_ll.read_text()
+            self.assertIn("storage upper-bound check failed", checked_ir)
+            self.assertIn("declare void @abort", checked_ir)
+
+            module_ll = tmp_path / "module.ll"
+            module_proc = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "inscription",
+                    "compile",
+                    str(FIXTURES / "export_module_phrase" / "main.ins"),
+                    "--emit",
+                    "llvm-ir",
+                    "--verify",
+                    "-o",
+                    str(module_ll),
+                ],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(module_proc.returncode, 0, module_proc.stderr)
+            module_ir = module_ll.read_text()
+            self.assertIn("define i32 @ins_square", module_ir)
+            self.assertIn("call i32 @ins_square", module_ir)
+
     @unittest.skipUnless(importlib.util.find_spec("pygments"), "Pygments is not installed")
     def test_cli_highlight_outputs_terminal_ansi(self):
         proc = subprocess.run(
