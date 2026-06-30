@@ -64,6 +64,7 @@ def highlight_source(
     output_format: OutputFormat = "terminal",
     style: str = "default",
     full: bool = False,
+    nowrap: bool = False,
 ) -> str:
     try:
         from pygments import highlight as pygments_highlight
@@ -78,7 +79,7 @@ def highlight_source(
         if output_format == "terminal":
             formatter = Terminal256Formatter(style=style)
         elif output_format == "html":
-            formatter = HtmlFormatter(style=style, full=full)
+            formatter = HtmlFormatter(style=style, full=full, nowrap=nowrap)
         else:
             raise HighlightError(f"unsupported highlight format '{output_format}'")
     except ClassNotFound as exc:

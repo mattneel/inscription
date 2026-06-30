@@ -34,13 +34,16 @@ def _is_inscription_info(info: str) -> bool:
 
 def _highlight_block(code: str) -> str:
     try:
-        highlighted = highlight_source(code, output_format="html", style="default", full=False)
+        highlighted = highlight_source(code, output_format="html", style="default", full=False, nowrap=True)
     except HighlightError as exc:
         raise PreprocessorError(
             "Inscription mdBook preprocessor requires Pygments; install docs dependencies with "
             "`python -m pip install -e \".[docs]\"`"
         ) from exc
-    return f'<div class="inscription-code" role="region" aria-label="Inscription code">\n{highlighted}</div>'
+    return (
+        '<pre class="inscription-code" role="region" aria-label="Inscription code">'
+        f'<code class="language-inscription">{highlighted}</code></pre>'
+    )
 
 
 def transform_markdown(markdown: str, highlighter: Callable[[str], str] = _highlight_block) -> str:
@@ -60,15 +63,20 @@ def transform_markdown(markdown: str, highlighter: Callable[[str], str] = _highl
 
 
 def transform_book(book: dict[str, Any], highlighter: Callable[[str], str] = _highlight_block) -> dict[str, Any]:
-    def visit_sections(sections: list[dict[str, Any]]) -> None:
-        for section in sections:
-            chapter = section.get("Chapter")
+    def visit_items(items: list[dict[str, Any]]) -> None:
+        for item in items:
+            chapter = item.get("Chapter")
             if not chapter:
                 continue
             chapter["content"] = transform_markdown(chapter.get("content", ""), highlighter=highlighter)
-            visit_sections(chapter.get("sub_items", []))
+            visit_items(chapter.get("sub_items", []))
 
-    visit_sections(book.get("sections", []))
+    # mdBook 0.5 serializes the book as {"items": [...]}; older 0.4-era
+    # examples and our original tests used {"sections": [...]}.  Support both
+    # so the preprocessor actually transforms real mdBook builds while keeping
+    # the standalone unit path stable.
+    visit_items(book.get("items", []))
+    visit_items(book.get("sections", []))
     return book
 
 

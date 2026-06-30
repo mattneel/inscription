@@ -5527,7 +5527,7 @@ class BookDocumentationTests(unittest.TestCase):
             ROOT / "book" / "tools" / "inscription_mdbook_preprocessor.py",
         )
         book = {
-            "sections": [
+            "items": [
                 {
                     "Chapter": {
                         "name": "Example",
@@ -5535,10 +5535,45 @@ class BookDocumentationTests(unittest.TestCase):
                         "sub_items": [],
                     }
                 }
-            ]
+            ],
+            "sections": [
+                {
+                    "Chapter": {
+                        "name": "Old Example",
+                        "content": "```inscription\nTo old, giving i32.\nGive 7.\n```\n",
+                        "sub_items": [],
+                    }
+                }
+            ],
         }
         transformed = preprocessor.transform_book(book, highlighter=lambda code: f"<pre>{code}</pre>")
-        self.assertIn("<pre>To main, giving i32.\nGive 7.</pre>", transformed["sections"][0]["Chapter"]["content"])
+        self.assertIn("<pre>To main, giving i32.\nGive 7.</pre>", transformed["items"][0]["Chapter"]["content"])
+        self.assertIn("<pre>To old, giving i32.\nGive 7.</pre>", transformed["sections"][0]["Chapter"]["content"])
+
+    @unittest.skipUnless(importlib.util.find_spec("pygments"), "Pygments is not installed")
+    def test_mdbook_preprocessor_emits_highlight_spans_for_mdbook_items_payload(self):
+        preprocessor = self._load_module(
+            "inscription_mdbook_preprocessor_highlight",
+            ROOT / "book" / "tools" / "inscription_mdbook_preprocessor.py",
+        )
+        book = {
+            "items": [
+                {
+                    "Chapter": {
+                        "name": "Example",
+                        "content": "```inscription,check\nTo main, giving i32.\nGive 7.\n```\n",
+                        "sub_items": [],
+                    }
+                }
+            ]
+        }
+        transformed = preprocessor.transform_book(book)
+        content = transformed["items"][0]["Chapter"]["content"]
+        self.assertIn('<pre class="inscription-code"', content)
+        self.assertIn('<code class="language-inscription">', content)
+        self.assertIn('<span class="k">To</span>', content)
+        self.assertNotIn('<div class="highlight">', content)
+        self.assertNotIn('```inscription', content)
 
     def test_mdbook_preprocessor_dependency_error_is_deterministic(self):
         preprocessor = self._load_module(
