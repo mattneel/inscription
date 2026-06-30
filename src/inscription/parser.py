@@ -46,6 +46,7 @@ from .ast import (
     MatchStepArm,
     OffsetOfField,
     OwnedBufferBinding,
+    OwnedBufferType,
     Parameter,
     Program,
     RecordConstructor,
@@ -107,6 +108,7 @@ CONNECTOR_WORDS = {"of", "from", "to", "at", "in", "into", "between", "and", "wi
 BUFFER_LENGTH_PATTERN = r"(?:-?\d+|[a-z][a-z0-9_]*|\([^)]*\))"
 TYPE_REF_PATTERN = r"(?:(?:[A-Za-z][A-Za-z0-9_]*\.)*[A-Z][A-Za-z0-9_]*|[a-z][a-z0-9_]*)"
 TYPE_PATTERN = rf"(?:buffer\s+of\s+{BUFFER_LENGTH_PATTERN}\s+{TYPE_REF_PATTERN}|array\s+of\s+{BUFFER_LENGTH_PATTERN}\s+{TYPE_REF_PATTERN}|view\s+of\s+{TYPE_REF_PATTERN}|(?:[A-Za-z][A-Za-z0-9_]*\.)*[A-Z][A-Za-z0-9_]*|[a-z][a-z0-9_]*)"
+OWNED_BUFFER_RETURN_PATTERN = rf"owned\s+buffer\s+of\s+{TYPE_REF_PATTERN}"
 MODULE_RE = re.compile(r"[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z][A-Za-z0-9_]*)*")
 EXTERNAL_SYMBOL_PATTERN = r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*"
 
@@ -577,7 +579,7 @@ class Parser:
         if line.is_header:
             raise InscriptionError("extern phrase declarations cannot have bodies", line.number)
         gives_match = re.fullmatch(
-            rf"extern (.+?) gives ({TYPE_PATTERN}) as ({EXTERNAL_SYMBOL_PATTERN})",
+            rf"extern (.+?) gives ({TYPE_PATTERN}|{OWNED_BUFFER_RETURN_PATTERN}) as ({EXTERNAL_SYMBOL_PATTERN})",
             line.text,
         )
         if gives_match is not None:
@@ -598,7 +600,7 @@ class Parser:
         if not line.is_header:
             raise InscriptionError("exported phrase definitions require a body", line.number)
         gives_match = re.fullmatch(
-            rf"export (.+?) gives ({TYPE_PATTERN}) as ({EXTERNAL_SYMBOL_PATTERN})",
+            rf"export (.+?) gives ({TYPE_PATTERN}|{OWNED_BUFFER_RETURN_PATTERN}) as ({EXTERNAL_SYMBOL_PATTERN})",
             line.text,
         )
         if gives_match is not None:
@@ -1441,6 +1443,11 @@ class Parser:
         raise InscriptionError("malformed buffer length", line)
 
     def _return_type(self, value: str, line: int) -> ReturnType:
+        if value.startswith("owned buffer of "):
+            element = value[len("owned buffer of ") :].strip()
+            if not re.fullmatch(TYPE_REF_PATTERN, element):
+                raise InscriptionError("malformed owned buffer return type", line)
+            return OwnedBufferType(self._return_type(element, line))
         if value.startswith("buffer of "):
             raise InscriptionError("buffer return types are not supported", line)
         if value.startswith("array of "):

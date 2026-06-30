@@ -234,6 +234,7 @@ class MlirEmitter:
         self.record_order: list[str] = []
         self.union_order: list[str] = []
         self.owned_buffer_scopes: list[list[OwnedBufferStorage]] = []
+        self.moved_owned_buffers: set[str] = set()
         self.while_counter = 0
         self.while_depth = 0
         self.for_counter = 0
@@ -282,6 +283,7 @@ class MlirEmitter:
         self.record_order = [param.name for param in fn.params if isinstance(param.type_name, RecordType)]
         self.union_order = [param.name for param in fn.params if isinstance(param.type_name, UnionType)]
         self.owned_buffer_scopes = [[]]
+        self.moved_owned_buffers = set()
         self.while_counter = 0
         self.while_depth = 0
         self.for_counter = 0
@@ -319,6 +321,8 @@ class MlirEmitter:
     def emit_owned_deallocs(self, lines: list[str], indent: str) -> None:
         for scope in reversed(self.owned_buffer_scopes):
             for storage in reversed(scope):
+                if storage.name in self.moved_owned_buffers:
+                    continue
                 lines.append(f"{indent}memref.dealloc {storage.name} : {dynamic_memref_type(storage.element_type)}")
 
     def enter_owned_scope(self) -> None:
@@ -333,12 +337,17 @@ class MlirEmitter:
             return
         scope = self.owned_buffer_scopes.pop()
         for storage in reversed(scope):
+            if storage.name in self.moved_owned_buffers:
+                continue
             lines.append(f"{indent}memref.dealloc {storage.name} : {dynamic_memref_type(storage.element_type)}")
 
     def remember_owned_buffer(self, buffer: OwnedBufferStorage) -> None:
         if not self.owned_buffer_scopes:
             self.owned_buffer_scopes.append([])
         self.owned_buffer_scopes[-1].append(buffer)
+
+    def mark_owned_buffer_moved(self, buffer: OwnedBufferStorage) -> None:
+        self.moved_owned_buffers.add(buffer.name)
 
     def function_argument_decls(self, fn: Function) -> list[str]:
         args: list[str] = []
@@ -418,7 +427,7 @@ class MlirEmitter:
         env: dict[str, EnvValue],
         lines: list[str],
         indent: str,
-        return_type: TypeName | RecordType | UnionType,
+        return_type: TypeName | RecordType | UnionType | OwnedBufferType,
     ) -> None:
         for stmt in statements:
             if isinstance(stmt, ReturnStmt):
@@ -439,12 +448,61 @@ class MlirEmitter:
                         f"{indent}return {', '.join(value.name for value in values)} : "
                         f"{', '.join(mlir_type(value.type_name) for value in values)}"
                     )
+                elif isinstance(return_type, OwnedBufferType):
+                    buffer = self.emit_owned_buffer_return_expr(stmt.expr, env, lines, indent, return_type)
+                    self.mark_owned_buffer_moved(buffer)
+                    self.emit_owned_deallocs(lines, indent)
+                    lines.append(
+                        f"{indent}return {buffer.name}, {buffer.length.name} : "
+                        f"{dynamic_memref_type(buffer.element_type)}, i32"
+                    )
                 else:
                     value = self.emit_expr(stmt.expr, env, lines, indent, expected=return_type)
                     self.emit_owned_deallocs(lines, indent)
                     lines.append(f"{indent}return {value.name} : {mlir_type(return_type)}")
             else:
                 self.emit_body_stmt(stmt, env, lines, indent)
+
+    def emit_owned_buffer_return_expr(
+        self,
+        expr: Expr,
+        env: dict[str, EnvValue],
+        lines: list[str],
+        indent: str,
+        return_type: OwnedBufferType,
+    ) -> OwnedBufferStorage:
+        if isinstance(expr, Variable):
+            value = env[expr.name]
+            assert isinstance(value, OwnedBufferStorage)
+            assert value.element_type == return_type.element_type
+            return value
+        if isinstance(expr, Call):
+            return self.emit_owned_buffer_call(expr, env, lines, indent, remember=False)
+        raise AssertionError("owned buffer return should be a binding or direct call")  # pragma: no cover
+
+    def emit_owned_buffer_call(
+        self,
+        call: Call,
+        env: dict[str, EnvValue],
+        lines: list[str],
+        indent: str,
+        *,
+        remember: bool,
+    ) -> OwnedBufferStorage:
+        target = self.functions[call.name]
+        assert isinstance(target.return_type, OwnedBufferType)
+        args = self.emit_call_arguments(call, target, env, lines, indent)
+        result = self.fresh()
+        arg_values = ", ".join(arg.name for arg in args)
+        arg_types = ", ".join(arg.mlir_type for arg in args)
+        return_types = self.return_type_list(target.return_type)
+        lines.append(
+            f"{indent}{result}:2 = func.call @{self.call_symbol(target)}({arg_values}) : ({arg_types}) -> {return_types}"
+        )
+        storage = OwnedBufferStorage(f"{result}#0", target.return_type.element_type, Value(f"{result}#1", "i32"), None)
+        if remember:
+            self.remember_owned_buffer(storage)
+        return storage
 
     def emit_body_stmt(self, stmt: Stmt, env: dict[str, EnvValue], lines: list[str], indent: str) -> None:
         if isinstance(stmt, CheckStmt):
@@ -467,6 +525,9 @@ class MlirEmitter:
             elif isinstance(type_name, UnionType):
                 env[stmt.name] = self.emit_union_expr(stmt.expr, env, lines, indent, expected=type_name)
                 self.union_order.append(stmt.name)
+            elif isinstance(type_name, OwnedBufferType):
+                assert isinstance(stmt.expr, Call)
+                env[stmt.name] = self.emit_owned_buffer_call(stmt.expr, env, lines, indent, remember=True)
             elif isinstance(type_name, ArrayType | ViewType):
                 raise AssertionError("view binding must use view syntax")  # pragma: no cover
             else:
@@ -603,7 +664,7 @@ class MlirEmitter:
             target = self.functions[expr.name]
             args = self.emit_call_arguments(expr, target, env, lines, indent)
             assert target.return_type is not None
-            assert not isinstance(target.return_type, RecordType | UnionType | ViewType)
+            assert not isinstance(target.return_type, RecordType | UnionType | ViewType | OwnedBufferType)
             out = Value(self.fresh(), target.return_type)
             arg_values = ", ".join(arg.name for arg in args)
             arg_types = ", ".join(arg.mlir_type for arg in args)
@@ -2455,6 +2516,8 @@ class MlirEmitter:
         return [return_type]
 
     def return_type_list(self, return_type: ValueType | RecordType) -> str:
+        if isinstance(return_type, OwnedBufferType):
+            return f"({dynamic_memref_type(return_type.element_type)}, i32)"
         return self.result_type_list(self.return_types(return_type))
 
     def type_list(self, types: list[ValueType]) -> str:

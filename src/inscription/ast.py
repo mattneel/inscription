@@ -206,7 +206,7 @@ class UnionType:
 
 
 ValueType = TypeName | BufferType | ArrayType | ViewType | OwnedBufferType | RecordType | EnumType | UnionType
-ReturnType = TypeName | RecordType | ArrayType | ViewType | EnumType | UnionType | None
+ReturnType = TypeName | RecordType | ArrayType | ViewType | OwnedBufferType | EnumType | UnionType | None
 
 
 @dataclass(frozen=True)

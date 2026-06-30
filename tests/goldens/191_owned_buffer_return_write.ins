@@ -1,0 +1,9 @@
+make indices count: i32 gives owned buffer of i32:
+  let cells be owned buffer of count i32 filled with 0
+  for each index i of cells:
+    cells at i becomes i plus 1
+  cells
+
+main gives i32:
+  let cells be make indices 4
+  (cells at 0) plus (cells at 1) plus (cells at 2) plus (cells at 3)

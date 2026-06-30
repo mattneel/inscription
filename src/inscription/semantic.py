@@ -806,6 +806,8 @@ def _check_function(
         raise InscriptionError("view return types are not supported", fn.line)
     if isinstance(fn.return_type, ArrayType):
         raise InscriptionError("array return types are not supported", fn.line)
+    if isinstance(fn.return_type, OwnedBufferType):
+        _check_owned_buffer_element_type(fn.return_type.element_type, fn.line)
     if not fn.body:
         raise InscriptionError(f"phrase '{fn.name}' must evaluate to a value", fn.line)
     bindings = _constant_bindings(constants)
@@ -825,14 +827,17 @@ def _check_function(
         if isinstance(stmt, ReturnStmt):
             if not is_last:
                 raise InscriptionError("value expression must be the final phrase body form", stmt.line)
-            actual = _infer_declared_type(stmt.expr, fn.return_type, _env_types(bindings), functions, records, constants)
-            if actual != fn.return_type:
-                if isinstance(actual, RecordType) or isinstance(fn.return_type, RecordType):
-                    raise InscriptionError(
-                        f"phrase {fn.display_name} must return {format_type(fn.return_type)}, got {format_type(actual)}",
-                        stmt.line,
-                    )
-                require_type(actual, fn.return_type, stmt.line)
+            if isinstance(fn.return_type, OwnedBufferType):
+                _check_owned_buffer_return_expr(stmt.expr, fn, bindings, functions, records, constants)
+            else:
+                actual = _infer_declared_type(stmt.expr, fn.return_type, _env_types(bindings), functions, records, constants)
+                if actual != fn.return_type:
+                    if isinstance(actual, RecordType) or isinstance(fn.return_type, RecordType):
+                        raise InscriptionError(
+                            f"phrase {fn.display_name} must return {format_type(fn.return_type)}, got {format_type(actual)}",
+                            stmt.line,
+                        )
+                    require_type(actual, fn.return_type, stmt.line)
             returned = True
         else:
             if isinstance(stmt, OwnedBufferBinding):
@@ -845,7 +850,7 @@ def _check_function(
 
 def _primitive_abi_type_message(prefix: str, type_name: ValueType) -> str:
     resolved = resolve_named_value_type(type_name)
-    wording = "primitive scalar types" if isinstance(resolved, EnumType | UnionType) else "scalar types"
+    wording = "primitive scalar types" if isinstance(resolved, EnumType | UnionType | OwnedBufferType) else "scalar types"
     return f"{prefix} must be {wording}, got {format_type(type_name)}"
 
 
@@ -928,6 +933,12 @@ def _check_parameter_type(
     if isinstance(type_name, ViewType):
         _check_view_type(type_name, line)
         return
+    if isinstance(type_name, OwnedBufferType):
+        _check_owned_buffer_element_type(type_name.element_type, line)
+        raise InscriptionError(
+            f"owned buffer parameters are not supported in v0.31; use view of {format_type(type_name.element_type)}",
+            line,
+        )
     if isinstance(type_name, RecordType):
         if type_name.name not in records:
             raise InscriptionError(f"unknown type {type_name.name}", line)
@@ -977,7 +988,7 @@ def _check_view_type(view_type: ViewType, line: int) -> None:
 
 def _check_owned_buffer_element_type(element_type: ValueType, line: int) -> None:
     if isinstance(element_type, UnionType):
-        raise InscriptionError("owned buffer element type may not be a union type in v0.30", line)
+        raise InscriptionError("owned buffer element type may not be a union type in v0.31", line)
     if not is_numeric_type(element_type) and not isinstance(element_type, EnumType):
         raise InscriptionError(f"owned buffer element type must be numeric or enum, got {format_type(element_type)}", line)
 
@@ -1090,6 +1101,12 @@ def _declare_let(
         source_type = _env_types(bindings).get(stmt.expr.name)
         if isinstance(source_type, OwnedBufferType):
             raise InscriptionError(f"owned buffer {stmt.expr.name} cannot be used as a value", stmt.line)
+    if isinstance(stmt.expr, Call):
+        target = _lookup_phrase(stmt.expr.name, stmt.expr.line, functions)
+        if isinstance(target.return_type, OwnedBufferType):
+            _check_call_argument_types(stmt.expr, target, _env_types(bindings), functions, records, constants)
+            bindings[stmt.name] = Binding(target.return_type, "owned_buffer", stmt.line, root=stmt.name)
+            return
     type_name = infer_expr_type(stmt.expr, _env_types(bindings), functions, records, constants=constants)
     bindings[stmt.name] = Binding(type_name, "let", stmt.line)
 
@@ -1201,6 +1218,53 @@ def _declare_owned_buffer(
             stmt.line,
         )
     bindings[stmt.name] = Binding(OwnedBufferType(element_type, static_length), "owned_buffer", stmt.line, root=stmt.name)
+
+
+def _owned_buffer_return_matches(actual: ValueType, expected: OwnedBufferType) -> bool:
+    return isinstance(actual, OwnedBufferType) and actual.element_type == expected.element_type
+
+
+def _owned_buffer_return_actual_type(
+    expr: Expr,
+    bindings: dict[str, Binding],
+    functions: dict[str, Function],
+    records: dict[str, RecordDecl],
+    constants: dict[str, ConstValue],
+) -> ValueType:
+    if isinstance(expr, Variable):
+        if expr.name in bindings:
+            return bindings[expr.name].type_name
+        if expr.name in constants:
+            return constants[expr.name].type_name
+        return _lookup_binding_type(expr.name, expr.line, _env_types(bindings))
+    if isinstance(expr, Call):
+        target = _lookup_phrase(expr.name, expr.line, functions)
+        if target.return_type is None:
+            raise InscriptionError(f"phrase `{target.display_name}` does not return a value", expr.line)
+        _check_call_argument_types(expr, target, _env_types(bindings), functions, records, constants)
+        return target.return_type
+    return infer_expr_type(expr, _env_types(bindings), functions, records, constants=constants)
+
+
+def _check_owned_buffer_return_expr(
+    expr: Expr,
+    fn: Function,
+    bindings: dict[str, Binding],
+    functions: dict[str, Function],
+    records: dict[str, RecordDecl],
+    constants: dict[str, ConstValue],
+) -> None:
+    assert isinstance(fn.return_type, OwnedBufferType)
+    if isinstance(expr, WhenExpr):
+        raise InscriptionError("guarded owned buffer returns are not supported in v0.31", expr.line)
+    if isinstance(expr, MatchExpr):
+        raise InscriptionError("match expressions returning owned buffers are not supported in v0.31", expr.line)
+    actual = _owned_buffer_return_actual_type(expr, bindings, functions, records, constants)
+    if not _owned_buffer_return_matches(actual, fn.return_type):
+        raise InscriptionError(
+            f"phrase {fn.display_name} must return {format_type(fn.return_type)}, got {format_type(actual)}",
+            getattr(expr, "line", fn.line),
+        )
 
 
 def _declare_storage_alias(
@@ -1565,6 +1629,7 @@ def _check_call_arguments(
                 raise InscriptionError(f"cannot pass read-only buffer {name} to effectful phrase `{target.display_name}`", call.line)
             continue
         if isinstance(expected, ViewType):
+            _reject_unbound_owned_buffer_result(arg, functions)
             name, actual_type = _require_view_argument(arg, expected, env, getattr(arg, "line", call.line), records)
             root = bindings[name].root or name
             previous = seen_roots.get(root)
@@ -1621,6 +1686,7 @@ def _check_call_argument_types(
             seen_storage_names.add(name)
             continue
         if isinstance(expected, ViewType):
+            _reject_unbound_owned_buffer_result(arg, functions)
             name, _binding_type = _require_view_argument(arg, expected, env, getattr(arg, "line", call.line), records)
             if name in seen_storage_names:
                 raise InscriptionError(f"view {name} cannot be passed to multiple view parameters in one call", call.line)
@@ -1638,6 +1704,17 @@ def _check_call_argument_types(
                 f"argument {argument_name} must have type {format_type(expected)}, got {format_type(actual)}",
                 getattr(arg, "line", call.line),
             )
+
+
+def _reject_unbound_owned_buffer_result(arg: Expr, functions: dict[str, Function]) -> None:
+    if not isinstance(arg, Call):
+        return
+    target = _lookup_phrase(arg.name, arg.line, functions)
+    if isinstance(target.return_type, OwnedBufferType):
+        raise InscriptionError(
+            f"owned buffer result from `{target.display_name}` must be bound before it can be passed as a view",
+            arg.line,
+        )
 
 
 def _check_call_arity(call: Call, target: Function) -> None:
@@ -2413,6 +2490,8 @@ def infer_expr_type(
     if isinstance(expr, WhenExpr):
         if expected is None:
             expected = infer_expr_type(expr.otherwise, env, functions, records)
+        if isinstance(expected, OwnedBufferType):
+            raise InscriptionError("guarded owned buffer returns are not supported in v0.31", expr.line)
         for case in expr.cases:
             actual = _infer_declared_type(case.expr, expected, env, functions, records)
             if actual != expected:
@@ -2464,6 +2543,8 @@ def infer_match_expression_type(
     )
     if isinstance(result_type, BufferType | ArrayType | ViewType):
         raise InscriptionError(f"match expression cannot return {format_type(result_type)}", expr.line)
+    if isinstance(result_type, OwnedBufferType):
+        raise InscriptionError("match expressions returning owned buffers are not supported in v0.31", expr.line)
     for arm in expr.arms:
         arm_env = _env_with_match_payload(arm.pattern, scrutinee_type, env, constants)
         actual = _infer_declared_type(arm.expr, result_type, arm_env, functions, records, constants)
@@ -2874,7 +2955,7 @@ def infer_numeric_pair_type(
         right_type = infer_numeric_operand_type(right, env, functions, records, expected=left_type if is_numeric_type(left_type) else None)  # type: ignore[arg-type]
 
     if not is_numeric_type(left_type) or not is_numeric_type(right_type):
-        if isinstance(left_type, EnumType) or isinstance(right_type, EnumType):
+        if isinstance(left_type, EnumType | OwnedBufferType) or isinstance(right_type, EnumType | OwnedBufferType):
             raise InscriptionError(f"{op} requires numeric primitive operands, got {format_type(left_type)} and {format_type(right_type)}", line)
         if not is_float_type(left_type) and not is_float_type(right_type):
             raise InscriptionError(f"{op} requires integer operands, got {format_type(left_type)} and {format_type(right_type)}", line)

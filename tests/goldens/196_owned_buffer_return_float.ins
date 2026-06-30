@@ -1,0 +1,10 @@
+make floats count: i32 gives owned buffer of f64:
+  let cells be owned buffer of count f64 filled with 1.5
+  cells
+
+main gives i32:
+  let cells be make floats 4
+  let total: f64 be 0.0
+  for each index i of cells:
+    total becomes total plus cells at i
+  total as i32

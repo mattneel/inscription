@@ -3834,6 +3834,163 @@ main gives i32:
             run = subprocess.run([str(executable)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False)
             self.assertEqual(run.returncode, 7, run.stderr)
 
+    def test_v031_owned_buffer_returns_transfer_ownership(self):
+        basic = compile_source(self.fixture("owned_buffer_return_basic.ins"))
+        self.assertIn("func.func @make_ones(%count: i32) -> (memref<?xi32>, i32)", basic)
+        self.assertIn("return %1, %count : memref<?xi32>, i32", basic)
+        self.assertIn("func.call @make_ones", basic)
+        self.assertIn("memref.dealloc %1#0 : memref<?xi32>", basic)
+
+        write = compile_source(self.fixture("owned_buffer_return_write.ins"))
+        self.assertIn("memref.store", write)
+        self.assertIn("memref.load", write)
+
+        forward = compile_source(self.fixture("owned_buffer_return_forward.ins"))
+        self.assertIn("func.func @forward_ones(%count: i32) -> (memref<?xi32>, i32)", forward)
+        self.assertIn("func.call @make_ones", forward)
+        self.assertIn("return %0#0, %0#1 : memref<?xi32>, i32", forward)
+
+        cleanup_other = compile_source(self.fixture("owned_buffer_return_cleanup_other.ins"))
+        self.assertRegex(
+            cleanup_other,
+            r"memref\.dealloc %\d+ : memref<\?xi32>\n    return %\d+, %count : memref<\?xi32>, i32",
+        )
+
+        nested_scope = compile_source(self.fixture("owned_buffer_return_nested_scope.ins"))
+        self.assertRegex(nested_scope, r"memref\.dealloc %\d+#0 : memref<\?xi32>\n      scf\.yield")
+
+        layout = compile_source(self.fixture("owned_buffer_return_layout.ins"))
+        self.assertIn("memref<?xi8>", layout)
+        self.assertIn("func.call @make_bytes", layout)
+
+        float_buffer = compile_source(self.fixture("owned_buffer_return_float.ins"))
+        self.assertIn("memref<?xf64>", float_buffer)
+
+        enum_buffer = compile_source(self.fixture("owned_buffer_return_enum.ins"))
+        self.assertIn("memref<?xi8>", enum_buffer)
+
+        view_parameter = compile_source(self.fixture("owned_buffer_return_view_parameter.ins"))
+        self.assertIn("func.call @sum_view", view_parameter)
+        self.assertIn("memref.dealloc", view_parameter)
+
+        with self.assertRaises(InscriptionError) as ctx:
+            run_source("main gives owned buffer of i32:\n  let cells be owned buffer of 1 i32 filled with 0\n  cells\n")
+        self.assertIn("program main must return an integer scalar, got owned buffer of i32", str(ctx.exception))
+
+    def test_v031_owned_buffer_return_artifacts_and_runtime_checks(self):
+        try:
+            resolve_toolchain()
+        except ToolchainError:
+            return
+
+        env = {**os.environ, "PYTHONPATH": str(SRC)}
+        for fixture, status in [
+            ("checked_returned_owned_index.ins", 3),
+            ("checked_returned_owned_length.ins", 5),
+            ("checked_returned_owned_view.ins", 7),
+        ]:
+            with self.subTest(runtime_checked=fixture):
+                checked = subprocess.run(
+                    [
+                        sys.executable,
+                        "-m",
+                        "inscription",
+                        "run",
+                        str(FIXTURES / fixture),
+                        "--runtime-checks",
+                    ],
+                    cwd=ROOT,
+                    env=env,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    check=False,
+                )
+                self.assertEqual(checked.returncode, status, checked.stderr)
+                self.assertEqual(checked.stdout, "")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            llvm_ir = tmp_path / "owned_buffer_return_basic.ll"
+            llvm_proc = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "inscription",
+                    "compile",
+                    str(FIXTURES / "owned_buffer_return_basic.ins"),
+                    "--emit",
+                    "llvm-ir",
+                    "--verify",
+                    "-o",
+                    str(llvm_ir),
+                ],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(llvm_proc.returncode, 0, llvm_proc.stderr)
+            self.assertIn("define i32 @main", llvm_ir.read_text())
+
+            try:
+                resolve_toolchain(require_static_library=True)
+            except ToolchainError:
+                pass
+            else:
+                archive = tmp_path / "libowned_buffer_return_basic.a"
+                archive_proc = subprocess.run(
+                    [
+                        sys.executable,
+                        "-m",
+                        "inscription",
+                        "compile",
+                        str(FIXTURES / "owned_buffer_return_basic.ins"),
+                        "--emit",
+                        "static-library",
+                        "-o",
+                        str(archive),
+                    ],
+                    cwd=ROOT,
+                    env=env,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    check=False,
+                )
+                self.assertEqual(archive_proc.returncode, 0, archive_proc.stderr)
+                self.assertGreater(archive.stat().st_size, 0)
+
+            try:
+                resolve_toolchain(require_executable=True)
+            except ToolchainError:
+                return
+            executable = tmp_path / "owned_buffer_return_basic"
+            exe_proc = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "inscription",
+                    "compile",
+                    str(FIXTURES / "owned_buffer_return_basic.ins"),
+                    "--emit",
+                    "executable",
+                    "-o",
+                    str(executable),
+                ],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(exe_proc.returncode, 0, exe_proc.stderr)
+            run = subprocess.run([str(executable)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False)
+            self.assertEqual(run.returncode, 7, run.stderr)
+
     def test_negative_diagnostics(self):
         cases = {
             "malformed top level": ("Please add two numbers\n", "expected phrase definition"),
@@ -4992,7 +5149,7 @@ main gives i32:
             ),
             "owned buffer union element unsupported": (
                 "union MaybeI32:\n  none\n\nbad n: i32 gives i32:\n  let values be owned buffer of n MaybeI32 filled with MaybeI32.none\n  0\n",
-                "owned buffer element type may not be a union type in v0.30",
+                "owned buffer element type may not be a union type in v0.31",
             ),
             "owned buffer fill type mismatch": (
                 "bad n: i32 gives i32:\n  let cells be owned buffer of n i32 filled with true\n  0\n",
@@ -5053,6 +5210,66 @@ main gives i32:
             "layout write to non u8 owned buffer": (
                 "packed layout record Word:\n  value: u16\n\nbad gives i32:\n  let cells be owned buffer of 2 i32 filled with 0\n  let word be Word with value be 1\n  write word into cells at 0\n  0\n",
                 "write Word requires a u8 buffer or view, got owned buffer of i32",
+            ),
+            "owned buffer return i1 element unsupported": (
+                "bad gives owned buffer of i1:\n  0\n",
+                "owned buffer element type must be numeric or enum, got i1",
+            ),
+            "owned buffer return union element unsupported": (
+                "union MaybeI32:\n  none\n\nbad gives owned buffer of MaybeI32:\n  0\n",
+                "owned buffer element type may not be a union type in v0.31",
+            ),
+            "owned buffer return scalar invalid": (
+                "bad gives owned buffer of i32:\n  0\n",
+                "phrase bad must return owned buffer of i32, got i32",
+            ),
+            "owned buffer return fixed buffer invalid": (
+                "bad gives owned buffer of i32:\n  let cells be buffer of 4 i32 filled with 0\n  cells\n",
+                "phrase bad must return owned buffer of i32, got buffer of 4 i32",
+            ),
+            "owned buffer return array invalid": (
+                "bad gives owned buffer of i32:\n  let cells be array of 4 i32 filled with 0\n  cells\n",
+                "phrase bad must return owned buffer of i32, got array of 4 i32",
+            ),
+            "owned buffer return view invalid": (
+                "bad gives owned buffer of i32:\n  let cells be owned buffer of 4 i32 filled with 0\n  let window be view of cells from 0 for 4\n  window\n",
+                "phrase bad must return owned buffer of i32, got view of i32",
+            ),
+            "owned buffer return element mismatch": (
+                "bad gives owned buffer of i32:\n  let cells be owned buffer of 4 u8 filled with 0\n  cells\n",
+                "phrase bad must return owned buffer of i32, got owned buffer of u8",
+            ),
+            "owned buffer returning phrase used as step": (
+                "make cells count: i32 gives owned buffer of i32:\n  let cells be owned buffer of count i32 filled with 0\n  cells\n\nbad gives i32:\n  make cells 4\n  0\n",
+                "phrase `make cells _` returns owned buffer of i32 and cannot be used as a step",
+            ),
+            "owned buffer returning phrase used as scalar": (
+                "make cells count: i32 gives owned buffer of i32:\n  let cells be owned buffer of count i32 filled with 0\n  cells\n\nbad gives i32:\n  let x be (make cells 4) plus 1\n  x\n",
+                "plus requires numeric primitive operands, got owned buffer of i32 and i32",
+            ),
+            "owned buffer return direct view pass invalid": (
+                "sum view cells: view of i32 gives i32:\n  0\n\nmake cells count: i32 gives owned buffer of i32:\n  let cells be owned buffer of count i32 filled with 0\n  cells\n\nbad gives i32:\n  sum view make cells 4\n",
+                "owned buffer result from `make cells _` must be bound before it can be passed as a view",
+            ),
+            "guarded owned buffer return unsupported": (
+                "make small gives owned buffer of i32:\n  let cells be owned buffer of 1 i32 filled with 1\n  cells\n\nmake large gives owned buffer of i32:\n  let cells be owned buffer of 2 i32 filled with 2\n  cells\n\nbad flag: i1 gives owned buffer of i32:\n  make small when flag\n  otherwise make large\n",
+                "guarded owned buffer returns are not supported in v0.31",
+            ),
+            "match owned buffer return unsupported": (
+                "enum Mode: u8:\n  small be 0\n  large be 1\n\nmake small gives owned buffer of i32:\n  let cells be owned buffer of 1 i32 filled with 1\n  cells\n\nmake large gives owned buffer of i32:\n  let cells be owned buffer of 2 i32 filled with 2\n  cells\n\nbad mode: Mode gives owned buffer of i32:\n  match mode:\n    Mode.small gives make small\n    otherwise gives make large\n",
+                "match expressions returning owned buffers are not supported in v0.31",
+            ),
+            "exported owned buffer return unsupported": (
+                "export make cells count: i32 gives owned buffer of i32 as ins_make_cells:\n  let cells be owned buffer of count i32 filled with 0\n  cells\n",
+                "exported phrase return types must be primitive scalar types, got owned buffer of i32",
+            ),
+            "extern owned buffer return unsupported": (
+                "extern host make cells count: i32 gives owned buffer of i32 as host_make_cells\n",
+                "extern phrase return types must be primitive scalar types, got owned buffer of i32",
+            ),
+            "returned owned buffer copy invalid": (
+                "make cells count: i32 gives owned buffer of i32:\n  let cells be owned buffer of count i32 filled with 0\n  cells\n\nbad gives i32:\n  let cells be make cells 4\n  let copy be cells\n  0\n",
+                "owned buffer cells cannot be used as a value",
             ),
         }
         for name, (source, contains) in cases.items():

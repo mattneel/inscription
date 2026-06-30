@@ -45,6 +45,7 @@ from .ast import (
     MatchStepArm,
     OffsetOfField,
     OwnedBufferBinding,
+    OwnedBufferType,
     Parameter,
     Program,
     RecordConstructor,
@@ -391,7 +392,8 @@ def qualify_type(type_name: ValueType, module_name: str, record_names: set[str],
         return ArrayType(qualify_buffer_length(type_name.length, module_name, record_names, constant_names), qualify_type(type_name.element_type, module_name, record_names, constant_names))
     if isinstance(type_name, ViewType):
         return ViewType(qualify_type(type_name.element_type, module_name, record_names, constant_names), type_name.length)
-    # Owned buffer types are local semantic artifacts; they are not source-level alias targets.
+    if isinstance(type_name, OwnedBufferType):
+        return OwnedBufferType(qualify_type(type_name.element_type, module_name, record_names, constant_names), type_name.length)
     if isinstance(type_name, RecordType) and type_name.name in record_names:
         return RecordType(qname(module_name, type_name.name))
     return type_name
@@ -402,6 +404,8 @@ def qualify_return_type(type_name, module_name: str, record_names: set[str]):
         return ArrayType(qualify_buffer_length(type_name.length, module_name, record_names, set()), qualify_return_type(type_name.element_type, module_name, record_names))
     if isinstance(type_name, ViewType):
         return ViewType(qualify_return_type(type_name.element_type, module_name, record_names), type_name.length)
+    if isinstance(type_name, OwnedBufferType):
+        return OwnedBufferType(qualify_return_type(type_name.element_type, module_name, record_names), type_name.length)
     if isinstance(type_name, RecordType) and type_name.name in record_names:
         return RecordType(qname(module_name, type_name.name))
     return type_name
