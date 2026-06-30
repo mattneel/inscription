@@ -165,20 +165,42 @@ def function_table(program: Program) -> dict[str, Function]:
 
 def validate_external_symbols(functions: dict[str, Function]) -> None:
     externs: dict[str, tuple[tuple[ValueType, ...], ValueType | None]] = {}
-    normal_symbols = {fn.name for fn in functions.values() if fn.extern_symbol is None}
+    exports: dict[str, Function] = {}
+    normal_symbols = {fn.name for fn in functions.values() if fn.implementation == "normal"}
     for fn in functions.values():
         if fn.extern_symbol is None:
             continue
-        if fn.extern_symbol == "main" or fn.extern_symbol in normal_symbols:
-            raise InscriptionError(
-                f"external symbol {fn.extern_symbol} conflicts with generated function {fn.extern_symbol}",
-                fn.line,
-            )
-        signature = (tuple(param.type_name for param in fn.params), fn.return_type)
-        existing = externs.get(fn.extern_symbol)
-        if existing is not None and existing != signature:
-            raise InscriptionError(f"external symbol {fn.extern_symbol} declared with incompatible types", fn.line)
-        externs[fn.extern_symbol] = signature
+        if fn.implementation == "export":
+            if fn.extern_symbol == "main" or fn.extern_symbol in normal_symbols:
+                raise InscriptionError(
+                    f"exported symbol {fn.extern_symbol} conflicts with generated function {fn.extern_symbol}",
+                    fn.line,
+                )
+            if fn.extern_symbol in exports:
+                raise InscriptionError(f"exported symbol {fn.extern_symbol} is already defined", fn.line)
+            if fn.extern_symbol in externs:
+                raise InscriptionError(
+                    f"exported symbol {fn.extern_symbol} conflicts with external symbol {fn.extern_symbol}",
+                    fn.line,
+                )
+            exports[fn.extern_symbol] = fn
+            continue
+        if fn.implementation == "extern":
+            if fn.extern_symbol == "main" or fn.extern_symbol in normal_symbols:
+                raise InscriptionError(
+                    f"external symbol {fn.extern_symbol} conflicts with generated function {fn.extern_symbol}",
+                    fn.line,
+                )
+            if fn.extern_symbol in exports:
+                raise InscriptionError(
+                    f"exported symbol {fn.extern_symbol} conflicts with external symbol {fn.extern_symbol}",
+                    fn.line,
+                )
+            signature = (tuple(param.type_name for param in fn.params), fn.return_type)
+            existing = externs.get(fn.extern_symbol)
+            if existing is not None and existing != signature:
+                raise InscriptionError(f"external symbol {fn.extern_symbol} declared with incompatible types", fn.line)
+            externs[fn.extern_symbol] = signature
 
 
 def constant_table(
@@ -241,7 +263,7 @@ def resolve_function_table(
             if fn.return_type is None
             else resolve_value_type(fn.return_type, fn.line, records, constants, functions, {})
         )
-        resolved[name] = Function(fn.name, params, return_type, fn.body, fn.line, fn.display_name, fn.extern_symbol)
+        resolved[name] = Function(fn.name, params, return_type, fn.body, fn.line, fn.display_name, fn.extern_symbol, fn.implementation)
     return resolved
 
 
@@ -321,9 +343,11 @@ def _check_function(
     constants: dict[str, ConstValue],
 ) -> None:
     fn = functions[fn.name]
-    if fn.extern_symbol is not None:
+    if fn.implementation == "extern":
         _check_extern_function(fn, records)
         return
+    if fn.implementation == "export":
+        _check_exported_function(fn, records)
     resolved_params: list[tuple[str, ValueType]] = []
     for param in fn.params:
         if param.name in constants:
@@ -387,6 +411,23 @@ def _check_extern_function(fn: Function, records: dict[str, RecordDecl]) -> None
             raise InscriptionError(f"unknown type {fn.return_type.name}", fn.line)
         raise InscriptionError(
             f"extern phrase return types must be scalar types, got {format_type(fn.return_type)}",
+            fn.line,
+        )
+
+
+
+def _check_exported_function(fn: Function, records: dict[str, RecordDecl]) -> None:
+    for param in fn.params:
+        if not isinstance(param.type_name, str) or param.type_name not in SCALAR_TYPES:
+            raise InscriptionError(
+                f"exported phrase parameters must be scalar types, got {format_type(param.type_name)}",
+                fn.line,
+            )
+    if fn.return_type is not None and (not isinstance(fn.return_type, str) or fn.return_type not in SCALAR_TYPES):
+        if isinstance(fn.return_type, RecordType) and fn.return_type.name not in records:
+            raise InscriptionError(f"unknown type {fn.return_type.name}", fn.line)
+        raise InscriptionError(
+            f"exported phrase return types must be scalar types, got {format_type(fn.return_type)}",
             fn.line,
         )
 

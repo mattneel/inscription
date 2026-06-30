@@ -1,0 +1,7 @@
+extern population count of x: i32 gives i32 as llvm.ctpop.i32
+
+export exported popcount x: i32 gives i32 as ins_popcount:
+  population count of x
+
+main gives i32:
+  exported popcount 15

@@ -6,11 +6,12 @@ The language is readable, but it is **not** natural-language interpretation: eve
 
 ## Status
 
-This repository currently implements **Inscription v0.14**:
+This repository currently implements **Inscription v0.15**:
 
 - source-visible scalar types: `i1`, signed integers `i8`/`i16`/`i32`/`i64`, and unsigned integers `u8`/`u16`/`u32`/`u64`
 - phrase-shaped function definitions and phrase-shaped calls
 - scalar-only extern phrase declarations such as `extern population count of x: i32 gives i32 as llvm.ctpop.i32`
+- scalar-only exported phrase definitions such as `export add x: i32 and y: i32 gives i32 as ins_add:`
 - value blocks with `expression when condition` and `otherwise expression`
 - implicit returns: the block value is the phrase result
 - local scalar bindings with `let name be expression` and `let name: type be expression`
@@ -51,11 +52,11 @@ This repository currently implements **Inscription v0.14**:
 - parenthesized expressions
 - deterministic parsing and semantic checks
 - exact MLIR golden conformance tests in [`tests/goldens`](tests/goldens)
-- MLIR emission using `func`, `arith`, `scf.if`, `scf.for`, `scf.while`, flattened scalar SSA and flattened scalar function results for records, local `memref.alloca`/`memref.load`/`memref.store` for buffers, private `func.func` declarations for scalar extern phrases, and `cf.assert` when runtime assertions are emitted
+- MLIR emission using `func`, `arith`, `scf.if`, `scf.for`, `scf.while`, flattened scalar SSA and flattened scalar function results for records, local `memref.alloca`/`memref.load`/`memref.store` for buffers, private `func.func` declarations for scalar extern phrases, public stable-symbol definitions for exported phrases, and `cf.assert` when runtime assertions are emitted
 - LLVM 22 lowering and execution through `mlir-opt`, `mlir-translate`, and `lli`
-- no source-level I/O, heap allocation, pointers, dynamic-size buffers, buffer/view return values, buffer/view aliasing beyond conservative same-root rejection, slices, LLVM/C ABI structs, C ABI annotations, linker flags, extern buffer/view/record parameters, extern record returns, floats, strings, statement-level `return`, `break`, `continue`, macros, import aliases, wildcard imports, generics, global storage, exceptions, result/error values, source strings, source-level runtime assertion messages, overloading, type coercions, or natural-language inference
+- no source-level I/O, heap allocation, pointers, dynamic-size buffers, buffer/view return values, buffer/view aliasing beyond conservative same-root rejection, slices, LLVM/C ABI structs, C ABI annotations, linker flags, extern/exported buffer/view/record parameters, extern/exported record returns, object-file packaging, floats, strings, statement-level `return`, `break`, `continue`, macros, import aliases, wildcard imports, generics, global storage, exceptions, result/error values, source strings, source-level runtime assertion messages, overloading, type coercions, or natural-language inference
 
-See [`docs/inscription-v0.14-spec.md`](docs/inscription-v0.14-spec.md) and [`grammar/inscription-v0.14.ebnf`](grammar/inscription-v0.14.ebnf) for the exact current language contract. The immutable previous contracts remain in [`docs/`](docs) and [`grammar/`](grammar), including the v0.13 record-return contract.
+See [`docs/inscription-v0.15-spec.md`](docs/inscription-v0.15-spec.md) and [`grammar/inscription-v0.15.ebnf`](grammar/inscription-v0.15.ebnf) for the exact current language contract. The immutable previous contracts remain in [`docs/`](docs) and [`grammar/`](grammar), including the v0.14 extern-phrase contract.
 
 ## Requirements
 
@@ -159,7 +160,7 @@ Commands return `2` for compiler, diagnostic, toolchain, or filesystem errors. I
 
 ## Language summary
 
-A program is an optional module declaration followed by imports, top-level constants, compile-time checks, record declarations, layout-record declarations, extern phrase declarations, and phrase definitions:
+A program is an optional module declaration followed by imports, top-level constants, compile-time checks, record declarations, layout-record declarations, extern phrase declarations, exported phrase definitions, and phrase definitions:
 
 ```text
 module module.name
@@ -170,6 +171,9 @@ check expression
 
 extern phrase hole: i32 gives i32 as external.symbol
 extern side effect code: i32 does as host_notify
+
+export add x: i32 and y: i32 gives i32 as ins_add:
+  x plus y
 
 record TypeName:
   field: type
@@ -205,6 +209,18 @@ main gives i32:
 ```
 
 Extern phrases use ordinary phrase-call syntax. `gives` externs are expressions, `does` externs are standalone steps, and imported extern phrases must be qualified like imported normal phrases. The compiler emits private `func.func` declarations for external symbols and does not check whether the host symbol exists at compile time. v0.14 externs are scalar-only: no buffer, view, or record extern parameters and no record extern returns are supported. Inscription does not add C ABI guarantees, linker flags, library names, pointer types, or source string literals for externs.
+
+Exported phrase definitions are the mirror image: they define Inscription bodies with stable public MLIR symbols for host or other LLVM IR callers:
+
+```text
+export add left: i32 and right: i32 gives i32 as ins_add:
+  left plus right
+
+main gives i32:
+  add 40 and 2
+```
+
+The source call still uses the phrase-shaped name (`add 40 and 2`), while MLIR defines and calls `@ins_add`. Imported exported phrases are still source-qualified by module name. v0.15 exports are scalar-only at the ABI boundary, but their bodies may use local records, buffers, views, `require`, helper phrases, and extern calls. Inscription does not yet provide object-file packaging, headers, linker flags, pointer parameters, buffer/view ABI, or record ABI lowering.
 
 A scalar type is one of `i1`, `i8`, `i16`, `i32`, `i64`, `u8`, `u16`, `u32`, or `u64`. A record type is a nominal top-level name declared with scalar fields. A buffer parameter type is written `buffer of LENGTH TYPE`, where `TYPE` is an integer numeric scalar type, not `i1`, and `LENGTH` is a compile-time integer length. A borrowed view parameter type is written `view of TYPE`, where `TYPE` is an integer numeric scalar type, not `i1`. `i1` is boolean only; all other scalar types are integer numeric types. Signedness is source-semantic: MLIR integers are signless, but Inscription signedness selects division, remainder, ordered comparison, right-shift, widening cast, and dynamic buffer-index conversion operations. A scalar typed hole is written `name: type`; a buffer typed hole is written `name: buffer of LENGTH type`; a view typed hole is written `name: view of type`. The call site mirrors the definition by filling the holes:
 
@@ -428,10 +444,16 @@ left is greater than right
 left is greater than or equal to right
 ```
 
-Important v0.14 rules:
+Important v0.15 rules:
 
 - function names are generated from the leading literal words in a phrase definition
 - extern phrase declarations have no body and emit external `func.func private` declarations
+- exported phrase definitions have bodies and emit public definitions with the symbol named after `as`
+- exported phrase signatures are scalar-only at the ABI boundary in v0.15
+- exported `gives` calls are scalar expressions; exported `does` calls are standalone steps
+- exported phrase bodies may still use local records, buffers, views, requirements, helper phrases, and extern calls
+- imported exported phrases must be source-qualified, but emitted calls target the exported symbol
+- exported symbols cannot duplicate each other or conflict with extern/generated symbols such as `main`
 - extern phrase parameters and return values are scalar-only in v0.14
 - extern `gives` calls are expressions; extern `does` calls are standalone steps
 - imported extern phrases must be qualified, and calls target the declared external symbol rather than a module-qualified generated symbol
@@ -496,7 +518,7 @@ Important v0.14 rules:
 - phrase calls must match a declared phrase template exactly
 - conditional value blocks require `otherwise`
 - removed ceremony words such as `Function`, `End function`, `Set`, `Return`, and `call ... with` are not valid Inscription syntax
-- unsupported `track`, I/O, dynamic arrays, floats, pointers, heap allocation, source-level memrefs, buffer/view returns, extern buffer/view/record parameters, extern record returns, record buffers, nested records, and free prose are rejected
+- unsupported `track`, I/O, dynamic arrays, floats, pointers, heap allocation, source-level memrefs, buffer/view returns, extern/exported buffer/view/record parameters, extern/exported record returns, record buffers, nested records, and free prose are rejected
 
 ## Tests
 
@@ -564,6 +586,11 @@ PYTHONPATH=src python -m inscription run tests/fixtures/positive/constant_layout
 PYTHONPATH=src python -m inscription run tests/fixtures/positive/extern_ctpop.ins                    # exits 4
 PYTHONPATH=src python -m inscription run tests/fixtures/positive/extern_in_loop.ins                  # exits 4
 PYTHONPATH=src python -m inscription run tests/fixtures/positive/extern_constant_argument.ins        # exits 4
+PYTHONPATH=src python -m inscription run tests/fixtures/positive/export_scalar_gives.ins             # exits 42
+PYTHONPATH=src python -m inscription run tests/fixtures/positive/export_scalar_does.ins              # exits 7
+PYTHONPATH=src python -m inscription run tests/fixtures/positive/export_calls_extern.ins             # exits 4
+PYTHONPATH=src python -m inscription run tests/fixtures/positive/export_uses_record_local.ins        # exits 42
+PYTHONPATH=src python -m inscription run tests/fixtures/positive/export_uses_buffer_local.ins        # exits 20
 ```
 
 ## Repository layout
@@ -584,7 +611,8 @@ docs/inscription-v0.10-spec.md v0.10 language and toolchain specification
 docs/inscription-v0.11-spec.md v0.11 language and toolchain specification
 docs/inscription-v0.12-spec.md v0.12 language and toolchain specification
 docs/inscription-v0.13-spec.md v0.13 language and toolchain specification
-docs/inscription-v0.14-spec.md current v0.14 language and toolchain specification
+docs/inscription-v0.14-spec.md v0.14 language and toolchain specification
+docs/inscription-v0.15-spec.md current v0.15 language and toolchain specification
 grammar/inscription-v0.ebnf   original v0 grammar
 grammar/inscription-v0.1.ebnf v0.1 grammar
 grammar/inscription-v0.2.ebnf v0.2 grammar
@@ -599,7 +627,8 @@ grammar/inscription-v0.10.ebnf v0.10 grammar
 grammar/inscription-v0.11.ebnf v0.11 grammar
 grammar/inscription-v0.12.ebnf v0.12 grammar
 grammar/inscription-v0.13.ebnf v0.13 grammar
-grammar/inscription-v0.14.ebnf current v0.14 grammar
+grammar/inscription-v0.14.ebnf v0.14 grammar
+grammar/inscription-v0.15.ebnf current v0.15 grammar
 tests/goldens/                exact MLIR conformance goldens
 tests/                        unit tests and executable fixtures
 ```

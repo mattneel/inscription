@@ -273,6 +273,7 @@ def qualify_function(
         function.line,
         function.display_name,
         function.extern_symbol,
+        function.implementation,
     )
 
 

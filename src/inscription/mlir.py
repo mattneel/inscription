@@ -185,12 +185,12 @@ class MlirEmitter:
         emitted_any = False
         for fn in program.functions:
             resolved = self.functions[fn.name]
-            if resolved.extern_symbol is None or resolved.extern_symbol in emitted_declarations:
+            if resolved.implementation != "extern" or resolved.extern_symbol in emitted_declarations:
                 continue
             self.emit_extern_declaration(resolved, lines)
             emitted_declarations.add(resolved.extern_symbol)
             emitted_any = True
-        normal_functions = [fn for fn in program.functions if self.functions[fn.name].extern_symbol is None]
+        normal_functions = [fn for fn in program.functions if self.functions[fn.name].implementation != "extern"]
         for index, fn in enumerate(normal_functions):
             if emitted_any or index:
                 lines.append("")
@@ -217,7 +217,7 @@ class MlirEmitter:
         self.for_depth = 0
         args = ", ".join(self.function_argument_decls(fn))
         return_suffix = "" if fn.return_type is None else f" -> {self.return_type_list(fn.return_type)}"
-        lines.append(f"  func.func @{fn.name}({args}){return_suffix} {{")
+        lines.append(f"  func.func @{self.call_symbol(fn)}({args}){return_suffix} {{")
         env: dict[str, EnvValue] = {}
         for param in fn.params:
             if isinstance(param.type_name, BufferType):

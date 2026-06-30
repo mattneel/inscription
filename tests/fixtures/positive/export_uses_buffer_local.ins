@@ -1,0 +1,9 @@
+export sum local buffer gives i32 as ins_sum_local_buffer:
+  let cells be buffer of 4 i32 filled with 5
+  let total be 0
+  for each index i of cells:
+    total becomes total plus cells at i
+  total
+
+main gives i32:
+  sum local buffer

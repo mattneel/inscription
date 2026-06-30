@@ -198,6 +198,7 @@ class CompilerTests(unittest.TestCase):
                 (GOLDENS / "75_view_parameter_sum.ins").read_text(),
                 (GOLDENS / "81_require_divide.ins").read_text(),
                 (GOLDENS / "94_extern_ctpop.ins").read_text(),
+                (GOLDENS / "99_export_scalar_gives.ins").read_text(),
                 "highlight new widths a: i8 and b: i16 and c: u64 gives u64:\n  c bitwise xor c\n",
             ]
         )
@@ -565,6 +566,70 @@ main gives Point:
                 "extern missing call gives i32 as definitely_missing_symbol\n\nmain gives i32:\n  missing call\n"
             )
             self.assertIn("func.func private @definitely_missing_symbol() -> i32", missing_symbol_mlir)
+
+    def test_v015_exported_phrases_lower_to_public_symbols(self):
+        mlir = compile_source(self.fixture("export_scalar_gives.ins"))
+        self.assertIn("func.func @ins_add(%left: i32, %right: i32) -> i32", mlir)
+        self.assertIn("func.call @ins_add", mlir)
+        self.assertNotIn("func.func @add", mlir)
+        try:
+            result = run_source(self.fixture("export_scalar_gives.ins"))
+        except ToolchainError as exc:
+            self.skipTest(str(exc))
+        self.assertEqual(result.exit_status, 42)
+
+        does_mlir = compile_source(self.fixture("export_scalar_does.ins"))
+        self.assertIn("func.func @ins_require_nonnegative(%value: i32)", does_mlir)
+        self.assertIn("cf.assert", does_mlir)
+        self.assertIn("func.call @ins_require_nonnegative", does_mlir)
+
+        extern_mlir = compile_source(self.fixture("export_calls_extern.ins"))
+        self.assertIn("func.func private @llvm.ctpop.i32(i32) -> i32", extern_mlir)
+        self.assertIn("func.func @ins_popcount(%x: i32) -> i32", extern_mlir)
+        self.assertIn("func.call @llvm.ctpop.i32", extern_mlir)
+        self.assertIn("func.call @ins_popcount", extern_mlir)
+
+        record_mlir = compile_source(self.fixture("export_uses_record_local.ins"))
+        self.assertIn("func.func @ins_make_and_sum(%x: i32, %y: i32) -> i32", record_mlir)
+        self.assertIn("arith.addi", record_mlir)
+
+        buffer_mlir = compile_source(self.fixture("export_uses_buffer_local.ins"))
+        self.assertIn("func.func @ins_sum_local_buffer() -> i32", buffer_mlir)
+        self.assertIn("memref.alloca", buffer_mlir)
+        self.assertIn("scf.for", buffer_mlir)
+
+    def test_v015_module_exported_phrase_uses_public_symbol(self):
+        fixture = FIXTURES / "export_module_phrase" / "main.ins"
+        mlir = compile_file(fixture, module_root=fixture.parent)
+        self.assertIn("func.func @ins_square(%x: i32) -> i32", mlir)
+        self.assertIn("func.call @ins_square", mlir)
+        self.assertNotIn("Math__square", mlir)
+        try:
+            result = run_file(fixture, module_root=fixture.parent)
+        except ToolchainError as exc:
+            self.skipTest(str(exc))
+        self.assertEqual(result.exit_status, 81)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "Math.ins").write_text(
+                "module Math\n\nexport square of x: i32 gives i32 as ins_square:\n  x times x\n"
+            )
+            self.assertIn(
+                "unexpected token 'of'",
+                self._compile_file_error(root, "import Math\n\nmain gives i32:\n  square of 9\n"),
+            )
+
+            (root / "A.ins").write_text(
+                "module A\n\nexport add x: i32 and y: i32 gives i32 as ins_add:\n  x plus y\n"
+            )
+            (root / "B.ins").write_text(
+                "module B\n\nexport sub x: i32 and y: i32 gives i32 as ins_add:\n  x minus y\n"
+            )
+            self.assertIn(
+                "exported symbol ins_add is already defined",
+                self._compile_file_error(root, "import A\nimport B\n\nmain gives i32:\n  A.add 1 and 2\n"),
+            )
 
     def test_v010_module_diagnostics(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1339,6 +1404,66 @@ main gives i32:
             "external symbol conflicts with generated function": (
                 "extern external main gives i32 as main\n\nmain gives i32:\n  0\n",
                 "external symbol main conflicts with generated function main",
+            ),
+            "exported phrase missing body": (
+                "export add x: i32 and y: i32 gives i32 as ins_add\n",
+                "exported phrase definitions require a body",
+            ),
+            "exported buffer parameter unsupported": (
+                "export sum cells cells: buffer of 4 i32 gives i32 as ins_sum_cells:\n  0\n",
+                "exported phrase parameters must be scalar types, got buffer of 4 i32",
+            ),
+            "exported view parameter unsupported": (
+                "export sum view cells: view of i32 gives i32 as ins_sum_view:\n  0\n",
+                "exported phrase parameters must be scalar types, got view of i32",
+            ),
+            "exported record parameter unsupported": (
+                "record Point:\n  x: i32\n  y: i32\n\nexport sum point p: Point gives i32 as ins_sum_point:\n  p.x plus p.y\n",
+                "exported phrase parameters must be scalar types, got Point",
+            ),
+            "exported record return unsupported": (
+                "record Point:\n  x: i32\n  y: i32\n\nexport make point gives Point as ins_make_point:\n  Point with x be 1 and y be 2\n",
+                "exported phrase return types must be scalar types, got Point",
+            ),
+            "exported duplicate normal phrase": (
+                "export add x: i32 and y: i32 gives i32 as ins_add:\n  x plus y\n\nadd x: i32 and y: i32 gives i32:\n  x plus y\n",
+                "phrase `add _ and _` is already defined",
+            ),
+            "exported duplicate extern phrase": (
+                "extern add x: i32 and y: i32 gives i32 as host_add\n\nexport add x: i32 and y: i32 gives i32 as ins_add:\n  x plus y\n",
+                "phrase `add _ and _` is already defined",
+            ),
+            "exported symbol duplicate": (
+                "export add x: i32 and y: i32 gives i32 as ins_op:\n  x plus y\n\nexport sub x: i32 and y: i32 gives i32 as ins_op:\n  x minus y\n",
+                "exported symbol ins_op is already defined",
+            ),
+            "exported symbol conflicts with extern symbol": (
+                "extern host add x: i32 and y: i32 gives i32 as ins_add\n\nexport add x: i32 and y: i32 gives i32 as ins_add:\n  x plus y\n",
+                "exported symbol ins_add conflicts with external symbol ins_add",
+            ),
+            "exported symbol conflicts with generated normal function": (
+                "normal helper gives i32:\n  0\n\nexport exported helper gives i32 as normal_helper:\n  0\n",
+                "exported symbol normal_helper conflicts with generated function normal_helper",
+            ),
+            "exported symbol main rejected": (
+                "export exported main gives i32 as main:\n  0\n",
+                "exported symbol main conflicts with generated function main",
+            ),
+            "exported gives used as step": (
+                "export add x: i32 and y: i32 gives i32 as ins_add:\n  x plus y\n\nbad gives i32:\n  add 1 and 2\n  0\n",
+                "phrase `add _ and _` returns i32 and cannot be used as a step",
+            ),
+            "exported does used as expression": (
+                "export notify code: i32 does as ins_notify:\n  require code is greater than or equal to 0\n\nbad gives i32:\n  let x be notify 1\n  x\n",
+                "phrase `notify _` does not return a value",
+            ),
+            "exported call in constant initializer": (
+                "export add x: i32 and y: i32 gives i32 as ins_add:\n  x plus y\n\nconstant x: i32 be add 1 and 2\n",
+                "constant x must be compile-time evaluable",
+            ),
+            "exported call in check": (
+                "export add x: i32 and y: i32 gives i32 as ins_add:\n  x plus y\n\ncheck add 1 and 2 is equal to 3\n",
+                "check expression must be compile-time evaluable",
             ),
         }
         for name, (source, contains) in cases.items():

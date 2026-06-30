@@ -21,6 +21,7 @@ BinOp = Literal[
 ]
 UnaryOp = Literal["not", "bitwise not"]
 RecordLayoutKind = Literal["value", "natural", "packed"]
+FunctionImplementation = Literal["normal", "extern", "export"]
 
 
 @dataclass(frozen=True)
@@ -78,6 +79,7 @@ class Function:
     line: int
     display_name: str
     extern_symbol: str | None = None
+    implementation: FunctionImplementation = "normal"
 
 
 @dataclass(frozen=True)

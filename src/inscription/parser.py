@@ -62,7 +62,7 @@ QUALIFIED_RECORD_NAME_RE = re.compile(r"(?:[A-Za-z][A-Za-z0-9_]*\.)*[A-Z][A-Za-z
 TOKEN_RE = re.compile(r"\s*(-?\d+|[A-Z][A-Za-z0-9_]*|[a-z][a-z0-9_]*|[().,])")
 RESERVED = {
     "address", "alignment", "and", "arguments", "array", "as", "at", "be", "becomes", "bitwise", "buffer", "by", "call",
-    "check", "constant", "divided", "do", "does", "each", "else", "equal", "extern", "false", "filled", "float", "for", "from",
+    "check", "constant", "divided", "do", "does", "each", "else", "equal", "export", "extern", "false", "filled", "float", "for", "from",
     "function", "gives", "greater", "i1", "i32", "i64", "if", "in", "index", "input", "into", "import",
     "i8", "i16", "is", "layout", "length", "less", "let", "memref", "minus", "module", "no", "not", "or", "otherwise", "output", "packed", "parameters",
     "pointer", "plus", "print", "read", "remainder", "require", "return", "set", "shifted", "size", "takes", "than", "then", "times", "to",
@@ -166,6 +166,10 @@ class Parser:
                 template, _return_type, _external_symbol = self._parse_extern_decl(line)
                 templates.append(template)
                 continue
+            if line.indent == 0 and line.text.startswith("export "):
+                template, _return_type, _external_symbol = self._parse_export_header(line)
+                templates.append(template)
+                continue
             if not self._looks_like_phrase_header(line):
                 continue
             template, _return_type = self._parse_phrase_header(line)
@@ -219,14 +223,31 @@ class Parser:
                         line.number,
                         template.display_name,
                         external_symbol,
+                        "extern",
                     )
                 )
                 index += 1
                 continue
+            if line.text.startswith("export "):
+                template, return_type, external_symbol = self._parse_export_header(line)
+                body, index = self._parse_phrase_body(index + 1, template, line.number)
+                functions.append(
+                    Function(
+                        template.symbol,
+                        template.params,
+                        return_type,
+                        tuple(body),
+                        line.number,
+                        template.display_name,
+                        external_symbol,
+                        "export",
+                    )
+                )
+                continue
             if line.text.startswith("require "):
                 raise InscriptionError("require may only appear inside phrase bodies", line.number)
             if not self._looks_like_phrase_header(line):
-                raise InscriptionError("expected phrase definition, record declaration, constant declaration, check, extern, module, or import", line.number)
+                raise InscriptionError("expected phrase definition, record declaration, constant declaration, check, extern, export, module, or import", line.number)
             template, return_type = self._parse_phrase_header(line)
             body, index = self._parse_phrase_body(index + 1, template, line.number)
             functions.append(
@@ -257,7 +278,7 @@ class Parser:
         return (
             self._looks_like_phrase_header(line)
             or self._looks_like_record_header(line)
-            or (line.indent == 0 and (line.text.startswith("constant ") or line.text.startswith("check ") or line.text.startswith("extern ") or line.text.startswith("module ") or line.text.startswith("import ") or line.text.startswith("require ")))
+            or (line.indent == 0 and (line.text.startswith("constant ") or line.text.startswith("check ") or line.text.startswith("extern ") or line.text.startswith("export ") or line.text.startswith("module ") or line.text.startswith("import ") or line.text.startswith("require ")))
         )
 
     def _parse_record_decl(self, index: int) -> tuple[RecordDecl, int]:
@@ -338,6 +359,27 @@ class Parser:
             template = self._parse_phrase_template(does_match.group(1).strip(), line.number, None)
             return template, None, does_match.group(2)
         raise InscriptionError("malformed extern phrase declaration", line.number)
+
+
+    def _parse_export_header(self, line: Line) -> tuple[PhraseTemplate, ReturnType, str]:
+        if not line.is_header:
+            raise InscriptionError("exported phrase definitions require a body", line.number)
+        gives_match = re.fullmatch(
+            rf"export (.+?) gives ({TYPE_PATTERN}) as ({EXTERNAL_SYMBOL_PATTERN})",
+            line.text,
+        )
+        if gives_match is not None:
+            return_type = self._return_type(gives_match.group(2), line.number)
+            template = self._parse_phrase_template(gives_match.group(1).strip(), line.number, return_type)
+            return template, return_type, gives_match.group(3)
+        does_match = re.fullmatch(
+            rf"export (.+?) does as ({EXTERNAL_SYMBOL_PATTERN})",
+            line.text,
+        )
+        if does_match is not None:
+            template = self._parse_phrase_template(does_match.group(1).strip(), line.number, None)
+            return template, None, does_match.group(2)
+        raise InscriptionError("malformed exported phrase definition", line.number)
 
     def _parse_phrase_template(self, text: str, line: int, return_type: ReturnType) -> PhraseTemplate:
         parts: list[PhrasePart] = []
@@ -485,6 +527,11 @@ class Parser:
         if current.text.startswith("check "):
             return self._parse_check_stmt(current), index + 1
         if current.text.startswith("require "):
+            if include_phrase_calls:
+                call = self._parse_phrase_call_expr(current)
+                target = self._template_for_call(call) if call is not None else None
+                if target is not None and target.return_type is None:
+                    return CallStmt(call, current.number), index + 1
             return self._parse_require_stmt(current), index + 1
         if current.text.startswith("let "):
             return self._parse_let(current), index + 1
