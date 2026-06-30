@@ -6,7 +6,7 @@ The language is readable, but it is **not** natural-language interpretation: eve
 
 ## Status
 
-This repository currently implements **Inscription v0.21**:
+This repository currently implements **Inscription v0.22**:
 
 - source-visible scalar types: `i1`, signed integers `i8`/`i16`/`i32`/`i64`, unsigned integers `u8`/`u16`/`u32`/`u64`, and floats `f32`/`f64`
 - phrase-shaped function definitions and phrase-shaped calls
@@ -32,22 +32,23 @@ This repository currently implements **Inscription v0.21**:
 - top-level typed compile-time constants with `constant name: type be expression`
 - compile-time assertions with `check expression` at top level or inside phrase bodies
 - runtime requirements with `require expression` inside phrase bodies
-- local fixed-size stack buffers with `let name be buffer of LENGTH TYPE filled with expression`, where `LENGTH` may be a literal, constant name, or parenthesized compile-time expression
+- local fixed-size stack buffers with `let name be buffer of LENGTH TYPE filled with expression` or `let name be buffer of LENGTH TYPE containing a, b, c`, where `LENGTH` may be a literal, constant name, or parenthesized compile-time expression
+- immutable fixed-size local arrays with `let name be array of LENGTH TYPE containing a, b, c` or `filled with expression`
 - buffer parameter holes with `name: buffer of LENGTH TYPE`
-- buffer/view loads with `name at index` and buffer/view stores with `name at index becomes expression`
-- borrowed non-owning buffer views with `let name be view of source from start for count`
+- buffer/view/array loads with `name at index`, plus mutable buffer/view stores with `name at index becomes expression`
+- borrowed non-owning views over buffers, arrays, or other views with `let name be view of source from start for count`
 - view parameter holes with `name: view of TYPE`
-- buffer/view length expressions with `length of name`
-- optional checked storage mode with `--runtime-checks` for dynamic buffer, view, and layout bounds
+- buffer/view/array length expressions with `length of name`
+- optional checked storage mode with `--runtime-checks` for dynamic buffer, array, view, and layout bounds
 - local record values with constructors such as `Point with x be 1 and y be 2`
 - record field reads and rebindings with `p.x` and `p.x becomes expression`
 - compile-time layout introspection with `size of TypeName`, `alignment of TypeName`, and `offset of field in TypeName`
-- explicit layout serialization with `read TypeName from bytes at index` and `write value into bytes at index` for `u8` buffers or `view of u8`
+- explicit layout serialization with `read TypeName from bytes at index` for `u8` buffers/views/arrays and `write value into bytes at index` for writable `u8` buffers/views
 - record parameters passed by value and flattened into scalar MLIR operands
 - record return values from `gives` phrases, flattened into scalar MLIR results
 - side-effect-only `does` phrases used as standalone steps
 - counted `for name from start up to end:` loops, with optional positive literal `by step`
-- buffer/view index loops with `for each index name of buffer_or_view:`
+- buffer/view/array index loops with `for each index name of storage:`
 - `while condition:` step blocks lowered as loop-carried SSA values through `scf.while`
 - nested `while` loops
 - step-level `if condition:` / `otherwise:` blocks lowered through `scf.if` SSA results
@@ -64,12 +65,12 @@ This repository currently implements **Inscription v0.21**:
 - parenthesized expressions
 - deterministic parsing and semantic checks
 - exact MLIR golden conformance tests in [`tests/goldens`](tests/goldens)
-- MLIR emission using `func`, `arith`, `scf.if`, `scf.for`, `scf.while`, flattened scalar SSA and flattened scalar function results for records, local `memref.alloca`/`memref.load`/`memref.store` for buffers, private `func.func` declarations for scalar extern phrases, public stable-symbol definitions for exported phrases, and `cf.assert` when runtime assertions are emitted
+- MLIR emission using `func`, `arith`, `scf.if`, `scf.for`, `scf.while`, flattened scalar SSA and flattened scalar function results for records, local `memref.alloca`/`memref.load`/`memref.store` for buffers and arrays, private `func.func` declarations for scalar extern phrases, public stable-symbol definitions for exported phrases, and `cf.assert` when runtime assertions are emitted
 - tooling output for frontend source MLIR, optimized source MLIR, lowered MLIR, LLVM IR, optional single-object output through LLVM 22 `llc`, native executable output through LLVM 22 `clang`, deterministic static archives through LLVM 22 `llvm-ar`, deterministic interface JSON, and conservative C headers
 - LLVM 22 lowering and execution through `mlir-opt`, `mlir-translate`, and `lli`
-- no source-level I/O, heap allocation, pointers, dynamic-size buffers, buffer/view return values, buffer/view aliasing beyond conservative same-root rejection, slices, C ABI structs, C ABI annotations, arbitrary pass pipelines, LLVM `opt`, LTO, linker flags beyond explicit `--link-object`/`--archive-object`, extern/exported buffer/view/record parameters, extern/exported record returns, executable packaging beyond one output file, shared libraries, record/layout C structs, header installation, strings, statement-level `return`, `break`, `continue`, macros, import aliases, wildcard imports, generics, global storage, exceptions, result/error values, source strings, source-level runtime assertion messages, overloading, type coercions, or natural-language inference
+- no source-level I/O, heap allocation, pointers, dynamic-size buffers, array parameters or returns, buffer/view return values, buffer/view/array aliasing beyond conservative same-root rejection, slices, C ABI structs, C ABI annotations, arbitrary pass pipelines, LLVM `opt`, LTO, linker flags beyond explicit `--link-object`/`--archive-object`, extern/exported buffer/view/record parameters, extern/exported record returns, executable packaging beyond one output file, shared libraries, record/layout C structs, header installation, strings, statement-level `return`, `break`, `continue`, macros, import aliases, wildcard imports, generics, global storage, exceptions, result/error values, source strings, source-level runtime assertion messages, overloading, type coercions, or natural-language inference
 
-See [`docs/inscription-v0.21-spec.md`](docs/inscription-v0.21-spec.md) and [`grammar/inscription-v0.21.ebnf`](grammar/inscription-v0.21.ebnf) for the exact current language and tooling contract. The immutable previous contracts remain in [`docs/`](docs) and [`grammar/`](grammar), including the v0.19 interface metadata contract.
+See [`docs/inscription-v0.22-spec.md`](docs/inscription-v0.22-spec.md) and [`grammar/inscription-v0.22.ebnf`](grammar/inscription-v0.22.ebnf) for the exact current language and tooling contract. The immutable previous contracts remain in [`docs/`](docs) and [`grammar/`](grammar), including the v0.19 interface metadata contract.
 
 ## Requirements
 
@@ -193,7 +194,7 @@ python -m inscription check-tools [--show-pipeline] [--require-object] [--requir
 
 Commands return `2` for compiler, diagnostic, toolchain, or filesystem errors. Imports resolve relative to the root source file directory by default; pass `--module-root ROOT` to resolve module paths from another directory.
 
-`compile --emit mlir` emits the frontend source MLIR and is the default exact-golden artifact. `--emit mlir` remains raw frontend output even with `-O1` or `-O2`. `--emit lowered-mlir` emits MLIR after the configured lowering pipeline. `--emit llvm-ir` emits LLVM IR from `mlir-translate`. `--emit object -o file.o` emits a single native object with LLVM 22 `llc`; it does not link or resolve extern symbols. `--emit executable -o program` emits an object and links it with LLVM 22 `clang`; it requires a root no-hole integer-scalar `main` and does not run the executable. `--emit static-library -o libname.a` emits a deterministic native static archive with LLVM 22 `llvm-ar`; it does not require `main`, does not invoke `clang`, and does not resolve extern symbols. When a compilation contains exported phrases, the root executable `main` entry point is omitted from the archive object so generated C callers can provide their own `main`; normal helper phrases remain available according to existing symbol emission. `--emit interface-json` emits deterministic host-integration metadata for loaded modules, constants, records, layout records, exported phrases, and extern phrases. `--emit c-header` emits a deterministic C header for exported scalar phrases only; v0.21 C headers support `i32`, `u32`, `i64`, `u64`, `f32`, and `f64`, reject dotted/non-C exported symbols, and do not include extern declarations. Repeated `--link-object PATH` arguments pass explicit additional objects to clang after the generated object. Repeated `--archive-object PATH` arguments add explicit additional objects to a static archive after the generated object and are valid only with `--emit static-library`. `--opt-level none|basic|aggressive` chooses deterministic MLIR optimization passes before lowering; `-O0`, `-O1`, and `-O2` are aliases for `none`, `basic`, and `aggressive`. Optimization affects lowered MLIR, LLVM IR, object emission, executable emission, static-library emission, and `run`, but not source MLIR, interface JSON, or C header output. `--save-temps DIR` writes deterministic `<stem>.mlir`, `<stem>.lowered.mlir`, `<stem>.ll`, and, for object/executable/static-library emission, `<stem>.o` intermediates; with `basic` or `aggressive` it also writes `<stem>.optimized.mlir`. Interface JSON and C header modes do not create temps unless `--verify` requests the MLIR verification pipeline. `run --save-temps DIR` saves the stages used before execution through `lli`, which remains the default run backend.
+`compile --emit mlir` emits the frontend source MLIR and is the default exact-golden artifact. `--emit mlir` remains raw frontend output even with `-O1` or `-O2`. `--emit lowered-mlir` emits MLIR after the configured lowering pipeline. `--emit llvm-ir` emits LLVM IR from `mlir-translate`. `--emit object -o file.o` emits a single native object with LLVM 22 `llc`; it does not link or resolve extern symbols. `--emit executable -o program` emits an object and links it with LLVM 22 `clang`; it requires a root no-hole integer-scalar `main` and does not run the executable. `--emit static-library -o libname.a` emits a deterministic native static archive with LLVM 22 `llvm-ar`; it does not require `main`, does not invoke `clang`, and does not resolve extern symbols. When a compilation contains exported phrases, the root executable `main` entry point is omitted from the archive object so generated C callers can provide their own `main`; normal helper phrases remain available according to existing symbol emission. `--emit interface-json` emits deterministic host-integration metadata for loaded modules, constants, records, layout records, exported phrases, and extern phrases. `--emit c-header` emits a deterministic C header for exported scalar phrases only; v0.22 C headers support `i32`, `u32`, `i64`, `u64`, `f32`, and `f64`, reject dotted/non-C exported symbols, and do not include extern declarations. Repeated `--link-object PATH` arguments pass explicit additional objects to clang after the generated object. Repeated `--archive-object PATH` arguments add explicit additional objects to a static archive after the generated object and are valid only with `--emit static-library`. `--opt-level none|basic|aggressive` chooses deterministic MLIR optimization passes before lowering; `-O0`, `-O1`, and `-O2` are aliases for `none`, `basic`, and `aggressive`. Optimization affects lowered MLIR, LLVM IR, object emission, executable emission, static-library emission, and `run`, but not source MLIR, interface JSON, or C header output. `--save-temps DIR` writes deterministic `<stem>.mlir`, `<stem>.lowered.mlir`, `<stem>.ll`, and, for object/executable/static-library emission, `<stem>.o` intermediates; with `basic` or `aggressive` it also writes `<stem>.optimized.mlir`. Interface JSON and C header modes do not create temps unless `--verify` requests the MLIR verification pipeline. `run --save-temps DIR` saves the stages used before execution through `lli`, which remains the default run backend.
 
 `highlight` uses Pygments with a built-in Inscription lexer. The default output is ANSI-colored terminal text. Use `--format html --full -o file.html` to emit a complete HTML document.
 
@@ -261,7 +262,7 @@ main gives i32:
 
 The source call still uses the phrase-shaped name (`add 40 and 2`), while MLIR defines and calls `@ins_add`. Imported exported phrases are still source-qualified by module name. v0.15 exports are scalar-only at the ABI boundary, but their bodies may use local records, buffers, views, `require`, helper phrases, and extern calls. Inscription does not yet provide general linker flags, executable packaging beyond one output file, headers, pointer parameters, buffer/view ABI, or record ABI lowering.
 
-A scalar type is one of `i1`, `i8`, `i16`, `i32`, `i64`, `u8`, `u16`, `u32`, or `u64`. A record type is a nominal top-level name declared with scalar fields. A buffer parameter type is written `buffer of LENGTH TYPE`, where `TYPE` is an integer numeric scalar type, not `i1`, and `LENGTH` is a compile-time integer length. A borrowed view parameter type is written `view of TYPE`, where `TYPE` is an integer numeric scalar type, not `i1`. `i1` is boolean only; all other scalar types are integer numeric types. Signedness is source-semantic: MLIR integers are signless, but Inscription signedness selects division, remainder, ordered comparison, right-shift, widening cast, and dynamic buffer-index conversion operations. A scalar typed hole is written `name: type`; a buffer typed hole is written `name: buffer of LENGTH type`; a view typed hole is written `name: view of type`. The call site mirrors the definition by filling the holes:
+A scalar type is one of `i1`, integer types `i8`, `i16`, `i32`, `i64`, `u8`, `u16`, `u32`, `u64`, or float types `f32` and `f64`. A record type is a nominal top-level name declared with scalar fields. A buffer parameter type is written `buffer of LENGTH TYPE`, where `TYPE` is a numeric scalar type other than `i1`, and `LENGTH` is a compile-time integer length. A borrowed view parameter type is written `view of TYPE`, where `TYPE` is a numeric scalar type other than `i1`. `i1` is boolean only; integer and float scalar types are numeric types. Signedness is source-semantic: MLIR integers are signless, but Inscription signedness selects division, remainder, ordered comparison, right-shift, widening cast, and dynamic buffer-index conversion operations. A scalar typed hole is written `name: type`; a buffer typed hole is written `name: buffer of LENGTH type`; a view typed hole is written `name: view of type`. The call site mirrors the definition by filling the holes:
 
 ```text
 square of n: i32 gives i32:
@@ -305,9 +306,9 @@ main gives i32:
   size of Header plus offset of flags in Header plus copy.tag as i32
 ```
 
-Natural `layout record` declarations use scalar byte widths and alignments, including deterministic padding and final size rounding. `packed layout record` declarations use consecutive byte offsets, size equal to the sum of field widths, and alignment 1. `size of TypeName`, `alignment of TypeName`, and `offset of field in TypeName` are compile-time `i32` constants. `read TypeName from bytes at index` and `write value into bytes at index` operate only on `u8` buffers or `view of u8`, use little-endian multi-byte fields, and write padding bytes as zero. Dynamic layout read/write indices are unchecked by default; `--runtime-checks` emits runtime assertions for dynamic layout bounds.
+Natural `layout record` declarations use scalar byte widths and alignments, including deterministic padding and final size rounding. `packed layout record` declarations use consecutive byte offsets, size equal to the sum of field widths, and alignment 1. `size of TypeName`, `alignment of TypeName`, and `offset of field in TypeName` are compile-time `i32` constants. `read TypeName from bytes at index` operates on `u8` buffers, `view of u8`, or `u8` arrays. `write value into bytes at index` operates only on writable `u8` buffers or writable `view of u8`. Layout serialization uses little-endian multi-byte fields and writes padding bytes as zero. Dynamic layout read/write indices are unchecked by default; `--runtime-checks` emits runtime assertions for dynamic layout bounds.
 
-Body items may introduce scalar or record `let` bindings, local buffers, local views, compile-time `check` steps, runtime `require` steps, scalar/record/field rebindings, buffer/view stores, `does` phrase calls, counted for loops, buffer/view index loops, while loops, or step-level if/otherwise blocks:
+Body items may introduce scalar or record `let` bindings, local buffers, immutable local arrays, local views, compile-time `check` steps, runtime `require` steps, scalar/record/field rebindings, mutable buffer/view stores, `does` phrase calls, counted for loops, buffer/view/array index loops, while loops, or step-level if/otherwise blocks:
 
 ```text
 let total be 0
@@ -316,6 +317,7 @@ total becomes total plus 1
 let point be Point with x be 1 and y be 2
 point.x becomes point.x plus 1
 let bytes be buffer of 4 u8 filled with 0
+let numbers be array of 4 i32 containing 1, 2, 3, 4
 bytes at 0 becomes 255
 let window be view of bytes from 1 for 2
 window at 0 becomes 7
@@ -343,10 +345,23 @@ A local buffer binding uses fixed-size stack storage:
 constant cell_count: i32 be 8
 let bytes be buffer of 4 u8 filled with 0
 let cells be buffer of cell_count i32 filled with zero
+let primes be buffer of 4 i32 containing 2, 3, 5, 7
 let header_bytes be buffer of (size of Header) u8 filled with 0
 ```
 
-Buffers are initialized with `filled with`, read with `name at index`, and written with `name at index becomes value`. Borrowed views are introduced with `let window be view of cells from start for count`, read with `window at index`, and written with `window at index becomes value` when writable. `length of name` returns a buffer's static length or a view's runtime `i32` length. Buffer storage lowers to `memref.alloca`, `memref.load`, and `memref.store`; views lower to a memref base plus `i32` start and length. Literal/static indices are checked at compile time when the length is known. Dynamic storage bounds remain unchecked by default for v0.11 compatibility; pass `--runtime-checks` to emit runtime assertions for dynamic buffer indices, view creation ranges, view indices, and layout read/write bounds. Buffers can be borrowed by phrase calls through buffer parameters or view parameters. Views cannot be returned, stored in scalar bindings, dynamically sized, heap allocated, rebound, cast, compared, or used as scalar values.
+Buffers are initialized with `filled with` or literal `containing` lists, read with `name at index`, and written with `name at index becomes value`.
+
+Immutable local arrays use the same fixed-size length and numeric element rules, but source semantics prohibit mutation:
+
+```text
+let numbers be array of 4 i32 containing 1, 2, 3, 4
+let zeros be array of 8 i32 filled with 0
+let weights be array of 3 f64 containing 0.25, 0.5, 0.25
+```
+
+Arrays are read with `numbers at i`, expose `length of numbers`, and can be iterated with `for each index`. Arrays can be borrowed with `let window be view of numbers from start for count` or passed to `view of TYPE` phrase parameters as read-only full views. Arrays cannot be mutated, rebound, returned, used as phrase parameters, passed to buffer parameters, or used as scalar values. `read TypeName from bytes at index` can read from `u8` arrays, but layout writes cannot target arrays.
+
+Borrowed views are introduced with `let window be view of source from start for count`, read with `window at index`, and written with `window at index becomes value` when writable. `source` may be a buffer, array, or view. `length of name` returns a buffer or array's static length or a view's runtime `i32` length. Buffer and array storage lowers to `memref.alloca`, `memref.load`, and `memref.store`; views lower to a memref base plus `i32` start and length. Literal/static indices are checked at compile time when the length is known. Dynamic storage bounds remain unchecked by default for v0.11 compatibility; pass `--runtime-checks` to emit runtime assertions for dynamic buffer/array indices, view creation ranges, view indices, and layout read/write/read-from-array bounds. Buffers can be borrowed by phrase calls through buffer parameters or view parameters; arrays can be borrowed through view parameters only. Views cannot be returned, stored in scalar bindings, dynamically sized, heap allocated, rebound, cast, compared, or used as scalar values.
 
 
 `gives` phrases return scalar values or nominal record values and can accept read-only buffer parameters:
@@ -497,8 +512,13 @@ left is greater than right
 left is greater than or equal to right
 ```
 
-Important v0.21 rules:
+Important v0.22 rules:
 
+- buffers can be literal-initialized with `containing` expression lists; the element count must exactly match the evaluated length
+- arrays are immutable fixed-size local storage initialized with `containing` or `filled with`, lowered through local memrefs, and readable with `array at index`
+- arrays expose `length of`, support `for each index`, can be viewed, and can be passed to `view of TYPE` parameters as read-only full views
+- arrays cannot be mutated, rebound, returned, used as phrase parameters, passed to buffer parameters, or used as scalar values
+- layout reads can read from `u8` arrays; layout writes cannot target arrays
 - `f32` and `f64` are first-class scalar numeric types and lower to MLIR `f32`/`f64`
 - floating literals are decimal only; there are no NaN, infinity, fast-math, or rounding-mode source forms
 - floating arithmetic requires matching float operand types and uses `arith.addf`, `arith.subf`, `arith.mulf`, and `arith.divf`; `remainder` remains integer-only
@@ -520,9 +540,9 @@ Important v0.21 rules:
 - unresolved externs may compile to object but fail executable linking with `executable link failed`
 - `compile --emit interface-json` requires no `main` and emits deterministic metadata without timestamps, absolute paths, usernames, hostnames, or git hashes
 - interface JSON includes extern declarations; C headers describe only exported functions provided by the Inscription compilation unit
-- `compile --emit c-header` supports exported ABI types `i32`, `u32`, `i64`, `u64`, `f32`, and `f64` in v0.21 and uses generated C parameter names `arg0`, `arg1`, ...
+- `compile --emit c-header` supports exported ABI types `i32`, `u32`, `i64`, `u64`, `f32`, and `f64` in v0.22 and uses generated C parameter names `arg0`, `arg1`, ...
 - `compile/run --save-temps DIR` saves produced compiler intermediates under deterministic filenames, including `<stem>.optimized.mlir` for non-`none` optimization
-- v0.21 does not expose arbitrary pass pipelines, LLVM `opt`, LTO, linker flags beyond `--link-object`/`--archive-object`, target triples, optimization remarks, inlining, symbol DCE by default, native runtime libraries, executable packaging beyond one output file, shared libraries, C ABI structs, buffer/view C ABI, record/layout C structs, or header installation
+- v0.22 does not expose arbitrary pass pipelines, LLVM `opt`, LTO, linker flags beyond `--link-object`/`--archive-object`, target triples, optimization remarks, inlining, symbol DCE by default, native runtime libraries, executable packaging beyond one output file, shared libraries, C ABI structs, buffer/view C ABI, record/layout C structs, or header installation
 - function names are generated from the leading literal words in a phrase definition
 - extern phrase declarations have no body and emit external `func.func private` declarations
 - exported phrase definitions have bodies and emit public definitions with the symbol named after `as`
@@ -595,7 +615,7 @@ Important v0.21 rules:
 - phrase calls must match a declared phrase template exactly
 - conditional value blocks require `otherwise`
 - removed ceremony words such as `Function`, `End function`, `Set`, `Return`, and `call ... with` are not valid Inscription syntax
-- unsupported `track`, I/O, dynamic arrays, pointers, heap allocation, source-level memrefs, buffer/view returns, extern/exported buffer/view/record parameters, extern/exported record returns, record buffers, nested records, and free prose are rejected
+- unsupported `track`, I/O, dynamic arrays, array parameters/returns, pointers, heap allocation, source-level memrefs, buffer/view returns, extern/exported buffer/view/record parameters, extern/exported record returns, record buffers, nested records, and free prose are rejected
 
 ## Tests
 
@@ -605,7 +625,7 @@ Run the full test suite:
 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python -m unittest discover -s tests -v
 ```
 
-The suite includes exact source-MLIR golden conformance files under [`tests/goldens`](tests/goldens). Each `*.ins` source must compile byte-for-byte to its sibling `*.mlir`. v0.16/v0.17/v0.18/v0.19/v0.20/v0.21 artifact tests also exercise lowered MLIR, LLVM IR, object emission when `llc` is available, executable emission when `clang` is available, static-library emission when `llvm-ar` is available, saved intermediates, optimization presets, generated interface metadata/headers, and C header/archive smoke integration without making lowered or optimized tool output byte-for-byte golden-stable.
+The suite includes exact source-MLIR golden conformance files under [`tests/goldens`](tests/goldens). Each `*.ins` source must compile byte-for-byte to its sibling `*.mlir`. v0.16/v0.17/v0.18/v0.19/v0.20/v0.21/v0.22 artifact tests also exercise lowered MLIR, LLVM IR, object emission when `llc` is available, executable emission when `clang` is available, static-library emission when `llvm-ar` is available, saved intermediates, optimization presets, generated interface metadata/headers, and C header/archive smoke integration without making lowered or optimized tool output byte-for-byte golden-stable.
 
 With LLVM/MLIR 22 available, verify the toolchain and fixture exit codes:
 
@@ -697,8 +717,10 @@ docs/inscription-v0.15-spec.md v0.15 language and toolchain specification
 docs/inscription-v0.16-spec.md v0.16 language and toolchain specification
 docs/inscription-v0.17-spec.md v0.17 language and toolchain specification
 docs/inscription-v0.18-spec.md v0.18 native executable emission specification
+docs/inscription-v0.19-spec.md v0.19 interface manifest and C header specification
 docs/inscription-v0.20-spec.md v0.20 static-library tooling specification
-docs/inscription-v0.21-spec.md current v0.21 floating-point scalar specification
+docs/inscription-v0.21-spec.md v0.21 floating-point scalar specification
+docs/inscription-v0.22-spec.md current v0.22 fixed-size array specification
 grammar/inscription-v0.ebnf   original v0 grammar
 grammar/inscription-v0.1.ebnf v0.1 grammar
 grammar/inscription-v0.2.ebnf v0.2 grammar
@@ -718,8 +740,10 @@ grammar/inscription-v0.15.ebnf v0.15 grammar
 grammar/inscription-v0.16.ebnf v0.16 grammar
 grammar/inscription-v0.17.ebnf v0.17 grammar
 grammar/inscription-v0.18.ebnf v0.18 grammar
+grammar/inscription-v0.19.ebnf v0.19 grammar mirror
 grammar/inscription-v0.20.ebnf v0.20 grammar mirror
-grammar/inscription-v0.21.ebnf current v0.21 grammar mirror
+grammar/inscription-v0.21.ebnf v0.21 grammar mirror
+grammar/inscription-v0.22.ebnf current v0.22 grammar mirror
 tests/goldens/                exact MLIR conformance goldens
 tests/                        unit tests and executable fixtures
 ```

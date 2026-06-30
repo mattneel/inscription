@@ -1732,6 +1732,145 @@ class CompilerTests(unittest.TestCase):
             run = subprocess.run([str(executable)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False)
             self.assertEqual(run.returncode, 3, run.stderr)
 
+    def test_v022_arrays_and_literal_initialization_lower_and_check(self):
+        buffer_containing = compile_source(self.fixture("buffer_containing.ins"))
+        self.assertIn("memref.alloca() : memref<4xi32>", buffer_containing)
+        self.assertIn("memref.store", buffer_containing)
+        self.assertIn("arith.constant 4 : i32", buffer_containing)
+
+        array_sum = compile_source(self.fixture("array_sum.ins"))
+        self.assertIn("memref.alloca() : memref<4xi32>", array_sum)
+        self.assertIn("memref.load", array_sum)
+        self.assertIn("scf.for", array_sum)
+
+        array_length = compile_source(self.fixture("array_length.ins"))
+        self.assertIn("arith.constant 4 : i32", array_length)
+
+        array_to_view = compile_source(self.fixture("array_passed_to_view.ins"))
+        self.assertIn("memref.cast", array_to_view)
+        self.assertIn("memref<?xi32>", array_to_view)
+
+        float_values = compile_source(self.fixture("array_float_values.ins"))
+        self.assertIn("memref<3xf64>", float_values)
+        self.assertIn("arith.addf", float_values)
+
+        layout_read = compile_source(self.fixture("layout_read_from_array.ins"))
+        self.assertIn("memref<2xi8>", layout_read)
+        self.assertIn("arith.extui", layout_read)
+
+        checked_index = compile_source(self.fixture("checked_array_index.ins"), runtime_checks=True)
+        self.assertIn("storage upper-bound check failed", checked_index)
+        checked_view = compile_source(self.fixture("checked_array_view.ins"), runtime_checks=True)
+        self.assertIn("view count range check failed", checked_view)
+
+    def test_v022_array_artifacts_and_runtime_checks(self):
+        try:
+            resolve_toolchain()
+        except ToolchainError as exc:
+            self.skipTest(str(exc))
+
+        env = {**os.environ, "PYTHONPATH": str(SRC)}
+        runtime_cases = [
+            ("checked_array_index.ins", ["--runtime-checks"], 3),
+            ("checked_array_view.ins", ["--runtime-checks"], 2),
+        ]
+        for fixture, options, expected in runtime_cases:
+            with self.subTest(fixture=fixture):
+                proc = subprocess.run(
+                    [sys.executable, "-m", "inscription", "run", str(FIXTURES / fixture), *options],
+                    cwd=ROOT,
+                    env=env,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    check=False,
+                )
+                self.assertEqual(proc.returncode, expected, proc.stderr)
+                self.assertEqual(proc.stdout, "")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            llvm_ir = tmp_path / "array_sum.ll"
+            proc = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "inscription",
+                    "compile",
+                    str(FIXTURES / "array_sum.ins"),
+                    "--emit",
+                    "llvm-ir",
+                    "--verify",
+                    "-o",
+                    str(llvm_ir),
+                ],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            self.assertIn("define i32 @main", llvm_ir.read_text())
+
+            try:
+                resolve_toolchain(require_static_library=True)
+            except ToolchainError:
+                pass
+            else:
+                archive = tmp_path / "libarray_sum.a"
+                archive_proc = subprocess.run(
+                    [
+                        sys.executable,
+                        "-m",
+                        "inscription",
+                        "compile",
+                        str(FIXTURES / "array_sum.ins"),
+                        "--emit",
+                        "static-library",
+                        "-o",
+                        str(archive),
+                    ],
+                    cwd=ROOT,
+                    env=env,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    check=False,
+                )
+                self.assertEqual(archive_proc.returncode, 0, archive_proc.stderr)
+                self.assertTrue(archive.exists())
+                self.assertGreater(archive.stat().st_size, 0)
+
+            try:
+                resolve_toolchain(require_executable=True)
+            except ToolchainError:
+                return
+            executable = tmp_path / "array_sum"
+            exe_proc = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "inscription",
+                    "compile",
+                    str(FIXTURES / "array_sum.ins"),
+                    "--emit",
+                    "executable",
+                    "-o",
+                    str(executable),
+                ],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(exe_proc.returncode, 0, exe_proc.stderr)
+            run = subprocess.run([str(executable)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False)
+            self.assertEqual(run.returncode, 10, run.stderr)
+
     @unittest.skipUnless(importlib.util.find_spec("pygments"), "Pygments is not installed")
     def test_cli_highlight_outputs_terminal_ansi(self):
         proc = subprocess.run(
@@ -1816,8 +1955,11 @@ class CompilerTests(unittest.TestCase):
                 (GOLDENS / "94_extern_ctpop.ins").read_text(),
                 (GOLDENS / "99_export_scalar_gives.ins").read_text(),
                 (GOLDENS / "105_float_arithmetic.ins").read_text(),
+                (GOLDENS / "112_buffer_containing.ins").read_text(),
+                (GOLDENS / "113_array_sum.ins").read_text(),
                 "highlight new widths a: i8 and b: i16 and c: u64 gives u64:\n  c bitwise xor c\n",
                 "highlight floats x: f32 and y: f64 gives f64:\n  y plus (x as f64) plus 1.5e2\n",
+                "highlight arrays gives i32:\n  let numbers be array of 2 i32 containing 1, 2\n  length of numbers\n",
             ]
         )
         html = highlight_source(source, output_format="html")
@@ -2569,6 +2711,10 @@ main gives i32:
                 "bad gives i32:\n  let bytes be buffer of 4 u8 filled with 300\n  0\n",
                 "integer literal 300 is out of range for u8",
             ),
+            "buffer containing count mismatch": (
+                "bad gives i32:\n  let cells be buffer of 4 i32 containing 1, 2, 3\n  0\n",
+                "buffer cells expects 4 elements, got 3",
+            ),
             "buffer store type mismatch": (
                 "bad gives i32:\n  let bytes be buffer of 4 u8 filled with 0\n  bytes at 0 becomes 300\n  0\n",
                 "integer literal 300 is out of range for u8",
@@ -2597,6 +2743,54 @@ main gives i32:
             "buffer used as scalar": (
                 "bad gives i32:\n  let cells be buffer of 4 i32 filled with 0\n  cells\n",
                 "buffer cells cannot be used as a scalar value; use `cells at index`",
+            ),
+            "array containing count mismatch": (
+                "bad gives i32:\n  let numbers be array of 4 i32 containing 1, 2, 3\n  0\n",
+                "array numbers expects 4 elements, got 3",
+            ),
+            "array element type mismatch": (
+                "bad gives i32:\n  let numbers be array of 4 i32 containing 1, true, 3, 4\n  0\n",
+                "array numbers element 1 must have type i32, got i1",
+            ),
+            "array of i1 unsupported": (
+                "bad gives i32:\n  let flags be array of 4 i1 containing true, false, true, false\n  0\n",
+                "array element type must be numeric, got i1",
+            ),
+            "array store invalid": (
+                "bad gives i32:\n  let numbers be array of 4 i32 containing 1, 2, 3, 4\n  numbers at 0 becomes 9\n  0\n",
+                "cannot store into array numbers; arrays are immutable",
+            ),
+            "array rebind invalid": (
+                "bad gives i32:\n  let numbers be array of 4 i32 containing 1, 2, 3, 4\n  numbers becomes 0\n  0\n",
+                "cannot rebind array numbers",
+            ),
+            "array used as scalar": (
+                "bad gives i32:\n  let numbers be array of 4 i32 containing 1, 2, 3, 4\n  numbers\n",
+                "array numbers cannot be used as a scalar value; use `numbers at index`",
+            ),
+            "array passed to buffer parameter": (
+                "sum buffer cells: buffer of 4 i32 gives i32:\n  0\n\nbad gives i32:\n  let numbers be array of 4 i32 containing 1, 2, 3, 4\n  sum buffer numbers\n",
+                "argument numbers must have type buffer of 4 i32, got array of 4 i32",
+            ),
+            "array passed to writable view parameter": (
+                "fill view cells: view of i32 with value: i32 does:\n  for each index i of cells:\n    cells at i becomes value\n\nbad gives i32:\n  let numbers be array of 4 i32 containing 1, 2, 3, 4\n  fill view numbers with 9\n  0\n",
+                "cannot pass read-only array numbers to effectful phrase `fill view _ with _`",
+            ),
+            "array index out of bounds": (
+                "bad gives i32:\n  let numbers be array of 4 i32 containing 1, 2, 3, 4\n  numbers at 4\n",
+                "array index 4 is out of bounds for array numbers of length 4",
+            ),
+            "array view out of bounds": (
+                "bad gives i32:\n  let numbers be array of 4 i32 containing 1, 2, 3, 4\n  let window be view of numbers from 2 for 3\n  0\n",
+                "view range 2 for 3 exceeds source numbers of length 4",
+            ),
+            "array return unsupported": (
+                "bad gives array of 4 i32:\n  0\n",
+                "array return types are not supported",
+            ),
+            "array parameter unsupported": (
+                "bad numbers: array of 4 i32 gives i32:\n  0\n",
+                "array parameters are not supported in v0.22; use view of i32",
             ),
             "buffer passed to phrase call": (
                 "identity of x: i32 gives i32:\n  x\n\nbad gives i32:\n  let cells be buffer of 4 i32 filled with 0\n  identity of cells\n",
@@ -2853,6 +3047,10 @@ main gives i32:
             "write readonly buffer parameter": (
                 "packed layout record Word:\n  value: u16\n\nbad bytes: buffer of 2 u8 gives i32:\n  let word be Word with value be 1\n  write word into bytes at 0\n  0\n",
                 "cannot write to read-only buffer parameter bytes",
+            ),
+            "layout write into array invalid": (
+                "packed layout record Word:\n  value: u16\n\nbad gives i32:\n  let bytes be array of 2 u8 containing 0, 0\n  let word be Word with value be 1\n  write word into bytes at 0\n  0\n",
+                "cannot write into array bytes; arrays are immutable",
             ),
             "layout read static out of bounds": (
                 "packed layout record Word:\n  value: u16\n\nbad gives i32:\n  let bytes be buffer of 2 u8 filled with 0\n  let word be read Word from bytes at 1\n  0\n",

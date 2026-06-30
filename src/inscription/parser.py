@@ -4,6 +4,8 @@ import re
 from dataclasses import dataclass
 
 from .ast import (
+    ArrayBinding,
+    ArrayType,
     AssignStmt,
     Binary,
     BodyStmt,
@@ -64,7 +66,7 @@ FLOAT_LITERAL_RE = r"(?:\d+\.\d+(?:[eE][+-]?\d+)?|\d+[eE][+-]?\d+)"
 TOKEN_RE = re.compile(rf"\s*({FLOAT_LITERAL_RE}|-?\d+|[A-Z][A-Za-z0-9_]*|[a-z][a-z0-9_]*|[().,])")
 RESERVED = {
     "address", "alignment", "and", "arguments", "array", "as", "at", "be", "becomes", "bitwise", "buffer", "by", "call",
-    "check", "constant", "divided", "do", "does", "each", "else", "equal", "export", "extern", "false", "filled", "float", "for", "from",
+    "check", "constant", "containing", "divided", "do", "does", "each", "else", "equal", "export", "extern", "false", "filled", "float", "for", "from",
     "function", "gives", "greater", "f32", "f64", "i1", "i32", "i64", "if", "in", "index", "input", "into", "import",
     "i8", "i16", "is", "layout", "length", "less", "let", "memref", "minus", "module", "no", "not", "or", "otherwise", "output", "packed", "parameters",
     "pointer", "plus", "print", "read", "remainder", "require", "return", "set", "shifted", "size", "takes", "than", "then", "times", "to",
@@ -81,7 +83,7 @@ COMPARATORS: tuple[tuple[tuple[str, ...], str], ...] = (
 )
 CONNECTOR_WORDS = {"of", "from", "to", "at", "in", "into", "between", "and", "with", "by"}
 BUFFER_LENGTH_PATTERN = r"(?:-?\d+|[a-z][a-z0-9_]*|\([^)]*\))"
-TYPE_PATTERN = rf"(?:buffer\s+of\s+{BUFFER_LENGTH_PATTERN}\s+(?:[A-Za-z][A-Za-z0-9_]*(?:\.[A-Z][A-Za-z0-9_]*)?|[a-z][a-z0-9_]*)|view\s+of\s+[a-z][a-z0-9_]*|(?:[A-Za-z][A-Za-z0-9_]*\.)*[A-Z][A-Za-z0-9_]*|[a-z][a-z0-9_]*)"
+TYPE_PATTERN = rf"(?:buffer\s+of\s+{BUFFER_LENGTH_PATTERN}\s+(?:[A-Za-z][A-Za-z0-9_]*(?:\.[A-Z][A-Za-z0-9_]*)?|[a-z][a-z0-9_]*)|array\s+of\s+{BUFFER_LENGTH_PATTERN}\s+(?:[A-Za-z][A-Za-z0-9_]*(?:\.[A-Z][A-Za-z0-9_]*)?|[a-z][a-z0-9_]*)|view\s+of\s+[a-z][a-z0-9_]*|(?:[A-Za-z][A-Za-z0-9_]*\.)*[A-Z][A-Za-z0-9_]*|[a-z][a-z0-9_]*)"
 MODULE_RE = re.compile(r"[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z][A-Za-z0-9_]*)*")
 EXTERNAL_SYMBOL_PATTERN = r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*"
 
@@ -691,17 +693,54 @@ class Parser:
             raise InscriptionError("value block must evaluate to an expression", lines[-1].number)
         return unconditional
 
-    def _parse_let(self, line: Line) -> SetStmt | BufferBinding | ViewBinding:
+    def _parse_let(self, line: Line) -> SetStmt | BufferBinding | ArrayBinding | ViewBinding:
         buffer_match = re.fullmatch(
-            rf"let ([a-z][a-z0-9_]*) be buffer of ({BUFFER_LENGTH_PATTERN}) ((?:(?:[A-Za-z][A-Za-z0-9_]*\.)*[A-Z][A-Za-z0-9_]*)|[a-z][a-z0-9_]*) filled with (.+)",
+            rf"let ([a-z][a-z0-9_]*) be buffer of ({BUFFER_LENGTH_PATTERN}) ((?:(?:[A-Za-z][A-Za-z0-9_]*\.)*[A-Z][A-Za-z0-9_]*)|[a-z][a-z0-9_]*) (filled with|containing) (.+)",
             line.text,
         )
         if buffer_match:
+            initializer = buffer_match.group(4)
+            initializer_text = buffer_match.group(5)
+            buffer_type = BufferType(
+                self._buffer_length(buffer_match.group(2), line.number),
+                self._return_type(buffer_match.group(3), line.number),
+            )
+            if initializer == "containing":
+                return BufferBinding(
+                    self._name(buffer_match.group(1), line.number),
+                    buffer_type,
+                    line.number,
+                    values=self._parse_expression_list(initializer_text, line.number),
+                )
             return BufferBinding(
                 self._name(buffer_match.group(1), line.number),
-                BufferType(self._buffer_length(buffer_match.group(2), line.number), self._return_type(buffer_match.group(3), line.number)),
-                self._parse_expression(buffer_match.group(4), line.number),
+                buffer_type,
                 line.number,
+                fill=self._parse_expression(initializer_text, line.number),
+            )
+        array_match = re.fullmatch(
+            rf"let ([a-z][a-z0-9_]*) be array of ({BUFFER_LENGTH_PATTERN}) ((?:(?:[A-Za-z][A-Za-z0-9_]*\.)*[A-Z][A-Za-z0-9_]*)|[a-z][a-z0-9_]*) (filled with|containing) (.+)",
+            line.text,
+        )
+        if array_match:
+            initializer = array_match.group(4)
+            initializer_text = array_match.group(5)
+            array_type = ArrayType(
+                self._buffer_length(array_match.group(2), line.number),
+                self._return_type(array_match.group(3), line.number),
+            )
+            if initializer == "containing":
+                return ArrayBinding(
+                    self._name(array_match.group(1), line.number),
+                    array_type,
+                    line.number,
+                    values=self._parse_expression_list(initializer_text, line.number),
+                )
+            return ArrayBinding(
+                self._name(array_match.group(1), line.number),
+                array_type,
+                line.number,
+                fill=self._parse_expression(initializer_text, line.number),
             )
         view_match = re.fullmatch(r"let ([a-z][a-z0-9_]*) be view of ([a-z][a-z0-9_]*) from (.+) for (.+)", line.text)
         if view_match:
@@ -721,6 +760,33 @@ class Parser:
             self._parse_expression(match.group(3), line.number),
             line.number,
         )
+
+    def _parse_expression_list(self, text: str, line: int) -> tuple[Expr, ...]:
+        tokens = tokenize(text, line)
+        parts: list[list[str]] = [[]]
+        depth = 0
+        for token in tokens:
+            if token == "(":
+                depth += 1
+                parts[-1].append(token)
+                continue
+            if token == ")":
+                if depth == 0:
+                    raise InscriptionError("unexpected token ')' in expression", line)
+                depth -= 1
+                parts[-1].append(token)
+                continue
+            if token == "," and depth == 0:
+                if not parts[-1]:
+                    raise InscriptionError("expected expression", line)
+                parts.append([])
+                continue
+            parts[-1].append(token)
+        if depth != 0:
+            raise InscriptionError("missing closing ')'", line)
+        if not parts[-1]:
+            raise InscriptionError("expected expression", line)
+        return tuple(parse_expression_tokens(part, line, self.phrases) for part in parts)
 
     def _assignment_match(self, line: Line) -> re.Match[str] | None:
         if line.is_header:
@@ -828,6 +894,9 @@ class Parser:
         buffer_match = re.fullmatch(rf"buffer of ({BUFFER_LENGTH_PATTERN}) ((?:(?:[A-Za-z][A-Za-z0-9_]*\.)*[A-Z][A-Za-z0-9_]*)|[a-z][a-z0-9_]*)", value)
         if buffer_match is not None:
             return BufferType(self._buffer_length(buffer_match.group(1), line), self._return_type(buffer_match.group(2), line))
+        array_match = re.fullmatch(rf"array of ({BUFFER_LENGTH_PATTERN}) ((?:(?:[A-Za-z][A-Za-z0-9_]*\.)*[A-Z][A-Za-z0-9_]*)|[a-z][a-z0-9_]*)", value)
+        if array_match is not None:
+            return ArrayType(self._buffer_length(array_match.group(1), line), self._return_type(array_match.group(2), line))
         view_match = re.fullmatch(r"view of ([a-z][a-z0-9_]*)", value)
         if view_match is not None:
             return ViewType(self._type_name(view_match.group(1), line))
@@ -843,9 +912,14 @@ class Parser:
             return self._parse_expression(value[1:-1].strip(), line)
         raise InscriptionError("malformed buffer length", line)
 
-    def _return_type(self, value: str, line: int) -> TypeName | RecordType:
+    def _return_type(self, value: str, line: int) -> ReturnType:
         if value.startswith("buffer of "):
             raise InscriptionError("buffer return types are not supported", line)
+        if value.startswith("array of "):
+            match = re.fullmatch(rf"array of ({BUFFER_LENGTH_PATTERN}) ((?:(?:[A-Za-z][A-Za-z0-9_]*\.)*[A-Z][A-Za-z0-9_]*)|[a-z][a-z0-9_]*)", value)
+            if match is None:
+                raise InscriptionError("malformed array type", line)
+            return ArrayType(self._buffer_length(match.group(1), line), self._return_type(match.group(2), line))
         if value.startswith("view of "):
             return ViewType(self._type_name(value[len("view of ") :].strip(), line))
         if QUALIFIED_RECORD_NAME_RE.fullmatch(value):

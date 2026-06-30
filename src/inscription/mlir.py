@@ -4,6 +4,8 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 from .ast import (
+    ArrayBinding,
+    ArrayType,
     AssignStmt,
     Binary,
     BodyStmt,
@@ -66,6 +68,7 @@ from .semantic import (
     memref_type,
     mlir_type,
     record_table,
+    resolve_array_type,
     resolve_buffer_type,
     resolve_function_table,
     type_width,
@@ -82,6 +85,12 @@ class Value:
 class BufferStorage:
     name: str
     buffer_type: BufferType
+
+
+@dataclass(frozen=True)
+class ArrayStorage:
+    name: str
+    array_type: ArrayType
 
 
 @dataclass(frozen=True)
@@ -127,12 +136,14 @@ class CallArg:
     mlir_type: str
 
 
-EnvValue = Value | BufferStorage | ViewStorage | RecordStorage
+EnvValue = Value | BufferStorage | ArrayStorage | ViewStorage | RecordStorage
 ConstantKey = tuple[str, int | bool | float, TypeName]
 
 
 def mlir_value_type(type_name: ValueType) -> str:
     if isinstance(type_name, BufferType):
+        return memref_type(type_name)
+    if isinstance(type_name, ArrayType):
         return memref_type(type_name)
     if isinstance(type_name, ViewType):
         return dynamic_memref_type(type_name.element_type)
@@ -144,6 +155,8 @@ def mlir_value_type(type_name: ValueType) -> str:
 def mlir_env_value_type(value: "EnvValue") -> str:
     if isinstance(value, BufferStorage):
         return memref_type(value.buffer_type)
+    if isinstance(value, ArrayStorage):
+        return memref_type(value.array_type)
     if isinstance(value, ViewStorage):
         return dynamic_memref_type(value.element_type)
     if isinstance(value, RecordStorage):
@@ -212,7 +225,11 @@ class MlirEmitter:
         fn = self.functions[fn.name]
         self.counter = 0
         self.constants = {}
-        self.binding_order = [param.name for param in fn.params if not isinstance(param.type_name, BufferType | ViewType | RecordType)]
+        self.binding_order = [
+            param.name
+            for param in fn.params
+            if not isinstance(param.type_name, BufferType | ArrayType | ViewType | RecordType)
+        ]
         self.record_order = [param.name for param in fn.params if isinstance(param.type_name, RecordType)]
         self.while_counter = 0
         self.while_depth = 0
@@ -340,7 +357,7 @@ class MlirEmitter:
             if isinstance(type_name, RecordType):
                 env[stmt.name] = self.emit_record_expr(stmt.expr, env, lines, indent, expected=type_name)
                 self.record_order.append(stmt.name)
-            elif isinstance(type_name, ViewType):
+            elif isinstance(type_name, ArrayType | ViewType):
                 raise AssertionError("view binding must use view syntax")  # pragma: no cover
             else:
                 env[stmt.name] = self.emit_expr(stmt.expr, env, lines, indent, expected=type_name)
@@ -349,6 +366,9 @@ class MlirEmitter:
         if isinstance(stmt, BufferBinding):
             self.emit_buffer_binding(stmt, env, lines, indent)
             return
+        if isinstance(stmt, ArrayBinding):
+            self.emit_array_binding(stmt, env, lines, indent)
+            return
         if isinstance(stmt, ViewBinding):
             self.emit_view_binding(stmt, env, lines, indent)
             return
@@ -356,8 +376,8 @@ class MlirEmitter:
             current_value = env[stmt.name]
             if isinstance(current_value, RecordStorage):
                 env[stmt.name] = self.emit_record_expr(stmt.expr, env, lines, indent, expected=current_value.record_type)
-            elif isinstance(current_value, ViewStorage):
-                raise AssertionError("view rebinding should be rejected by semantic analysis")  # pragma: no cover
+            elif isinstance(current_value, ArrayStorage | ViewStorage):
+                raise AssertionError("storage rebinding should be rejected by semantic analysis")  # pragma: no cover
             else:
                 current = self.require_scalar(current_value)
                 env[stmt.name] = self.emit_expr(stmt.expr, env, lines, indent, expected=current.type_name)
@@ -421,6 +441,8 @@ class MlirEmitter:
             storage = self.require_indexable(env[expr.name])
             if isinstance(storage, BufferStorage):
                 return self.emit_integer(storage.buffer_type.length, "i32", lines, indent)
+            if isinstance(storage, ArrayStorage):
+                return self.emit_integer(storage.array_type.length, "i32", lines, indent)
             return storage.length
         if isinstance(expr, SizeOfType):
             return self.emit_integer(layout_info(self.records[expr.type_name]).size, "i32", lines, indent)
@@ -614,22 +636,28 @@ class MlirEmitter:
         return out
 
     def emit_storage_length_i32(
-        self, storage: BufferStorage | ViewStorage, lines: list[str], indent: str
+        self, storage: BufferStorage | ArrayStorage | ViewStorage, lines: list[str], indent: str
     ) -> Value:
         if isinstance(storage, BufferStorage):
             return self.emit_integer(storage.buffer_type.length, "i32", lines, indent)
+        if isinstance(storage, ArrayStorage):
+            return self.emit_integer(storage.array_type.length, "i32", lines, indent)
         return storage.length
 
     def emit_storage_length_index(
-        self, storage: BufferStorage | ViewStorage, lines: list[str], indent: str
+        self, storage: BufferStorage | ArrayStorage | ViewStorage, lines: list[str], indent: str
     ) -> str:
         if isinstance(storage, BufferStorage):
             return self.emit_index_constant(storage.buffer_type.length, lines, indent)
+        if isinstance(storage, ArrayStorage):
+            return self.emit_index_constant(storage.array_type.length, lines, indent)
         return self.emit_value_as_index(storage.length, lines, indent)
 
-    def storage_static_length(self, storage: BufferStorage | ViewStorage) -> int | None:
+    def storage_static_length(self, storage: BufferStorage | ArrayStorage | ViewStorage) -> int | None:
         if isinstance(storage, BufferStorage):
             return storage.buffer_type.length
+        if isinstance(storage, ArrayStorage):
+            return storage.array_type.length
         return storage.static_length
 
     def emit_buffer_binding(self, stmt: BufferBinding, env: dict[str, EnvValue], lines: list[str], indent: str) -> None:
@@ -638,6 +666,11 @@ class MlirEmitter:
         )
         buffer = BufferStorage(self.fresh(), buffer_type)
         lines.append(f"{indent}{buffer.name} = memref.alloca() : {memref_type(buffer_type)}")
+        if stmt.values:
+            self.emit_literal_storage_initializers(buffer, buffer_type, stmt.values, env, lines, indent)
+            env[stmt.name] = buffer
+            return
+        assert stmt.fill is not None
         fill = self.emit_expr(stmt.fill, env, lines, indent, expected=buffer_type.element_type)
         lower = self.emit_index_constant(0, lines, indent)
         upper = self.emit_index_constant(buffer_type.length, lines, indent)
@@ -648,16 +681,52 @@ class MlirEmitter:
         lines.append(f"{indent}}}")
         env[stmt.name] = buffer
 
+    def emit_array_binding(self, stmt: ArrayBinding, env: dict[str, EnvValue], lines: list[str], indent: str) -> None:
+        array_type = resolve_array_type(
+            stmt.array_type, stmt.line, self.records, self.top_constants, self.functions, self.env_types(env)
+        )
+        array = ArrayStorage(self.fresh(), array_type)
+        lines.append(f"{indent}{array.name} = memref.alloca() : {memref_type(array_type)}")
+        if stmt.values:
+            self.emit_literal_storage_initializers(array, array_type, stmt.values, env, lines, indent)
+            env[stmt.name] = array
+            return
+        assert stmt.fill is not None
+        fill = self.emit_expr(stmt.fill, env, lines, indent, expected=array_type.element_type)
+        lower = self.emit_index_constant(0, lines, indent)
+        upper = self.emit_index_constant(array_type.length, lines, indent)
+        step = self.emit_index_constant(1, lines, indent)
+        iv = self.fresh()
+        lines.append(f"{indent}scf.for {iv} = {lower} to {upper} step {step} {{")
+        lines.append(f"{indent}  memref.store {fill.name}, {array.name}[{iv}] : {memref_type(array_type)}")
+        lines.append(f"{indent}}}")
+        env[stmt.name] = array
+
+    def emit_literal_storage_initializers(
+        self,
+        storage: BufferStorage | ArrayStorage,
+        storage_type: BufferType | ArrayType,
+        values: tuple[Expr, ...],
+        env: dict[str, EnvValue],
+        lines: list[str],
+        indent: str,
+    ) -> None:
+        for index, expr in enumerate(values):
+            value = self.emit_expr(expr, env, lines, indent, expected=storage_type.element_type)
+            index_value = self.emit_index_constant(index, lines, indent)
+            lines.append(f"{indent}memref.store {value.name}, {storage.name}[{index_value}] : {memref_type(storage_type)}")
+
     def emit_view_binding(self, stmt: ViewBinding, env: dict[str, EnvValue], lines: list[str], indent: str) -> None:
         source = self.require_indexable(env[stmt.source_name])
         start = self.emit_expr(stmt.start, env, lines, indent, expected="i32")
         count = self.emit_expr(stmt.count, env, lines, indent, expected="i32")
         self.emit_view_binding_runtime_checks(stmt, source, start, count, env, lines, indent)
-        if isinstance(source, BufferStorage):
-            base = self.emit_memref_cast_to_dynamic(source.name, memref_type(source.buffer_type), source.buffer_type.element_type, lines, indent)
+        if isinstance(source, BufferStorage | ArrayStorage):
+            source_type = source.buffer_type if isinstance(source, BufferStorage) else source.array_type
+            base = self.emit_memref_cast_to_dynamic(source.name, memref_type(source_type), source_type.element_type, lines, indent)
             root = stmt.source_name
             static_length = self.static_integer_value(stmt.count, env)
-            env[stmt.name] = ViewStorage(base, start, count, source.buffer_type.element_type, static_length, root)
+            env[stmt.name] = ViewStorage(base, start, count, source_type.element_type, static_length, root)
             return
         combined_start = self.emit_i32_add(source.start, start, lines, indent)
         static_length = self.static_integer_value(stmt.count, env)
@@ -666,7 +735,7 @@ class MlirEmitter:
     def emit_view_binding_runtime_checks(
         self,
         stmt: ViewBinding,
-        source: BufferStorage | ViewStorage,
+        source: BufferStorage | ArrayStorage | ViewStorage,
         start: Value,
         count: Value,
         env: dict[str, EnvValue],
@@ -718,16 +787,16 @@ class MlirEmitter:
     def emit_buffer_load(self, expr: BufferLoad, env: dict[str, EnvValue], lines: list[str], indent: str) -> Value:
         storage = self.require_indexable(env[expr.name])
         index = self.emit_storage_index(storage, expr.index, env, lines, indent)
-        element_type = storage.buffer_type.element_type if isinstance(storage, BufferStorage) else storage.element_type
-        storage_type = memref_type(storage.buffer_type) if isinstance(storage, BufferStorage) else dynamic_memref_type(storage.element_type)
+        element_type = self.storage_element_type(storage)
+        storage_type = self.storage_mlir_type(storage)
         out = Value(self.fresh(), element_type)
         lines.append(f"{indent}{out.name} = memref.load {storage.name}[{index}] : {storage_type}")
         return out
 
     def emit_buffer_store(self, stmt: BufferStoreStmt, env: dict[str, EnvValue], lines: list[str], indent: str) -> None:
         storage = self.require_indexable(env[stmt.name])
-        element_type = storage.buffer_type.element_type if isinstance(storage, BufferStorage) else storage.element_type
-        storage_type = memref_type(storage.buffer_type) if isinstance(storage, BufferStorage) else dynamic_memref_type(storage.element_type)
+        element_type = self.storage_element_type(storage)
+        storage_type = self.storage_mlir_type(storage)
         value = self.emit_expr(stmt.value, env, lines, indent, expected=element_type)
         index = self.emit_storage_index(storage, stmt.index, env, lines, indent)
         lines.append(f"{indent}memref.store {value.name}, {storage.name}[{index}] : {storage_type}")
@@ -754,7 +823,7 @@ class MlirEmitter:
 
     def emit_layout_field_read(
         self,
-        buffer: BufferStorage | ViewStorage,
+        buffer: BufferStorage | ArrayStorage | ViewStorage,
         base: str,
         offset: int,
         type_name: TypeName,
@@ -996,7 +1065,7 @@ class MlirEmitter:
 
     def emit_storage_index(
         self,
-        storage: BufferStorage | ViewStorage,
+        storage: BufferStorage | ArrayStorage | ViewStorage,
         index_expr: Expr,
         env: dict[str, EnvValue],
         lines: list[str],
@@ -1011,7 +1080,7 @@ class MlirEmitter:
             self.emit_storage_index_runtime_checks(storage, index, index_value, check_width, getattr(index_expr, "line", 0), lines, indent)
         else:
             index = self.emit_index(index_expr, env, lines, indent)
-        if isinstance(storage, BufferStorage):
+        if isinstance(storage, BufferStorage | ArrayStorage):
             return index
         start = self.emit_value_as_index(storage.start, lines, indent)
         out = self.fresh()
@@ -1020,7 +1089,7 @@ class MlirEmitter:
 
     def emit_storage_index_runtime_checks(
         self,
-        storage: BufferStorage | ViewStorage,
+        storage: BufferStorage | ArrayStorage | ViewStorage,
         index: str,
         index_value: Value,
         check_width: int,
@@ -1049,13 +1118,14 @@ class MlirEmitter:
         lines.append(f"{indent}{out} = arith.{op} {value.name} : {mlir_type(value.type_name)} to index")
         return out
 
-    def as_view_call_storage(self, storage: BufferStorage | ViewStorage, lines: list[str], indent: str) -> ViewStorage:
+    def as_view_call_storage(self, storage: BufferStorage | ArrayStorage | ViewStorage, lines: list[str], indent: str) -> ViewStorage:
         if isinstance(storage, ViewStorage):
             return storage
-        base = self.emit_memref_cast_to_dynamic(storage.name, memref_type(storage.buffer_type), storage.buffer_type.element_type, lines, indent)
+        storage_type = storage.buffer_type if isinstance(storage, BufferStorage) else storage.array_type
+        base = self.emit_memref_cast_to_dynamic(storage.name, memref_type(storage_type), storage_type.element_type, lines, indent)
         start = self.emit_integer(0, "i32", lines, indent)
-        length = self.emit_integer(storage.buffer_type.length, "i32", lines, indent)
-        return ViewStorage(base, start, length, storage.buffer_type.element_type, storage.buffer_type.length, storage.name)
+        length = self.emit_integer(storage_type.length, "i32", lines, indent)
+        return ViewStorage(base, start, length, storage_type.element_type, storage_type.length, storage.name)
 
     def static_integer_value(self, expr: Expr, env: dict[str, EnvValue]) -> int | None:
         try:
@@ -1224,7 +1294,7 @@ class MlirEmitter:
         arg_suffix = "" if self.for_depth == 0 else f"_for{loop_id}"
         env_types = self.env_types(env)
         loop_type = infer_expr_type(stmt.start, env_types, self.functions, self.records, constants=self.top_constants)
-        assert not isinstance(loop_type, BufferType | RecordType)
+        assert not isinstance(loop_type, BufferType | ArrayType | RecordType)
         start = self.emit_index(stmt.start, env, lines, indent)
         end = self.emit_index(stmt.end, env, lines, indent)
         step = self.emit_index_constant(stmt.step, lines, indent)
@@ -1277,6 +1347,8 @@ class MlirEmitter:
         lower = self.emit_index_constant(0, lines, indent)
         if isinstance(storage, BufferStorage):
             upper = self.emit_index_constant(storage.buffer_type.length, lines, indent)
+        elif isinstance(storage, ArrayStorage):
+            upper = self.emit_index_constant(storage.array_type.length, lines, indent)
         else:
             upper = self.emit_value_as_index(storage.length, lines, indent)
         step = self.emit_index_constant(1, lines, indent)
@@ -1491,6 +1563,8 @@ class MlirEmitter:
         for name, value in env.items():
             if isinstance(value, BufferStorage):
                 result[name] = value.buffer_type
+            elif isinstance(value, ArrayStorage):
+                result[name] = value.array_type
             elif isinstance(value, ViewStorage):
                 result[name] = value.view_type
             elif isinstance(value, RecordStorage):
@@ -1500,7 +1574,7 @@ class MlirEmitter:
         return result
 
     def require_scalar(self, value: EnvValue) -> Value:
-        if isinstance(value, BufferStorage | ViewStorage | RecordStorage):
+        if isinstance(value, BufferStorage | ArrayStorage | ViewStorage | RecordStorage):
             raise AssertionError("non-scalar used where scalar value was expected")  # pragma: no cover
         return value
 
@@ -1509,14 +1583,23 @@ class MlirEmitter:
             raise AssertionError("non-buffer used where buffer storage was expected")  # pragma: no cover
         return value
 
-    def require_indexable(self, value: EnvValue) -> BufferStorage | ViewStorage:
-        if not isinstance(value, BufferStorage | ViewStorage):
-            raise AssertionError("non-buffer/view used where indexable storage was expected")  # pragma: no cover
+    def require_indexable(self, value: EnvValue) -> BufferStorage | ArrayStorage | ViewStorage:
+        if not isinstance(value, BufferStorage | ArrayStorage | ViewStorage):
+            raise AssertionError("non-storage used where indexable storage was expected")  # pragma: no cover
         return value
 
-    def storage_mlir_type(self, value: BufferStorage | ViewStorage) -> str:
+    def storage_element_type(self, value: BufferStorage | ArrayStorage | ViewStorage) -> TypeName:
+        if isinstance(value, BufferStorage):
+            return value.buffer_type.element_type
+        if isinstance(value, ArrayStorage):
+            return value.array_type.element_type
+        return value.element_type
+
+    def storage_mlir_type(self, value: BufferStorage | ArrayStorage | ViewStorage) -> str:
         if isinstance(value, BufferStorage):
             return memref_type(value.buffer_type)
+        if isinstance(value, ArrayStorage):
+            return memref_type(value.array_type)
         return dynamic_memref_type(value.element_type)
 
     def require_record(self, value: EnvValue) -> RecordStorage:

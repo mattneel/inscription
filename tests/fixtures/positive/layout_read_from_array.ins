@@ -1,0 +1,10 @@
+packed layout record Word:
+  value: u16
+
+read word from array gives i32:
+  let bytes be array of 2 u8 containing 42, 0
+  let word be read Word from bytes at 0
+  word.value as i32
+
+main gives i32:
+  read word from array

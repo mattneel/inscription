@@ -114,6 +114,12 @@ class BufferType:
 
 
 @dataclass(frozen=True)
+class ArrayType:
+    length: "BufferLength"
+    element_type: "ValueType"
+
+
+@dataclass(frozen=True)
 class ViewType:
     element_type: TypeName
     length: int | None = None
@@ -124,8 +130,8 @@ class RecordType:
     name: str
 
 
-ValueType = TypeName | BufferType | ViewType | RecordType
-ReturnType = TypeName | RecordType | ViewType | None
+ValueType = TypeName | BufferType | ArrayType | ViewType | RecordType
+ReturnType = TypeName | RecordType | ArrayType | ViewType | None
 
 
 @dataclass(frozen=True)
@@ -284,8 +290,18 @@ class SetStmt:
 class BufferBinding:
     name: str
     buffer_type: BufferType
-    fill: Expr
     line: int
+    fill: Expr | None = None
+    values: tuple[Expr, ...] = ()
+
+
+@dataclass(frozen=True)
+class ArrayBinding:
+    name: str
+    array_type: ArrayType
+    line: int
+    fill: Expr | None = None
+    values: tuple[Expr, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -390,6 +406,7 @@ BodyStmt = (
     | RequireStmt
     | SetStmt
     | BufferBinding
+    | ArrayBinding
     | ViewBinding
     | AssignStmt
     | BufferStoreStmt
