@@ -2176,6 +2176,7 @@ class CompilerTests(unittest.TestCase):
                 "enum HighlightMode: u8:\n  idle be 0\n  active be 1\n\nhighlight enum mode: HighlightMode gives i32:\n  Mode.active as i32\n",
                 "union HighlightMaybe:\n  none\n  some value: i32\n\nhighlight union gives i32:\n  match HighlightMaybe.some with value be 1:\n    HighlightMaybe.some with value gives value\n    otherwise gives 0\n",
                 "union HighlightToken:\n  eof\n  operator symbol: u8 and precedence: u8\n\nhighlight token gives i32:\n  match HighlightToken.operator with symbol be 1 and precedence be 2:\n    HighlightToken.operator with symbol as op and precedence as prec gives (op as i32) plus (prec as i32)\n    otherwise gives 0\n",
+                "highlight bytes gives i32:\n  let text be array of bytes \"A\\n\"\n  match text at 0:\n    byte \"A\" gives length of bytes \"A\\n\"\n    otherwise gives 0\n",
             ]
         )
         html = highlight_source(source, output_format="html")
@@ -3392,6 +3393,151 @@ main gives i32:
             run = subprocess.run([str(executable)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False)
             self.assertEqual(run.returncode, 42, run.stderr)
 
+    def test_v028_byte_literals_and_byte_sequences_lower_without_runtime_strings(self):
+        byte_literal = compile_source(self.fixture("byte_literal.ins"))
+        self.assertIn("arith.constant 65 : i8", byte_literal)
+        self.assertNotIn("memref.global", byte_literal)
+
+        byte_array = compile_source(self.fixture("byte_array_literal.ins"))
+        self.assertIn("memref.alloca() : memref<5xi8>", byte_array)
+        self.assertIn("memref.store", byte_array)
+        self.assertNotIn("memref.global", byte_array)
+
+        byte_buffer = compile_source(self.fixture("byte_buffer_literal.ins"))
+        self.assertIn("memref.alloca() : memref<5xi8>", byte_buffer)
+        self.assertIn("arith.constant 72 : i8", byte_buffer)
+
+        splice = compile_source(self.fixture("byte_containing_splice.ins"))
+        self.assertIn("memref.alloca() : memref<6xi8>", splice)
+        self.assertIn("arith.constant 0 : i8", splice)
+
+        escapes = compile_source(self.fixture("byte_escapes.ins"))
+        self.assertIn("arith.constant 10 : i8", escapes)
+
+        length = compile_source(self.fixture("byte_length.ins"))
+        self.assertIn("arith.constant 5 : i32", length)
+
+        layout = compile_source(self.fixture("byte_layout_read.ins"))
+        self.assertIn("memref.alloca() : memref<2xi8>", layout)
+        self.assertIn("arith.constant 42 : i8", layout)
+
+        view = compile_source(self.fixture("byte_view.ins"))
+        self.assertIn("memref.cast", view)
+
+        match = compile_source(self.fixture("byte_match.ins"))
+        self.assertIn("arith.cmpi eq", match)
+
+        alias = compile_source(self.fixture("byte_alias.ins"))
+        self.assertIn("memref.alloca() : memref<5xi8>", alias)
+
+    def test_v028_byte_artifacts_and_runtime_checks(self):
+        try:
+            resolve_toolchain()
+        except ToolchainError:
+            return
+
+        env = {**os.environ, "PYTHONPATH": str(SRC)}
+        checked = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "inscription",
+                "run",
+                str(FIXTURES / "checked_byte_index.ins"),
+                "--runtime-checks",
+            ],
+            cwd=ROOT,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(checked.returncode, 101, checked.stderr)
+        self.assertEqual(checked.stdout, "")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            llvm_ir = tmp_path / "byte_array_literal.ll"
+            llvm_proc = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "inscription",
+                    "compile",
+                    str(FIXTURES / "byte_array_literal.ins"),
+                    "--emit",
+                    "llvm-ir",
+                    "--verify",
+                    "-o",
+                    str(llvm_ir),
+                ],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(llvm_proc.returncode, 0, llvm_proc.stderr)
+            self.assertIn("define i32 @main", llvm_ir.read_text())
+
+            try:
+                resolve_toolchain(require_static_library=True)
+            except ToolchainError:
+                pass
+            else:
+                archive = tmp_path / "libbyte_array_literal.a"
+                archive_proc = subprocess.run(
+                    [
+                        sys.executable,
+                        "-m",
+                        "inscription",
+                        "compile",
+                        str(FIXTURES / "byte_array_literal.ins"),
+                        "--emit",
+                        "static-library",
+                        "-o",
+                        str(archive),
+                    ],
+                    cwd=ROOT,
+                    env=env,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    check=False,
+                )
+                self.assertEqual(archive_proc.returncode, 0, archive_proc.stderr)
+                self.assertGreater(archive.stat().st_size, 0)
+
+            try:
+                resolve_toolchain(require_executable=True)
+            except ToolchainError:
+                return
+            executable = tmp_path / "byte_array_literal"
+            exe_proc = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "inscription",
+                    "compile",
+                    str(FIXTURES / "byte_array_literal.ins"),
+                    "--emit",
+                    "executable",
+                    "-o",
+                    str(executable),
+                ],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(exe_proc.returncode, 0, exe_proc.stderr)
+            run = subprocess.run([str(executable)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False)
+            self.assertEqual(run.returncode, 5, run.stderr)
+
     def test_negative_diagnostics(self):
         cases = {
             "malformed top level": ("Please add two numbers\n", "expected phrase definition"),
@@ -4375,6 +4521,47 @@ main gives i32:
                 "type Scores be array of 4 i32\n\nbad scores: Scores gives i32:\n  0\n",
                 "array parameters are not supported in v0.22; use view of i32",
             ),
+            "byte literal empty": ("bad gives i32:\n  byte \"\" as i32\n", "byte literal must decode to exactly one byte, got 0"),
+            "byte literal too long": ("bad gives i32:\n  byte \"AB\" as i32\n", "byte literal must decode to exactly one byte, got 2"),
+            "byte literal invalid escape": ("bad gives i32:\n  byte \"\\q\" as i32\n", "invalid escape sequence \\q"),
+            "byte literal short hex escape": (
+                "bad gives i32:\n  byte \"\\x4\" as i32\n",
+                "hex escape must contain exactly two hexadecimal digits",
+            ),
+            "byte literal invalid hex digits": (
+                "bad gives i32:\n  byte \"\\xGG\" as i32\n",
+                "hex escape contains non-hexadecimal digit",
+            ),
+            "byte string used as value": (
+                "bad gives i32:\n  let x be bytes \"hello\"\n  0\n",
+                "byte string literal cannot be used as a value; use `array of bytes` or `buffer of bytes`",
+            ),
+            "empty inferred byte array": (
+                "bad gives i32:\n  let text be array of bytes \"\"\n  0\n",
+                "byte array literal must contain at least one byte",
+            ),
+            "empty inferred byte buffer": (
+                "bad gives i32:\n  let text be buffer of bytes \"\"\n  0\n",
+                "byte buffer literal must contain at least one byte",
+            ),
+            "byte string splice in non-u8 array": (
+                "bad gives i32:\n  let cells be array of 5 i32 containing bytes \"hello\"\n  0\n",
+                "byte string literal can only initialize u8 arrays or buffers, got i32",
+            ),
+            "byte string splice count mismatch": (
+                "bad gives i32:\n  let text be array of 4 u8 containing bytes \"hello\"\n  0\n",
+                "array text expects 4 elements, got 5",
+            ),
+            "byte string splice in enum array": (
+                "enum ByteEnum: u8:\n  a be 65\n\nbad gives i32:\n  let values be array of 1 ByteEnum containing bytes \"A\"\n  0\n",
+                "byte string literal can only initialize u8 arrays or buffers, got ByteEnum",
+            ),
+            "duplicate byte match pattern": (
+                "bad b: u8 gives i32:\n  match b:\n    byte \"A\" gives 1\n    65 gives 2\n    otherwise gives 3\n",
+                "match has duplicate pattern 65",
+            ),
+            "length of bytes invalid escape": ("bad gives i32:\n  length of bytes \"\\q\"\n", "invalid escape sequence \\q"),
+            "unterminated byte string": ("bad gives i32:\n  byte \"A\n", "unterminated string literal"),
             "export union unsupported": (
                 "union MaybeI32:\n  none\n\nexport exported maybe maybe: MaybeI32 gives i32 as ins_maybe:\n  0\n",
                 "exported phrase parameters must be primitive scalar types, got MaybeI32",

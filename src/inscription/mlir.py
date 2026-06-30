@@ -10,6 +10,7 @@ from .ast import (
     Binary,
     BodyStmt,
     Boolean,
+    ByteLiteral,
     BufferBinding,
     BufferLoad,
     BufferStoreStmt,
@@ -32,6 +33,7 @@ from .ast import (
     Integer,
     AlignmentOfType,
     LengthOf,
+    LengthOfBytes,
     LayoutRead,
     LayoutWriteStmt,
     MatchExpr,
@@ -45,6 +47,7 @@ from .ast import (
     SetStmt,
     SizeOfType,
     StorageAliasBinding,
+    StorageElement,
     Stmt,
     TypeName,
     Unary,
@@ -67,6 +70,7 @@ from .semantic import (
     constant_table,
     enum_table,
     evaluate_const_expr,
+    expand_storage_values,
     function_table,
     infer_comparison_operand_type,
     infer_expr_type,
@@ -495,6 +499,8 @@ class MlirEmitter:
             if is_float_type(type_name) and expr.is_word_zero:
                 return self.emit_float(0.0, type_name, lines, indent)
             return self.emit_integer(expr.value, type_name, lines, indent)
+        if isinstance(expr, ByteLiteral):
+            return self.emit_integer(expr.value, type_name, lines, indent)
         if isinstance(expr, Float):
             return self.emit_float(float(expr.text), type_name, lines, indent)
         if isinstance(expr, Boolean):
@@ -519,6 +525,8 @@ class MlirEmitter:
             if isinstance(storage, ArrayStorage):
                 return self.emit_integer(storage.array_type.length, "i32", lines, indent)
             return storage.length
+        if isinstance(expr, LengthOfBytes):
+            return self.emit_integer(len(expr.values), "i32", lines, indent)
         if isinstance(expr, SizeOfType):
             return self.emit_integer(layout_info(self.layout_record(expr.type_name)).size, "i32", lines, indent)
         if isinstance(expr, AlignmentOfType):
@@ -813,12 +821,19 @@ class MlirEmitter:
         self,
         storage: BufferStorage | ArrayStorage,
         storage_type: BufferType | ArrayType,
-        values: tuple[Expr, ...],
+        values: tuple[StorageElement, ...],
         env: dict[str, EnvValue],
         lines: list[str],
         indent: str,
     ) -> None:
-        for index, expr in enumerate(values):
+        expanded_values = expand_storage_values(
+            "buffer" if isinstance(storage_type, BufferType) else "array",
+            "",
+            values,
+            storage_type.element_type,
+            0,
+        )
+        for index, expr in enumerate(expanded_values):
             value = self.emit_expr(expr, env, lines, indent, expected=storage_type.element_type)
             index_value = self.emit_index_constant(index, lines, indent)
             lines.append(f"{indent}memref.store {value.name}, {storage.name}[{index_value}] : {memref_type(storage_type)}")

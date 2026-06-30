@@ -12,6 +12,8 @@ from .ast import (
     Binary,
     BodyStmt,
     Boolean,
+    ByteLiteral,
+    ByteString,
     BufferBinding,
     BufferLoad,
     BufferStoreStmt,
@@ -36,6 +38,7 @@ from .ast import (
     Integer,
     AlignmentOfType,
     LengthOf,
+    LengthOfBytes,
     LayoutInfo,
     LayoutRead,
     LayoutWriteStmt,
@@ -52,6 +55,7 @@ from .ast import (
     SetStmt,
     SizeOfType,
     StorageAliasBinding,
+    StorageElement,
     TypeAliasDecl,
     TypeName,
     Unary,
@@ -1062,6 +1066,27 @@ def _declare_let(
     bindings[stmt.name] = Binding(type_name, "let", stmt.line)
 
 
+def expand_storage_values(
+    kind: Literal["buffer", "array"],
+    name: str,
+    values: tuple[StorageElement, ...],
+    element_type: ValueType,
+    line: int,
+) -> tuple[Expr, ...]:
+    expanded: list[Expr] = []
+    for value in values:
+        if isinstance(value, ByteString):
+            if element_type != "u8":
+                raise InscriptionError(
+                    f"byte string literal can only initialize u8 arrays or buffers, got {format_type(element_type)}",
+                    value.line,
+                )
+            expanded.extend(Integer(byte, value.line) for byte in value.values)
+            continue
+        expanded.append(value)
+    return tuple(expanded)
+
+
 def _declare_buffer(
     stmt: BufferBinding,
     bindings: dict[str, Binding],
@@ -1073,9 +1098,10 @@ def _declare_buffer(
     buffer_type = resolve_buffer_type(stmt.buffer_type, stmt.line, records, constants, functions, _env_types(bindings))
     _check_buffer_type(buffer_type, stmt.line, records, constants, functions, _env_types(bindings))
     if stmt.values:
-        if len(stmt.values) != buffer_type.length:
-            raise InscriptionError(f"buffer {stmt.name} expects {buffer_type.length} elements, got {len(stmt.values)}", stmt.line)
-        for index, value in enumerate(stmt.values):
+        values = expand_storage_values("buffer", stmt.name, stmt.values, buffer_type.element_type, stmt.line)
+        if len(values) != buffer_type.length:
+            raise InscriptionError(f"buffer {stmt.name} expects {buffer_type.length} elements, got {len(values)}", stmt.line)
+        for index, value in enumerate(values):
             actual = _infer_declared_type(value, buffer_type.element_type, _env_types(bindings), functions, records, constants)
             if actual != buffer_type.element_type:
                 raise InscriptionError(
@@ -1103,9 +1129,10 @@ def _declare_array(
     array_type = resolve_array_type(stmt.array_type, stmt.line, records, constants, functions, _env_types(bindings))
     _check_array_type(array_type, stmt.line)
     if stmt.values:
-        if len(stmt.values) != array_type.length:
-            raise InscriptionError(f"array {stmt.name} expects {array_type.length} elements, got {len(stmt.values)}", stmt.line)
-        for index, value in enumerate(stmt.values):
+        values = expand_storage_values("array", stmt.name, stmt.values, array_type.element_type, stmt.line)
+        if len(values) != array_type.length:
+            raise InscriptionError(f"array {stmt.name} expects {array_type.length} elements, got {len(values)}", stmt.line)
+        for index, value in enumerate(values):
             actual = _infer_declared_type(value, array_type.element_type, _env_types(bindings), functions, records, constants)
             if actual != array_type.element_type:
                 raise InscriptionError(
@@ -1849,6 +1876,8 @@ def evaluate_const_expr(
             return ConstValue(type_name, normalize_float(0.0, type_name))
         assert isinstance(type_name, str) and is_integer_type(type_name)
         return ConstValue(type_name, normalize_integer(expr.value, type_name))
+    if isinstance(expr, ByteLiteral):
+        return ConstValue("u8", expr.value)
     if isinstance(expr, Float):
         assert isinstance(type_name, str) and is_float_type(type_name)
         return ConstValue(type_name, normalize_float(parse_float_literal(expr.text, expr.line), type_name))
@@ -1892,6 +1921,8 @@ def evaluate_const_expr(
         if not isinstance(binding_type.length, int):
             raise CompileTimeEvaluationError(f"length of {expr.name} is not compile-time evaluable", expr.line)
         return ConstValue("i32", binding_type.length)
+    if isinstance(expr, LengthOfBytes):
+        return ConstValue("i32", len(expr.values))
     if isinstance(expr, SizeOfType):
         return ConstValue("i32", layout_info(_require_layout_record_decl(expr.type_name, expr.line, records, f"size of {expr.type_name}")).size)
     if isinstance(expr, AlignmentOfType):
@@ -2153,6 +2184,10 @@ def infer_expr_type(
             return expected
         _check_integer_literal_range(expr.value, "i32", expr.line)
         return "i32"
+    if isinstance(expr, ByteLiteral):
+        if expected is not None:
+            require_type("u8", expected, expr.line)
+        return "u8"
     if isinstance(expr, Float):
         if expected is not None:
             if not is_float_type(expected):
@@ -2236,6 +2271,10 @@ def infer_expr_type(
             raise InscriptionError("buffer length must be compile-time evaluable", expr.line)
         if binding_type.length is not None and binding_type.length > INTEGER_RANGES["i32"][1]:
             raise InscriptionError(f"buffer length {binding_type.length} does not fit in i32", expr.line)
+        if expected is not None:
+            require_type("i32", expected, expr.line)
+        return "i32"
+    if isinstance(expr, LengthOfBytes):
         if expected is not None:
             require_type("i32", expected, expr.line)
         return "i32"

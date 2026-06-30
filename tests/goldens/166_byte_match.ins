@@ -1,0 +1,8 @@
+classify byte b: u8 gives i32:
+  match b:
+    byte "A" gives 1
+    byte "\n" gives 2
+    otherwise gives 3
+
+main gives i32:
+  classify byte byte "A"

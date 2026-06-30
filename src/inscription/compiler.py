@@ -10,6 +10,8 @@ from .ast import (
     AssignStmt,
     Binary,
     Boolean,
+    ByteLiteral,
+    ByteString,
     BufferBinding,
     BufferLoad,
     BufferStoreStmt,
@@ -34,6 +36,7 @@ from .ast import (
     Integer,
     AlignmentOfType,
     LengthOf,
+    LengthOfBytes,
     LayoutRead,
     LayoutWriteStmt,
     MatchExpr,
@@ -53,6 +56,7 @@ from .ast import (
     SetStmt,
     SizeOfType,
     StorageAliasBinding,
+    StorageElement,
     Stmt,
     TypeAliasDecl,
     Unary,
@@ -419,17 +423,17 @@ def qualify_stmt(stmt: Stmt, module_name: str, record_names: set[str], constant_
         buffer_type = qualify_type(stmt.buffer_type, module_name, record_names, constant_names)
         assert isinstance(buffer_type, BufferType)
         fill = qualify_expr(stmt.fill, module_name, record_names, constant_names) if stmt.fill is not None else None
-        values = tuple(qualify_expr(value, module_name, record_names, constant_names) for value in stmt.values)
+        values = tuple(qualify_storage_element(value, module_name, record_names, constant_names) for value in stmt.values)
         return BufferBinding(stmt.name, buffer_type, stmt.line, fill, values)
     if isinstance(stmt, ArrayBinding):
         array_type = qualify_type(stmt.array_type, module_name, record_names, constant_names)
         assert isinstance(array_type, ArrayType)
         fill = qualify_expr(stmt.fill, module_name, record_names, constant_names) if stmt.fill is not None else None
-        values = tuple(qualify_expr(value, module_name, record_names, constant_names) for value in stmt.values)
+        values = tuple(qualify_storage_element(value, module_name, record_names, constant_names) for value in stmt.values)
         return ArrayBinding(stmt.name, array_type, stmt.line, fill, values)
     if isinstance(stmt, StorageAliasBinding):
         fill = qualify_expr(stmt.fill, module_name, record_names, constant_names) if stmt.fill is not None else None
-        values = tuple(qualify_expr(value, module_name, record_names, constant_names) for value in stmt.values)
+        values = tuple(qualify_storage_element(value, module_name, record_names, constant_names) for value in stmt.values)
         return StorageAliasBinding(
             stmt.name,
             qualify_type(stmt.alias_type, module_name, record_names, constant_names),
@@ -504,8 +508,16 @@ def qualify_pattern(pattern, module_name: str, record_names: set[str], constant_
     return qualify_expr(pattern, module_name, record_names, constant_names)
 
 
+def qualify_storage_element(
+    element: StorageElement, module_name: str, record_names: set[str], constant_names: set[str]
+) -> StorageElement:
+    if isinstance(element, ByteString):
+        return element
+    return qualify_expr(element, module_name, record_names, constant_names)
+
+
 def qualify_expr(expr: Expr, module_name: str, record_names: set[str], constant_names: set[str]) -> Expr:
-    if isinstance(expr, Integer | Float | Boolean):
+    if isinstance(expr, Integer | Float | ByteLiteral | Boolean | LengthOfBytes):
         return expr
     if isinstance(expr, Variable):
         if expr.name in constant_names:

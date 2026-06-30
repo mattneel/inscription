@@ -10,6 +10,8 @@ from .ast import (
     Binary,
     BodyStmt,
     Boolean,
+    ByteLiteral,
+    ByteString,
     BufferBinding,
     BufferLoad,
     BufferStoreStmt,
@@ -35,6 +37,7 @@ from .ast import (
     Integer,
     AlignmentOfType,
     LengthOf,
+    LengthOfBytes,
     LayoutRead,
     LayoutWriteStmt,
     MatchExpr,
@@ -55,6 +58,7 @@ from .ast import (
     SetStmt,
     SizeOfType,
     StorageAliasBinding,
+    StorageElement,
     TypeAliasDecl,
     TypeName,
     Unary,
@@ -79,7 +83,8 @@ NAME_RE = re.compile(r"[a-z][a-z0-9_]*")
 RECORD_NAME_RE = re.compile(r"[A-Z][A-Za-z0-9_]*")
 QUALIFIED_RECORD_NAME_RE = re.compile(r"(?:[A-Za-z][A-Za-z0-9_]*\.)*[A-Z][A-Za-z0-9_]*")
 FLOAT_LITERAL_RE = r"(?:\d+\.\d+(?:[eE][+-]?\d+)?|\d+[eE][+-]?\d+)"
-TOKEN_RE = re.compile(rf"\s*({FLOAT_LITERAL_RE}|-?\d+|[A-Z][A-Za-z0-9_]*|[a-z][a-z0-9_]*|[().,])")
+STRING_LITERAL_RE = r'"(?:\\.|[^"\\])*"'
+TOKEN_RE = re.compile(rf"\s*({STRING_LITERAL_RE}|{FLOAT_LITERAL_RE}|-?\d+|[A-Z][A-Za-z0-9_]*|[a-z][a-z0-9_]*|[().,])")
 RESERVED = {
     "address", "alignment", "and", "arguments", "array", "as", "at", "be", "becomes", "bitwise", "buffer", "by", "call",
     "check", "constant", "containing", "divided", "do", "does", "each", "else", "equal", "export", "extern", "false", "filled", "float", "for", "from",
@@ -139,6 +144,62 @@ class PhraseTemplate:
     line: int
     return_type: ReturnType
     display_name: str
+
+
+def decode_byte_string_token(token: str, line: int) -> tuple[int, ...]:
+    if not (len(token) >= 2 and token[0] == '"' and token[-1] == '"'):
+        raise InscriptionError("unterminated string literal", line)
+    body = token[1:-1]
+    out: list[int] = []
+    index = 0
+    while index < len(body):
+        char = body[index]
+        if char != "\\":
+            out.extend(char.encode("utf-8"))
+            index += 1
+            continue
+        if index + 1 >= len(body):
+            raise InscriptionError("unterminated string literal", line)
+        escaped = body[index + 1]
+        if escaped == "\\":
+            out.append(ord("\\"))
+            index += 2
+            continue
+        if escaped == '"':
+            out.append(ord('"'))
+            index += 2
+            continue
+        if escaped == "n":
+            out.append(10)
+            index += 2
+            continue
+        if escaped == "r":
+            out.append(13)
+            index += 2
+            continue
+        if escaped == "t":
+            out.append(9)
+            index += 2
+            continue
+        if escaped == "0":
+            out.append(0)
+            index += 2
+            continue
+        if escaped == "x":
+            digits = body[index + 2 : index + 4]
+            if len(digits) != 2:
+                raise InscriptionError("hex escape must contain exactly two hexadecimal digits", line)
+            if not re.fullmatch(r"[0-9A-Fa-f]{2}", digits):
+                raise InscriptionError("hex escape contains non-hexadecimal digit", line)
+            out.append(int(digits, 16))
+            index += 4
+            continue
+        raise InscriptionError(f"invalid escape sequence \\{escaped}", line)
+    return tuple(out)
+
+
+def _is_string_token(token: str) -> bool:
+    return len(token) >= 2 and token[0] == '"' and token[-1] == '"'
 
 
 ParsedTopLevel = RecordDecl | EnumDecl | UnionDecl | TypeAliasDecl | ConstantDecl | CheckStmt | Function
@@ -1023,6 +1084,28 @@ class Parser:
             self.lines = original_lines
 
     def _parse_let(self, line: Line) -> SetStmt | BufferBinding | ArrayBinding | StorageAliasBinding | ViewBinding:
+        inferred_byte_buffer_match = re.fullmatch(r'let ([a-z][a-z0-9_]*) be buffer of bytes (".*")', line.text)
+        if inferred_byte_buffer_match:
+            values = decode_byte_string_token(inferred_byte_buffer_match.group(2), line.number)
+            if not values:
+                raise InscriptionError("byte buffer literal must contain at least one byte", line.number)
+            return BufferBinding(
+                self._name(inferred_byte_buffer_match.group(1), line.number),
+                BufferType(len(values), "u8"),
+                line.number,
+                values=(ByteString(values, line.number),),
+            )
+        inferred_byte_array_match = re.fullmatch(r'let ([a-z][a-z0-9_]*) be array of bytes (".*")', line.text)
+        if inferred_byte_array_match:
+            values = decode_byte_string_token(inferred_byte_array_match.group(2), line.number)
+            if not values:
+                raise InscriptionError("byte array literal must contain at least one byte", line.number)
+            return ArrayBinding(
+                self._name(inferred_byte_array_match.group(1), line.number),
+                ArrayType(len(values), "u8"),
+                line.number,
+                values=(ByteString(values, line.number),),
+            )
         buffer_match = re.fullmatch(
             rf"let ([a-z][a-z0-9_]*) be buffer of ({BUFFER_LENGTH_PATTERN}) ({TYPE_REF_PATTERN}) (filled with|containing) (.+)",
             line.text,
@@ -1039,7 +1122,7 @@ class Parser:
                     self._name(buffer_match.group(1), line.number),
                     buffer_type,
                     line.number,
-                    values=self._parse_expression_list(initializer_text, line.number),
+                    values=self._parse_containing_list(initializer_text, line.number),
                 )
             return BufferBinding(
                 self._name(buffer_match.group(1), line.number),
@@ -1063,7 +1146,7 @@ class Parser:
                     self._name(array_match.group(1), line.number),
                     array_type,
                     line.number,
-                    values=self._parse_expression_list(initializer_text, line.number),
+                    values=self._parse_containing_list(initializer_text, line.number),
                 )
             return ArrayBinding(
                 self._name(array_match.group(1), line.number),
@@ -1093,7 +1176,7 @@ class Parser:
                     self._return_type(storage_alias_match.group(2), line.number),
                     line.number,
                     initializer,
-                    values=self._parse_expression_list(initializer_text, line.number),
+                    values=self._parse_containing_list(initializer_text, line.number),
                 )
             return StorageAliasBinding(
                 self._name(storage_alias_match.group(1), line.number),
@@ -1113,6 +1196,15 @@ class Parser:
         )
 
     def _parse_expression_list(self, text: str, line: int) -> tuple[Expr, ...]:
+        return tuple(
+            element if not isinstance(element, ByteString) else self._byte_string_as_value_error(element.line)
+            for element in self._parse_containing_list(text, line)
+        )
+
+    def _byte_string_as_value_error(self, line: int) -> Expr:
+        raise InscriptionError("byte string literal cannot be used as a value; use `array of bytes` or `buffer of bytes`", line)
+
+    def _parse_containing_list(self, text: str, line: int) -> tuple[StorageElement, ...]:
         tokens = tokenize(text, line)
         parts: list[list[str]] = [[]]
         depth = 0
@@ -1137,7 +1229,13 @@ class Parser:
             raise InscriptionError("missing closing ')'", line)
         if not parts[-1]:
             raise InscriptionError("expected expression", line)
-        return tuple(parse_expression_tokens(part, line, self.phrases) for part in parts)
+        elements: list[StorageElement] = []
+        for part in parts:
+            if len(part) == 2 and part[0] == "bytes" and _is_string_token(part[1]):
+                elements.append(ByteString(decode_byte_string_token(part[1], line), line))
+                continue
+            elements.append(parse_expression_tokens(part, line, self.phrases))
+        return tuple(elements)
 
     def _assignment_match(self, line: Line) -> re.Match[str] | None:
         if line.is_header:
@@ -1358,6 +1456,8 @@ def tokenize(text: str, line: int) -> list[str]:
         if not match:
             if text[pos:].strip() == "":
                 break
+            if text[pos:].lstrip().startswith('"'):
+                raise InscriptionError("unterminated string literal", line)
             raise InscriptionError(f"invalid token near '{text[pos:].strip()}'", line)
         token_start = match.start(1)
         token = match.group(1)
@@ -1610,6 +1710,10 @@ class ExpressionParser:
         if token == "length" and tuple(self.tokens[self.pos : self.pos + 2]) == ("length", "of"):
             self.pop()
             self.pop()
+            if self.peek() == "bytes" and self.pos + 1 < len(self.tokens) and _is_string_token(self.tokens[self.pos + 1]):
+                self.pop()
+                literal = self.pop()
+                return LengthOfBytes(decode_byte_string_token(literal, self.line), self.line)
             name = self.pop()
             if not NAME_RE.fullmatch(name) or name in RESERVED:
                 raise InscriptionError(f"invalid buffer name '{name}'", self.line)
@@ -1628,6 +1732,18 @@ class ExpressionParser:
         if enum_case is not None:
             return enum_case
         token = self.pop()
+        if token == "byte":
+            if self.peek() is not None and _is_string_token(self.peek() or ""):
+                literal = self.pop()
+                values = decode_byte_string_token(literal, self.line)
+                if len(values) != 1:
+                    raise InscriptionError(f"byte literal must decode to exactly one byte, got {len(values)}", self.line)
+                return ByteLiteral(values[0], self.line)
+        if token == "bytes":
+            if self.peek() is not None and _is_string_token(self.peek() or ""):
+                literal = self.pop()
+                decode_byte_string_token(literal, self.line)
+                raise InscriptionError("byte string literal cannot be used as a value; use `array of bytes` or `buffer of bytes`", self.line)
         if token == "check":
             raise InscriptionError("check is a step and cannot be used as an expression", self.line)
         if token == "require":

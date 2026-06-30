@@ -1,0 +1,7 @@
+packed layout record Word:
+  value: u16
+
+main gives i32:
+  let bytes be array of bytes "\x2a\x00"
+  let word be read Word from bytes at 0
+  word.value as i32

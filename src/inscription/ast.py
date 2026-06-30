@@ -142,6 +142,18 @@ class Float:
 
 
 @dataclass(frozen=True)
+class ByteLiteral:
+    value: int
+    line: int
+
+
+@dataclass(frozen=True)
+class ByteString:
+    values: tuple[int, ...]
+    line: int
+
+
+@dataclass(frozen=True)
 class Boolean:
     value: bool
     line: int
@@ -209,6 +221,12 @@ class BufferLoad:
 @dataclass(frozen=True)
 class LengthOf:
     name: str
+    line: int
+
+
+@dataclass(frozen=True)
+class LengthOfBytes:
+    values: tuple[int, ...]
     line: int
 
 
@@ -369,10 +387,12 @@ class MatchExpr:
 Expr = (
     Integer
     | Float
+    | ByteLiteral
     | Boolean
     | Variable
     | BufferLoad
     | LengthOf
+    | LengthOfBytes
     | SizeOfType
     | AlignmentOfType
     | OffsetOfField
@@ -391,6 +411,7 @@ Expr = (
 )
 
 BufferLength = int | Expr
+StorageElement = Expr | ByteString
 
 
 @dataclass(frozen=True)
@@ -407,7 +428,7 @@ class BufferBinding:
     buffer_type: BufferType
     line: int
     fill: Expr | None = None
-    values: tuple[Expr, ...] = ()
+    values: tuple[StorageElement, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -416,7 +437,7 @@ class ArrayBinding:
     array_type: ArrayType
     line: int
     fill: Expr | None = None
-    values: tuple[Expr, ...] = ()
+    values: tuple[StorageElement, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -426,7 +447,7 @@ class StorageAliasBinding:
     line: int
     initializer: Literal["filled with", "containing"]
     fill: Expr | None = None
-    values: tuple[Expr, ...] = ()
+    values: tuple[StorageElement, ...] = ()
 
 
 @dataclass(frozen=True)
