@@ -60,7 +60,10 @@ def main(argv: list[str] | None = None) -> int:
     compile_p.add_argument(
         "--emit",
         default="mlir",
-        help="artifact to emit: mlir, lowered-mlir, llvm-ir, object, executable, interface-json, or c-header",
+        help=(
+            "artifact to emit: mlir, lowered-mlir, llvm-ir, object, executable, "
+            "static-library, interface-json, or c-header"
+        ),
     )
     compile_p.add_argument(
         "--save-temps",
@@ -68,6 +71,13 @@ def main(argv: list[str] | None = None) -> int:
         help="directory for saved source MLIR, optimized MLIR when enabled, lowered MLIR, LLVM IR, and object intermediates",
     )
     compile_p.add_argument("--link-object", action="append", type=Path, default=[], help="additional object file to link for executable emission")
+    compile_p.add_argument(
+        "--archive-object",
+        action="append",
+        type=Path,
+        default=[],
+        help="additional object file to include in static-library emission",
+    )
     compile_p.add_argument("--verify", action="store_true", help="verify emitted artifacts with the LLVM/MLIR 22 toolchain")
     compile_p.add_argument("--module-root", type=Path, help="root directory for resolving imported modules")
     compile_p.add_argument("--runtime-checks", action="store_true", help="emit runtime assertions for dynamic storage bounds")
@@ -95,6 +105,7 @@ def main(argv: list[str] | None = None) -> int:
     tools_p.add_argument("--show-pipeline", action="store_true", help="show optimization presets and the MLIR lowering pipeline")
     tools_p.add_argument("--require-object", action="store_true", help="require LLVM 22 llc for object emission")
     tools_p.add_argument("--require-executable", action="store_true", help="require LLVM 22 llc and clang for executable emission")
+    tools_p.add_argument("--require-static-library", action="store_true", help="require LLVM 22 llc and llvm-ar for static library emission")
 
     args = parser.parse_args(argv)
     try:
@@ -105,12 +116,20 @@ def main(argv: list[str] | None = None) -> int:
                 raise InscriptionError("object emission requires -o OUTPUT")
             if args.emit == "executable" and args.output is None:
                 raise InscriptionError("executable emission requires -o OUTPUT")
+            if args.emit == "static-library" and args.output is None:
+                raise InscriptionError("static library emission requires -o OUTPUT")
             if args.link_object and args.emit != "executable":
                 raise InscriptionError("--link-object is supported only with --emit executable")
+            if args.archive_object and args.emit != "static-library":
+                raise InscriptionError("--archive-object is only valid with --emit static-library")
             link_objects = tuple(args.link_object)
             for path in link_objects:
                 if not path.exists():
                     raise InscriptionError(f"link object {path} does not exist")
+            archive_objects = tuple(args.archive_object)
+            for path in archive_objects:
+                if not path.exists():
+                    raise InscriptionError(f"archive object {path} does not exist")
             opt_level = _resolve_opt_level(args)
             if args.emit in {"interface-json", "c-header"}:
                 context = load_interface_context(args.source, module_root=args.module_root)
@@ -130,10 +149,14 @@ def main(argv: list[str] | None = None) -> int:
                 else:
                     sys.stdout.write(output)
                 return 0
-            if args.emit == "executable":
+            strip_main_for_static_library = False
+            if args.emit in {"executable", "static-library"}:
                 source_path = args.source.resolve()
                 program = load_program(source_path.read_text(), source_path=source_path, module_root=args.module_root)
-                validate_executable_main(program)
+                if args.emit == "executable":
+                    validate_executable_main(program)
+                else:
+                    strip_main_for_static_library = any(fn.implementation == "export" for fn in program.functions)
                 mlir = emit_mlir(program, runtime_checks=args.runtime_checks)
             else:
                 mlir = compile_file(args.source, module_root=args.module_root, runtime_checks=args.runtime_checks)
@@ -146,8 +169,11 @@ def main(argv: list[str] | None = None) -> int:
                 opt_level=opt_level,
                 executable_output=args.output if args.emit == "executable" else None,
                 link_objects=link_objects,
+                static_library_output=args.output if args.emit == "static-library" else None,
+                archive_objects=archive_objects,
+                strip_main_for_static_library=strip_main_for_static_library,
             )
-            if args.emit == "executable":
+            if args.emit in {"executable", "static-library"}:
                 return 0
             output = selected_artifact(artifacts, args.emit)
             if isinstance(output, bytes):
@@ -188,7 +214,11 @@ def main(argv: list[str] | None = None) -> int:
                 sys.stdout.write(highlighted)
             return 0
         if args.command == "check-tools":
-            toolchain = resolve_toolchain(require_object=args.require_object, require_executable=args.require_executable)
+            toolchain = resolve_toolchain(
+                require_object=args.require_object,
+                require_executable=args.require_executable,
+                require_static_library=args.require_static_library,
+            )
             print(f"mlir-opt={toolchain.mlir_opt}")
             print(f"mlir-translate={toolchain.mlir_translate}")
             print(f"lli={toolchain.lli}")
@@ -200,6 +230,10 @@ def main(argv: list[str] | None = None) -> int:
                 print("clang=unavailable (optional)")
             else:
                 print(f"clang={toolchain.clang}")
+            if toolchain.llvm_ar is None:
+                print("llvm-ar=unavailable (optional)")
+            else:
+                print(f"llvm-ar={toolchain.llvm_ar}")
             if args.show_pipeline:
                 print("optimization presets:")
                 for name, passes in OPTIMIZATION_PRESETS.items():
@@ -209,6 +243,7 @@ def main(argv: list[str] | None = None) -> int:
                 print("lli output.ll")
                 print("object emission: llc -relocation-model=pic -filetype=obj output.ll -o output.o")
                 print("executable emission: clang output.o -o executable")
+                print("static library emission: llvm-ar rcsD output.a output.o")
             return 0
     except (InscriptionError, ToolchainError, OSError) as exc:
         print(f"error: {exc}", file=sys.stderr)

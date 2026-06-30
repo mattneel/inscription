@@ -1219,6 +1219,358 @@ class CompilerTests(unittest.TestCase):
             self.assertEqual(dotted_proc.returncode, 2)
             self.assertIn("C header emission requires exported symbol runtime.add to be a C identifier", dotted_proc.stderr)
 
+    def test_v020_static_library_emission_and_save_temps(self):
+        env = {**os.environ, "PYTHONPATH": str(SRC)}
+        source = FIXTURES / "export_scalar_gives.ins"
+
+        no_output = subprocess.run(
+            [sys.executable, "-m", "inscription", "compile", str(source), "--emit", "static-library"],
+            cwd=ROOT,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(no_output.returncode, 2)
+        self.assertIn("static library emission requires -o OUTPUT", no_output.stderr)
+
+        try:
+            toolchain = resolve_toolchain(require_static_library=True)
+        except ToolchainError as exc:
+            self.skipTest(str(exc))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            cases = [
+                (source, ["--verify"], tmp_path / "libexport_scalar_gives.a"),
+                (source, ["-O2"], tmp_path / "libexport_scalar_gives_o2.a"),
+                (FIXTURES / "export_module_phrase" / "main.ins", ["-O1"], tmp_path / "libexport_module_phrase.a"),
+                (FIXTURES / "checked_dynamic_buffer_index.ins", ["--runtime-checks"], tmp_path / "libchecked.a"),
+            ]
+            for fixture, options, archive in cases:
+                with self.subTest(fixture=fixture, options=options):
+                    proc = subprocess.run(
+                        [
+                            sys.executable,
+                            "-m",
+                            "inscription",
+                            "compile",
+                            str(fixture),
+                            "--emit",
+                            "static-library",
+                            *options,
+                            "-o",
+                            str(archive),
+                        ],
+                        cwd=ROOT,
+                        env=env,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        text=True,
+                        check=False,
+                    )
+                    self.assertEqual(proc.returncode, 0, proc.stderr)
+                    self.assertEqual(proc.stdout, "")
+                    self.assertTrue(archive.exists())
+                    self.assertGreater(archive.stat().st_size, 0)
+
+            temps = tmp_path / "static-temps"
+            save_proc = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "inscription",
+                    "compile",
+                    str(source),
+                    "--emit",
+                    "static-library",
+                    "--save-temps",
+                    str(temps),
+                    "-o",
+                    str(tmp_path / "libsave.a"),
+                ],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(save_proc.returncode, 0, save_proc.stderr)
+            self.assertTrue((temps / "export_scalar_gives.mlir").exists())
+            self.assertFalse((temps / "export_scalar_gives.optimized.mlir").exists())
+            self.assertTrue((temps / "export_scalar_gives.lowered.mlir").exists())
+            self.assertTrue((temps / "export_scalar_gives.ll").exists())
+            self.assertTrue((temps / "export_scalar_gives.o").exists())
+
+            opt_temps = tmp_path / "static-opt-temps"
+            opt_save_proc = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "inscription",
+                    "compile",
+                    str(source),
+                    "--emit",
+                    "static-library",
+                    "-O1",
+                    "--save-temps",
+                    str(opt_temps),
+                    "-o",
+                    str(tmp_path / "libsave_o1.a"),
+                ],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(opt_save_proc.returncode, 0, opt_save_proc.stderr)
+            self.assertTrue((opt_temps / "export_scalar_gives.mlir").exists())
+            self.assertTrue((opt_temps / "export_scalar_gives.optimized.mlir").exists())
+            self.assertTrue((opt_temps / "export_scalar_gives.lowered.mlir").exists())
+            self.assertTrue((opt_temps / "export_scalar_gives.ll").exists())
+            self.assertTrue((opt_temps / "export_scalar_gives.o").exists())
+
+            missing_archive_object = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "inscription",
+                    "compile",
+                    str(source),
+                    "--emit",
+                    "static-library",
+                    "-o",
+                    str(tmp_path / "libmissing.a"),
+                    "--archive-object",
+                    str(tmp_path / "missing.o"),
+                ],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(missing_archive_object.returncode, 2)
+            self.assertIn(f"archive object {tmp_path / 'missing.o'} does not exist", missing_archive_object.stderr)
+
+            extra = tmp_path / "extra.o"
+            extra.write_bytes(b"not a real object")
+            invalid_archive_object_mode = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "inscription",
+                    "compile",
+                    str(source),
+                    "--emit",
+                    "object",
+                    "-o",
+                    str(tmp_path / "out.o"),
+                    "--archive-object",
+                    str(extra),
+                ],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(invalid_archive_object_mode.returncode, 2)
+            self.assertIn("--archive-object is only valid with --emit static-library", invalid_archive_object_mode.stderr)
+
+            pipeline = subprocess.run(
+                [sys.executable, "-m", "inscription", "check-tools", "--require-static-library", "--show-pipeline"],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(pipeline.returncode, 0, pipeline.stderr)
+            self.assertIn(f"llvm-ar={toolchain.llvm_ar}", pipeline.stdout)
+            self.assertIn("static library emission: llvm-ar rcsD output.a output.o", pipeline.stdout)
+
+    def test_v020_c_header_static_library_integration(self):
+        env = {**os.environ, "PYTHONPATH": str(SRC)}
+        try:
+            toolchain = resolve_toolchain(require_executable=True, require_static_library=True)
+        except ToolchainError as exc:
+            self.skipTest(str(exc))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+
+            def compile_header_and_archive(source: Path, header: Path, archive: Path) -> None:
+                header_proc = subprocess.run(
+                    [
+                        sys.executable,
+                        "-m",
+                        "inscription",
+                        "compile",
+                        str(source),
+                        "--emit",
+                        "c-header",
+                        "-o",
+                        str(header),
+                    ],
+                    cwd=ROOT,
+                    env=env,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    check=False,
+                )
+                self.assertEqual(header_proc.returncode, 0, header_proc.stderr)
+                archive_proc = subprocess.run(
+                    [
+                        sys.executable,
+                        "-m",
+                        "inscription",
+                        "compile",
+                        str(source),
+                        "--emit",
+                        "static-library",
+                        "-o",
+                        str(archive),
+                    ],
+                    cwd=ROOT,
+                    env=env,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    check=False,
+                )
+                self.assertEqual(archive_proc.returncode, 0, archive_proc.stderr)
+
+            def compile_and_run_c(c_source: str, header_dir: Path, archive: Path, output: Path, expected: int) -> None:
+                caller = output.with_suffix(".c")
+                caller.write_text(c_source)
+                compile_proc = subprocess.run(
+                    [
+                        str(toolchain.clang),
+                        str(caller),
+                        str(archive),
+                        "-I",
+                        str(header_dir),
+                        "-o",
+                        str(output),
+                    ],
+                    cwd=ROOT,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    check=False,
+                )
+                self.assertEqual(compile_proc.returncode, 0, compile_proc.stderr)
+                run = subprocess.run([str(output)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False)
+                self.assertEqual(run.returncode, expected, run.stderr)
+
+            add_header = tmp_path / "inscription_export.h"
+            add_archive = tmp_path / "libins_add.a"
+            compile_header_and_archive(FIXTURES / "export_scalar_gives.ins", add_header, add_archive)
+            compile_and_run_c(
+                '#include "inscription_export.h"\n\nint main(void) {\n  return ins_add(40, 2);\n}\n',
+                tmp_path,
+                add_archive,
+                tmp_path / "caller_add",
+                42,
+            )
+
+            module_header = tmp_path / "math.h"
+            module_archive = tmp_path / "libmath.a"
+            compile_header_and_archive(FIXTURES / "export_module_phrase" / "main.ins", module_header, module_archive)
+            compile_and_run_c(
+                '#include "math.h"\n\nint main(void) {\n  return ins_square(9);\n}\n',
+                tmp_path,
+                module_archive,
+                tmp_path / "caller_square",
+                81,
+            )
+
+            host_ll = tmp_path / "host_double.ll"
+            host_ll.write_text(
+                "define i32 @host_double(i32 %x) {\n"
+                "entry:\n"
+                "  %y = mul i32 %x, 2\n"
+                "  ret i32 %y\n"
+                "}\n"
+            )
+            host_object = tmp_path / "host_double.o"
+            host_object_proc = subprocess.run(
+                [str(toolchain.llc), "-filetype=obj", str(host_ll), "-o", str(host_object)],
+                cwd=ROOT,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(host_object_proc.returncode, 0, host_object_proc.stderr)
+
+            host_source = tmp_path / "host_double.ins"
+            host_source.write_text(
+                "extern host double x: i32 gives i32 as host_double\n\n"
+                "export exported double x: i32 gives i32 as ins_double:\n"
+                "  host double x\n"
+            )
+            host_header = tmp_path / "host_double.h"
+            host_archive = tmp_path / "libhost_double.a"
+            header_proc = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "inscription",
+                    "compile",
+                    str(host_source),
+                    "--emit",
+                    "c-header",
+                    "-o",
+                    str(host_header),
+                ],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(header_proc.returncode, 0, header_proc.stderr)
+            archive_proc = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "inscription",
+                    "compile",
+                    str(host_source),
+                    "--emit",
+                    "static-library",
+                    "-o",
+                    str(host_archive),
+                    "--archive-object",
+                    str(host_object),
+                ],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(archive_proc.returncode, 0, archive_proc.stderr)
+            compile_and_run_c(
+                '#include "host_double.h"\n\nint main(void) {\n  return ins_double(21);\n}\n',
+                tmp_path,
+                host_archive,
+                tmp_path / "caller_host_double",
+                42,
+            )
+
     @unittest.skipUnless(importlib.util.find_spec("pygments"), "Pygments is not installed")
     def test_cli_highlight_outputs_terminal_ansi(self):
         proc = subprocess.run(

@@ -23,7 +23,7 @@ LOWERING_PASSES = [
     "--reconcile-unrealized-casts",
 ]
 
-PIPELINE_EMIT_MODES = {"mlir", "lowered-mlir", "llvm-ir", "object", "executable"}
+PIPELINE_EMIT_MODES = {"mlir", "lowered-mlir", "llvm-ir", "object", "executable", "static-library"}
 EMIT_MODES = {*PIPELINE_EMIT_MODES, "interface-json", "c-header"}
 OPTIMIZATION_PRESETS = {
     "none": (),
@@ -57,6 +57,7 @@ class Toolchain:
     lli: Path
     llc: Path | None = None
     clang: Path | None = None
+    llvm_ar: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -67,6 +68,7 @@ class ArtifactResult:
     llvm_ir: str | None = None
     object_bytes: bytes | None = None
     executable_path: Path | None = None
+    static_library_path: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -77,14 +79,25 @@ class RunResult:
     llvm_ir: str
 
 
-def resolve_toolchain(*, require_object: bool = False, require_executable: bool = False) -> Toolchain:
+def resolve_toolchain(
+    *,
+    require_object: bool = False,
+    require_executable: bool = False,
+    require_static_library: bool = False,
+) -> Toolchain:
     root = Path(os.environ.get("MLIR_TOOLCHAIN", "/usr/lib/llvm-22/bin"))
     tools = {name: root / name for name in ("mlir-opt", "mlir-translate", "lli")}
     for name, path in tools.items():
         _require_llvm22_tool(name, path)
-    llc = _resolve_optional_llc(root, require_object=require_object, require_executable=require_executable)
+    llc = _resolve_optional_llc(
+        root,
+        require_object=require_object,
+        require_executable=require_executable,
+        require_static_library=require_static_library,
+    )
     clang = _resolve_optional_clang(root, require_executable=require_executable)
-    return Toolchain(root, tools["mlir-opt"], tools["mlir-translate"], tools["lli"], llc, clang)
+    llvm_ar = _resolve_optional_llvm_ar(root, require_static_library=require_static_library)
+    return Toolchain(root, tools["mlir-opt"], tools["mlir-translate"], tools["lli"], llc, clang, llvm_ar)
 
 
 def _require_llvm22_tool(name: str, path: Path) -> None:
@@ -95,10 +108,21 @@ def _require_llvm22_tool(name: str, path: Path) -> None:
         raise ToolchainError(f"tool '{path}' does not report LLVM/MLIR 22.x")
 
 
-def _resolve_optional_llc(root: Path, *, require_object: bool, require_executable: bool) -> Path | None:
+def _resolve_optional_llc(
+    root: Path,
+    *,
+    require_object: bool,
+    require_executable: bool,
+    require_static_library: bool,
+) -> Path | None:
     path = root / "llc"
-    context = "executable emission" if require_executable else "object emission"
-    required = require_object or require_executable
+    if require_static_library:
+        context = "static library emission"
+    elif require_executable:
+        context = "executable emission"
+    else:
+        context = "object emission"
+    required = require_object or require_executable or require_static_library
     if not path.exists() or not os.access(path, os.X_OK):
         if required:
             raise ToolchainError(f"{context} requires llc from LLVM 22, but llc was not found")
@@ -110,6 +134,23 @@ def _resolve_optional_llc(root: Path, *, require_object: bool, require_executabl
             if major is not None:
                 raise ToolchainError(f"{context} requires llc from LLVM 22, got LLVM {major}.x")
             raise ToolchainError(f"{context} requires llc from LLVM 22, but llc does not report LLVM 22.x")
+        return None
+    return path
+
+
+def _resolve_optional_llvm_ar(root: Path, *, require_static_library: bool) -> Path | None:
+    path = root / "llvm-ar"
+    if not path.exists() or not os.access(path, os.X_OK):
+        if require_static_library:
+            raise ToolchainError("static library emission requires llvm-ar from LLVM 22, but llvm-ar was not found")
+        return None
+    version = _tool_version(path)
+    if not _reports_llvm22(version):
+        if require_static_library:
+            major = _llvm_major(version)
+            if major is not None:
+                raise ToolchainError(f"static library emission requires llvm-ar from LLVM 22, got LLVM {major}.x")
+            raise ToolchainError("static library emission requires llvm-ar from LLVM 22, but llvm-ar does not report LLVM 22.x")
         return None
     return path
 
@@ -221,6 +262,27 @@ def compile_object(llvm_ir: str, toolchain: Toolchain | None = None) -> bytes:
         return object_path.read_bytes()
 
 
+def strip_llvm_function(llvm_ir: str, symbol: str) -> str:
+    pattern = re.compile(rf"^define\b.*@{re.escape(symbol)}\(")
+    output: list[str] = []
+    skipping = False
+    brace_depth = 0
+    for line in llvm_ir.splitlines(keepends=True):
+        if not skipping and pattern.search(line):
+            skipping = True
+            brace_depth = line.count("{") - line.count("}")
+            if brace_depth <= 0:
+                skipping = False
+            continue
+        if skipping:
+            brace_depth += line.count("{") - line.count("}")
+            if brace_depth <= 0:
+                skipping = False
+            continue
+        output.append(line)
+    return "".join(output)
+
+
 def link_executable(object_bytes: bytes, output_path: Path, link_objects: tuple[Path, ...], toolchain: Toolchain | None = None) -> None:
     toolchain = toolchain or resolve_toolchain(require_executable=True)
     if toolchain.clang is None:
@@ -237,6 +299,37 @@ def link_executable(object_bytes: bytes, output_path: Path, link_objects: tuple[
         )
 
 
+def create_static_library(
+    object_bytes: bytes,
+    output_path: Path,
+    archive_objects: tuple[Path, ...],
+    toolchain: Toolchain | None = None,
+) -> None:
+    toolchain = toolchain or resolve_toolchain(require_static_library=True)
+    if toolchain.llc is None:
+        raise ToolchainError("static library emission requires llc from LLVM 22, but llc was not found")
+    if toolchain.llvm_ar is None:
+        raise ToolchainError("static library emission requires llvm-ar from LLVM 22, but llvm-ar was not found")
+    for path in archive_objects:
+        if not path.exists():
+            raise InscriptionError(f"archive object {path} does not exist")
+    if output_path.exists():
+        output_path.unlink()
+    with tempfile.TemporaryDirectory(prefix="inscription-archive-") as tmp:
+        object_path = Path(tmp) / "inscription.o"
+        object_path.write_bytes(object_bytes)
+        _run_checked(
+            [
+                str(toolchain.llvm_ar),
+                "rcsD",
+                str(output_path),
+                str(object_path),
+                *(str(path) for path in archive_objects),
+            ],
+            "static library emission failed",
+        )
+
+
 def build_artifacts(
     mlir: str,
     *,
@@ -248,6 +341,9 @@ def build_artifacts(
     opt_level: str = "none",
     executable_output: Path | None = None,
     link_objects: tuple[Path, ...] = (),
+    static_library_output: Path | None = None,
+    archive_objects: tuple[Path, ...] = (),
+    strip_main_for_static_library: bool = False,
 ) -> ArtifactResult:
     if emit not in EMIT_MODES:
         raise InscriptionError(f"invalid emit mode {emit}")
@@ -255,12 +351,16 @@ def build_artifacts(
         raise InscriptionError(f"emit mode {emit} is handled outside the MLIR artifact pipeline")
     if emit == "executable" and executable_output is None:
         raise InscriptionError("executable emission requires -o OUTPUT")
+    if emit == "static-library" and static_library_output is None:
+        raise InscriptionError("static library emission requires -o OUTPUT")
     if opt_level not in OPTIMIZATION_PRESETS:
         raise InscriptionError(f"invalid optimization level {opt_level}")
     needs_optimized = opt_level != "none" and (emit != "mlir" or verify or save_temps is not None)
     needs_toolchain = emit != "mlir" or verify or needs_optimized
     if emit == "executable":
         toolchain = toolchain or resolve_toolchain(require_executable=True)
+    elif emit == "static-library":
+        toolchain = toolchain or resolve_toolchain(require_static_library=True)
     elif emit == "object":
         toolchain = toolchain or resolve_toolchain(require_object=True)
     elif needs_toolchain:
@@ -286,26 +386,40 @@ def build_artifacts(
     if emit != "mlir" or verify:
         assert toolchain is not None
         lowered = lower_mlir(lowering_input, toolchain)
-        if verify and emit in {"lowered-mlir", "llvm-ir", "object", "executable"}:
+        if verify and emit in {"lowered-mlir", "llvm-ir", "object", "executable", "static-library"}:
             verify_mlir(lowered, toolchain)
 
-    if emit in {"llvm-ir", "object", "executable"}:
+    if emit in {"llvm-ir", "object", "executable", "static-library"}:
         assert lowered is not None
         assert toolchain is not None
         llvm_ir = translate_to_llvm_ir(lowered, toolchain)
+        if emit == "static-library" and strip_main_for_static_library:
+            llvm_ir = strip_llvm_function(llvm_ir, "main")
 
-    if emit in {"object", "executable"}:
+    if emit in {"object", "executable", "static-library"}:
         assert llvm_ir is not None
         assert toolchain is not None
         object_bytes = compile_object(llvm_ir, toolchain)
 
-    result = ArtifactResult(mlir, optimized, lowered, llvm_ir, object_bytes, executable_output if emit == "executable" else None)
+    result = ArtifactResult(
+        mlir,
+        optimized,
+        lowered,
+        llvm_ir,
+        object_bytes,
+        executable_output if emit == "executable" else None,
+        static_library_output if emit == "static-library" else None,
+    )
     if save_temps is not None:
         _save_artifacts(result, save_temps, stem)
     if emit == "executable":
         assert object_bytes is not None
         assert executable_output is not None
         link_executable(object_bytes, executable_output, link_objects, toolchain)
+    if emit == "static-library":
+        assert object_bytes is not None
+        assert static_library_output is not None
+        create_static_library(object_bytes, static_library_output, archive_objects, toolchain)
     return result
 
 
@@ -323,6 +437,8 @@ def selected_artifact(result: ArtifactResult, emit: str) -> str | bytes:
         return result.object_bytes
     if emit == "executable":
         raise InscriptionError("executable emission writes directly to -o OUTPUT")
+    if emit == "static-library":
+        raise InscriptionError("static library emission writes directly to -o OUTPUT")
     if emit in {"interface-json", "c-header"}:
         raise InscriptionError(f"emit mode {emit} is handled outside the MLIR artifact pipeline")
     raise InscriptionError(f"invalid emit mode {emit}")
