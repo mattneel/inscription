@@ -1,0 +1,11 @@
+union Token:
+  eof
+  operator symbol: u8 and precedence: u8
+
+score token token: Token gives i32:
+  match token:
+    Token.operator with symbol and precedence gives (symbol as i32) plus (precedence as i32)
+    otherwise gives 0
+
+main gives i32:
+  score token Token.operator with symbol be 10 and precedence be 5

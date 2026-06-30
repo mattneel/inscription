@@ -1,0 +1,14 @@
+record Point:
+  x: i32
+  y: i32
+
+union Event:
+  none
+  click point: Point and button: u8
+
+main gives i32:
+  let p be Point with x be 3 and y be 4
+  let event be Event.click with point be p and button be 2
+  match event:
+    Event.click with point and button gives point.x plus point.y plus (button as i32)
+    otherwise gives 0

@@ -1150,16 +1150,14 @@ class MlirEmitter:
         slots: list[tuple[str, ValueType]] = [("tag", union.tag_type)]
         for variant_name in union.variant_order:
             variant = union.variants[variant_name]
-            if variant.payload_type is None:
-                continue
-            assert variant.payload_name is not None
-            label = f"{variant.name}_{variant.payload_name}"
-            payload_type = variant.payload_type
-            if isinstance(payload_type, RecordType):
-                for field in self.record_fields(payload_type):
-                    slots.append((f"{label}_{field.name}", field.type_name))
-            else:
-                slots.append((label, payload_type))
+            for payload in variant.payload_fields:
+                label = f"{variant.name}_{payload.name}"
+                payload_type = payload.type_name
+                if isinstance(payload_type, RecordType):
+                    for field in self.record_fields(payload_type):
+                        slots.append((f"{label}_{field.name}", field.type_name))
+                else:
+                    slots.append((label, payload_type))
         return slots
 
     def union_values(self, union: UnionStorage) -> list[Value]:
@@ -1188,7 +1186,7 @@ class MlirEmitter:
             return UnionStorage(expected, dict(source.slots))
         if isinstance(expr, EnumCase):
             return self.emit_union_constructor(
-                UnionConstructor(expr.type_name, expr.case_name, None, None, expr.line),
+                UnionConstructor(expr.type_name, expr.case_name, (), expr.line),
                 env,
                 lines,
                 indent,
@@ -1238,17 +1236,15 @@ class MlirEmitter:
         for slot_name, slot_type in self.union_slot_types(expected):
             slots[slot_name] = self.zero_for_type(slot_type, lines, indent)
         slots["tag"] = self.emit_integer(variant.tag, union.tag_type, lines, indent)
-        if variant.payload_type is not None:
-            assert expr.payload_expr is not None
-            assert variant.payload_name is not None
-            label = f"{variant.name}_{variant.payload_name}"
-            payload_type = variant.payload_type
+        for field_init, payload in zip(expr.fields, variant.payload_fields, strict=True):
+            label = f"{variant.name}_{payload.name}"
+            payload_type = payload.type_name
             if isinstance(payload_type, RecordType):
-                record = self.emit_record_expr(expr.payload_expr, env, lines, indent, expected=payload_type)
+                record = self.emit_record_expr(field_init.expr, env, lines, indent, expected=payload_type)
                 for field in self.record_fields(payload_type):
                     slots[f"{label}_{field.name}"] = record.fields[field.name]
             else:
-                slots[label] = self.emit_expr(expr.payload_expr, env, lines, indent, expected=payload_type)
+                slots[label] = self.emit_expr(field_init.expr, env, lines, indent, expected=payload_type)
         return UnionStorage(expected, slots)
 
     def emit_union_when_expr(
@@ -1666,18 +1662,20 @@ class MlirEmitter:
         assert isinstance(scrutinee, UnionStorage)
         union = self.unions[scrutinee_type.name]
         variant = union.variants[pattern.variant_name]
-        if variant.payload_type is None or pattern.payload_name is None:
+        if not variant.payload_fields:
             return env
-        payload_type = variant.payload_type
-        label = f"{variant.name}_{variant.payload_name}"
-        if isinstance(payload_type, RecordType):
-            fields = {
-                field.name: scrutinee.slots[f"{label}_{field.name}"]
-                for field in self.record_fields(payload_type)
-            }
-            env[pattern.payload_name] = RecordStorage(payload_type, fields)
-        else:
-            env[pattern.payload_name] = scrutinee.slots[label]
+        for binding, payload in zip(pattern.bindings, variant.payload_fields, strict=True):
+            binding_name = binding.alias_name or binding.field_name
+            payload_type = payload.type_name
+            label = f"{variant.name}_{payload.name}"
+            if isinstance(payload_type, RecordType):
+                fields = {
+                    field.name: scrutinee.slots[f"{label}_{field.name}"]
+                    for field in self.record_fields(payload_type)
+                }
+                env[binding_name] = RecordStorage(payload_type, fields)
+            else:
+                env[binding_name] = scrutinee.slots[label]
         return env
 
     def emit_comparison(self, condition: Comparison, env: dict[str, EnvValue], lines: list[str], indent: str) -> Value:

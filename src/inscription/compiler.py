@@ -56,7 +56,10 @@ from .ast import (
     Unary,
     UnionConstructor,
     UnionDecl,
+    UnionFieldInit,
     UnionPattern,
+    UnionPatternBinding,
+    UnionPayloadField,
     UnionVariantDecl,
     ValueType,
     Variable,
@@ -313,8 +316,14 @@ def qualify_union_decl(union: UnionDecl, module_name: str, type_names: set[str],
         tuple(
             UnionVariantDecl(
                 variant.name,
-                variant.payload_name,
-                None if variant.payload_type is None else qualify_type(variant.payload_type, module_name, type_names, constant_names),
+                tuple(
+                    UnionPayloadField(
+                        field.name,
+                        qualify_type(field.type_name, module_name, type_names, constant_names),
+                        field.line,
+                    )
+                    for field in variant.payload_fields
+                ),
                 variant.line,
             )
             for variant in union.variants
@@ -463,7 +472,7 @@ def qualify_pattern(pattern, module_name: str, record_names: set[str], constant_
         return UnionPattern(
             qname(module_name, pattern.type_name) if pattern.type_name in record_names else pattern.type_name,
             pattern.variant_name,
-            pattern.payload_name,
+            tuple(UnionPatternBinding(binding.field_name, binding.alias_name, binding.line) for binding in pattern.bindings),
             pattern.line,
         )
     return qualify_expr(pattern, module_name, record_names, constant_names)
@@ -499,8 +508,14 @@ def qualify_expr(expr: Expr, module_name: str, record_names: set[str], constant_
         return UnionConstructor(
             type_name,
             expr.variant_name,
-            expr.payload_name,
-            None if expr.payload_expr is None else qualify_expr(expr.payload_expr, module_name, record_names, constant_names),
+            tuple(
+                UnionFieldInit(
+                    field.name,
+                    qualify_expr(field.expr, module_name, record_names, constant_names),
+                    field.line,
+                )
+                for field in expr.fields
+            ),
             expr.line,
         )
     if isinstance(expr, RecordConstructor):

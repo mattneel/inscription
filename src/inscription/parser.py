@@ -58,7 +58,10 @@ from .ast import (
     Unary,
     UnionConstructor,
     UnionDecl,
+    UnionFieldInit,
     UnionPattern,
+    UnionPatternBinding,
+    UnionPayloadField,
     UnionVariantDecl,
     ValueType,
     Variable,
@@ -394,15 +397,24 @@ class Parser:
                 break
             if current.is_header:
                 raise InscriptionError("malformed union variant declaration", current.number)
-            if " and " in current.text and re.match(r"[a-z][a-z0-9_]* [a-z][a-z0-9_]*:", current.text):
-                raise InscriptionError("union variants support at most one payload in v0.25", current.number)
-            payload_match = re.fullmatch(rf"([a-z][a-z0-9_]*) ([a-z][a-z0-9_]*):\s*({TYPE_PATTERN})", current.text)
-            if payload_match is not None:
+            payload_match = re.fullmatch(r"([a-z][a-z0-9_]*)(?:\s+(.+))?", current.text)
+            if payload_match is not None and payload_match.group(2) is not None:
+                payload_fields: list[UnionPayloadField] = []
+                for field_text in payload_match.group(2).split(" and "):
+                    field_match = re.fullmatch(rf"([a-z][a-z0-9_]*):\s*({TYPE_PATTERN})", field_text)
+                    if field_match is None:
+                        raise InscriptionError("malformed union variant declaration", current.number)
+                    payload_fields.append(
+                        UnionPayloadField(
+                            self._field_name(field_match.group(1), current.number),
+                            self._value_type(field_match.group(2), current.number),
+                            current.number,
+                        )
+                    )
                 variants.append(
                     UnionVariantDecl(
                         self._field_name(payload_match.group(1), current.number),
-                        self._field_name(payload_match.group(2), current.number),
-                        self._value_type(payload_match.group(3), current.number),
+                        tuple(payload_fields),
                         current.number,
                     )
                 )
@@ -413,8 +425,7 @@ class Parser:
                 variants.append(
                     UnionVariantDecl(
                         self._field_name(no_payload_match.group(1), current.number),
-                        None,
-                        None,
+                        (),
                         current.number,
                     )
                 )
@@ -1187,9 +1198,21 @@ class Parser:
         )
 
     def _parse_pattern(self, text: str, line: int):
-        match = re.fullmatch(r"((?:[A-Za-z][A-Za-z0-9_]*\.)*[A-Z][A-Za-z0-9_]*)\.([a-z][a-z0-9_]*)(?: with ([a-z][a-z0-9_]*))?", text.strip())
+        match = re.fullmatch(r"((?:[A-Za-z][A-Za-z0-9_]*\.)*[A-Z][A-Za-z0-9_]*)\.([a-z][a-z0-9_]*)(?: with (.+))?", text.strip())
         if match is not None and match.group(3) is not None:
-            return UnionPattern(match.group(1), self._field_name(match.group(2), line), self._field_name(match.group(3), line), line)
+            bindings: list[UnionPatternBinding] = []
+            for binding_text in match.group(3).split(" and "):
+                binding_match = re.fullmatch(r"([a-z][a-z0-9_]*)(?: as ([a-z][a-z0-9_]*))?", binding_text.strip())
+                if binding_match is None:
+                    raise InscriptionError("malformed union pattern", line)
+                bindings.append(
+                    UnionPatternBinding(
+                        self._field_name(binding_match.group(1), line),
+                        None if binding_match.group(2) is None else self._field_name(binding_match.group(2), line),
+                        line,
+                    )
+                )
+            return UnionPattern(match.group(1), self._field_name(match.group(2), line), tuple(bindings), line)
         return self._parse_expression(text, line)
 
     def _parse_expression(self, text: str, line: int) -> Expr:
@@ -1611,15 +1634,32 @@ class ExpressionParser:
         self.pop()
         if self.at_end():
             raise InscriptionError("union constructor payload is missing", self.line)
-        payload_name = self.pop()
-        if not NAME_RE.fullmatch(payload_name):
-            raise InscriptionError(f"invalid payload name '{payload_name}'", self.line)
-        if self.at_end() or self.pop() != "be":
-            raise InscriptionError("union constructor payload must use 'be'", self.line)
-        payload_tokens = self.consume_union_payload_tokens(stop)
-        if not payload_tokens:
-            raise InscriptionError("union constructor payload requires an expression", self.line)
-        return UnionConstructor(type_name, variant_name, payload_name, parse_expression_tokens(payload_tokens, self.line, self.phrases), self.line)
+        fields: list[UnionFieldInit] = []
+        while True:
+            payload_name = self.pop()
+            if not NAME_RE.fullmatch(payload_name):
+                raise InscriptionError(f"invalid payload name '{payload_name}'", self.line)
+            if self.at_end() or self.pop() != "be":
+                raise InscriptionError("union constructor payload must use 'be'", self.line)
+            payload_tokens = self.consume_union_payload_tokens(stop)
+            if not payload_tokens:
+                raise InscriptionError("union constructor payload requires an expression", self.line)
+            fields.append(
+                UnionFieldInit(
+                    payload_name,
+                    parse_expression_tokens(payload_tokens, self.line, self.phrases),
+                    self.line,
+                )
+            )
+            if not (
+                self.peek() == "and"
+                and self.pos + 2 < len(self.tokens)
+                and NAME_RE.fullmatch(self.tokens[self.pos + 1])
+                and self.tokens[self.pos + 2] == "be"
+            ):
+                break
+            self.pop()
+        return UnionConstructor(type_name, variant_name, tuple(fields), self.line)
 
     def try_parse_qualified_type_member(self) -> tuple[str, str] | None:
         if self.at_end():
@@ -1657,6 +1697,14 @@ class ExpressionParser:
                     break
                 depth -= 1
             elif depth == 0 and token in stop | {",", ")"}:
+                break
+            elif (
+                depth == 0
+                and token == "and"
+                and end + 2 < len(self.tokens)
+                and NAME_RE.fullmatch(self.tokens[end + 1])
+                and self.tokens[end + 2] == "be"
+            ):
                 break
             end += 1
         self.pos = end
@@ -1773,6 +1821,9 @@ class ExpressionParser:
                         if depth == 0:
                             break
                         depth -= 1
+                    elif depth == 0 and token == "and" and end + 2 < len(self.tokens) and NAME_RE.fullmatch(self.tokens[end + 1]) and self.tokens[end + 2] == "be":
+                        end += 1
+                        continue
                     elif depth == 0 and (token in stop or token in {",", "and", "or", "as", "is", "shifted", "bitwise"}):
                         break
                     end += 1

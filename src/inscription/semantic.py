@@ -56,6 +56,7 @@ from .ast import (
     UnionConstructor,
     UnionDecl,
     UnionPattern,
+    UnionPayloadField,
     UnionType,
     ValueType,
     Variable,
@@ -125,11 +126,17 @@ class EnumInfo:
 
 
 @dataclass(frozen=True)
+class UnionPayloadInfo:
+    name: str
+    type_name: ValueType
+    line: int
+
+
+@dataclass(frozen=True)
 class UnionVariantInfo:
     name: str
     tag: int
-    payload_name: str | None
-    payload_type: ValueType | None
+    payload_fields: tuple[UnionPayloadInfo, ...]
     line: int
 
 
@@ -302,16 +309,25 @@ def union_table(program: Program) -> dict[str, UnionInfo]:
         for tag, variant in enumerate(union.variants):
             if variant.name in variants:
                 raise InscriptionError(f"union {union.name} has duplicate variant {variant.name}", variant.line)
-            payload_type = None if variant.payload_type is None else resolve_named_value_type(variant.payload_type)
-            if isinstance(payload_type, BufferType):
-                raise InscriptionError("union payloads may not be buffer types in v0.25", variant.line)
-            if isinstance(payload_type, ArrayType):
-                raise InscriptionError("union payloads may not be array types in v0.25", variant.line)
-            if isinstance(payload_type, ViewType):
-                raise InscriptionError("union payloads may not be view types in v0.25", variant.line)
-            if isinstance(payload_type, UnionType):
-                raise InscriptionError("union payloads may not be union types in v0.25", variant.line)
-            variants[variant.name] = UnionVariantInfo(variant.name, tag, variant.payload_name, payload_type, variant.line)
+            payload_fields: list[UnionPayloadInfo] = []
+            payload_names: set[str] = set()
+            for field in variant.payload_fields:
+                if field.name in payload_names:
+                    raise InscriptionError(
+                        f"variant {union.name}.{variant.name} has duplicate payload field {field.name}", field.line
+                    )
+                payload_names.add(field.name)
+                payload_type = resolve_named_value_type(field.type_name)
+                if isinstance(payload_type, BufferType):
+                    raise InscriptionError("union payloads may not be buffer types in v0.26", field.line)
+                if isinstance(payload_type, ArrayType):
+                    raise InscriptionError("union payloads may not be array types in v0.26", field.line)
+                if isinstance(payload_type, ViewType):
+                    raise InscriptionError("union payloads may not be view types in v0.26", field.line)
+                if isinstance(payload_type, UnionType):
+                    raise InscriptionError("union payloads may not be union types in v0.26", field.line)
+                payload_fields.append(UnionPayloadInfo(field.name, payload_type, field.line))
+            variants[variant.name] = UnionVariantInfo(variant.name, tag, tuple(payload_fields), variant.line)
             order.append(variant.name)
         unions[union.name] = UnionInfo(union.name, variants, tuple(order), union.line)
     ACTIVE_UNIONS = unions
@@ -322,18 +338,19 @@ def validate_union_payloads(unions: dict[str, UnionInfo], records: dict[str, Rec
     for union in unions.values():
         for variant_name in union.variant_order:
             variant = union.variants[variant_name]
-            payload_type = variant.payload_type
-            if payload_type is None:
-                continue
-            if isinstance(payload_type, RecordType):
-                if payload_type.name not in records:
-                    raise InscriptionError(f"unknown type {payload_type.name}", variant.line)
-                continue
-            if isinstance(payload_type, EnumType):
-                continue
-            if isinstance(payload_type, str) and payload_type in SCALAR_TYPES:
-                continue
-            raise InscriptionError(f"union payload type {format_type(payload_type)} is not supported in v0.25", variant.line)
+            for payload in variant.payload_fields:
+                payload_type = payload.type_name
+                if isinstance(payload_type, RecordType):
+                    if payload_type.name not in records:
+                        raise InscriptionError(f"unknown type {payload_type.name}", payload.line)
+                    continue
+                if isinstance(payload_type, EnumType):
+                    continue
+                if isinstance(payload_type, str) and payload_type in SCALAR_TYPES:
+                    continue
+                raise InscriptionError(
+                    f"union payload type {format_type(payload_type)} is not supported in v0.26", payload.line
+                )
 
 
 def _primitive_constants_before_enum(program: Program, enum_line: int) -> dict[str, ConstValue]:
@@ -1985,8 +2002,11 @@ def infer_expr_type(
             if union is None:
                 raise InscriptionError(f"unknown type {expr.type_name}", expr.line)
             variant = _union_variant(union, expr.case_name, expr.line)
-            if variant.payload_name is not None:
-                raise InscriptionError(f"variant {union.name}.{variant.name} requires payload {variant.payload_name}", expr.line)
+            if variant.payload_fields:
+                raise InscriptionError(
+                    f"variant {union.name}.{variant.name} requires payload fields {_payload_names(variant)}",
+                    expr.line,
+                )
             actual = UnionType(union.name)
             if expected is not None:
                 require_type(actual, expected, expr.line)
@@ -2240,22 +2260,28 @@ def _infer_match_pattern_type(
     if isinstance(pattern, UnionPattern):
         union = _union_info(pattern.type_name, pattern.line)
         variant = _union_variant(union, pattern.variant_name, pattern.line)
-        if variant.payload_name is None:
-            if pattern.payload_name is not None:
-                raise InscriptionError(f"variant {union.name}.{variant.name} has no payload", pattern.line)
-        elif pattern.payload_name is None:
-            raise InscriptionError(f"variant {union.name}.{variant.name} pattern requires payload {variant.payload_name}", pattern.line)
-        elif pattern.payload_name != variant.payload_name:
-            raise InscriptionError(
-                f"variant {union.name}.{variant.name} payload is {variant.payload_name}, got {pattern.payload_name}",
-                pattern.line,
-            )
+        _validate_union_field_names(
+            union,
+            variant,
+            [binding.field_name for binding in pattern.bindings],
+            line=pattern.line,
+            context="pattern",
+        )
+        seen_bindings: set[str] = set()
+        for binding in pattern.bindings:
+            binding_name = binding.alias_name or binding.field_name
+            if binding_name in seen_bindings:
+                raise InscriptionError(f"match pattern has duplicate binding {binding_name}", binding.line)
+            seen_bindings.add(binding_name)
         return UnionType(union.name)
     if isinstance(scrutinee_type, UnionType) and isinstance(pattern, EnumCase):
         union = _union_info(pattern.type_name, pattern.line)
         variant = _union_variant(union, pattern.case_name, pattern.line)
-        if variant.payload_name is not None:
-            raise InscriptionError(f"variant {union.name}.{variant.name} pattern requires payload {variant.payload_name}", pattern.line)
+        if variant.payload_fields:
+            raise InscriptionError(
+                f"variant {union.name}.{variant.name} pattern requires payload fields {_payload_names(variant)}",
+                pattern.line,
+            )
         return UnionType(union.name)
     if isinstance(pattern, Integer):
         expected: ValueType | None
@@ -2301,15 +2327,20 @@ def _env_with_match_payload(
         return env
     union = _union_info(scrutinee_type.name, pattern.line)
     variant = _union_variant(union, pattern.variant_name, pattern.line)
-    if variant.payload_name is None or pattern.payload_name is None:
+    if not variant.payload_fields:
         return env
-    if pattern.payload_name in env:
-        raise InscriptionError(f"binding {pattern.payload_name} already exists", pattern.line)
-    if pattern.payload_name in constants:
-        raise InscriptionError(f"binding {pattern.payload_name} conflicts with constant {pattern.payload_name}", pattern.line)
-    assert variant.payload_type is not None
     scoped = dict(env)
-    scoped[pattern.payload_name] = variant.payload_type
+    for binding, payload in zip(pattern.bindings, variant.payload_fields, strict=True):
+        binding_name = binding.alias_name or binding.field_name
+        if binding_name in scoped:
+            raise InscriptionError(
+                f"match payload binding {binding_name} conflicts with existing binding {binding_name}", binding.line
+            )
+        if binding_name in constants:
+            raise InscriptionError(
+                f"match payload binding {binding_name} conflicts with existing binding {binding_name}", binding.line
+            )
+        scoped[binding_name] = payload.type_name
     return scoped
 
 
@@ -2324,13 +2355,15 @@ def _bindings_with_match_payload(
     union = _union_info(scrutinee_type.name, pattern.line)
     variant = _union_variant(union, pattern.variant_name, pattern.line)
     scoped = dict(bindings)
-    if variant.payload_name is None or pattern.payload_name is None:
+    if not variant.payload_fields:
         return scoped
-    if pattern.payload_name in constants:
-        raise InscriptionError(f"binding {pattern.payload_name} conflicts with constant {pattern.payload_name}", pattern.line)
-    _check_no_shadow(pattern.payload_name, pattern.line, scoped, kind="payload")
-    assert variant.payload_type is not None
-    scoped[pattern.payload_name] = Binding(variant.payload_type, "let", pattern.line)
+    for binding, payload in zip(pattern.bindings, variant.payload_fields, strict=True):
+        binding_name = binding.alias_name or binding.field_name
+        if binding_name in constants or binding_name in scoped:
+            raise InscriptionError(
+                f"match payload binding {binding_name} conflicts with existing binding {binding_name}", binding.line
+            )
+        scoped[binding_name] = Binding(payload.type_name, "let", binding.line)
     return scoped
 
 
@@ -2799,6 +2832,43 @@ def _union_variant(union: UnionInfo, variant_name: str, line: int) -> UnionVaria
     return variant
 
 
+def _payload_names(variant: UnionVariantInfo) -> str:
+    return ", ".join(field.name for field in variant.payload_fields)
+
+
+def _constructor_field_order_error(union: UnionInfo, variant: UnionVariantInfo, line: int) -> InscriptionError:
+    return InscriptionError(
+        f"variant {union.name}.{variant.name} payload fields must appear in declaration order: {_payload_names(variant)}",
+        line,
+    )
+
+
+def _validate_union_field_names(
+    union: UnionInfo,
+    variant: UnionVariantInfo,
+    provided_names: list[str],
+    *,
+    line: int,
+    context: Literal["constructor", "pattern"],
+) -> None:
+    declared_names = [field.name for field in variant.payload_fields]
+    if not declared_names:
+        if provided_names:
+            raise InscriptionError(f"variant {union.name}.{variant.name} has no payload", line)
+        return
+    if not provided_names:
+        noun = "pattern requires" if context == "pattern" else "requires"
+        raise InscriptionError(f"variant {union.name}.{variant.name} {noun} payload fields {_payload_names(variant)}", line)
+    for name in provided_names:
+        if name not in declared_names:
+            raise InscriptionError(f"variant {union.name}.{variant.name} has no payload field {name}", line)
+    if len(provided_names) < len(declared_names) and provided_names == declared_names[: len(provided_names)]:
+        noun = "pattern requires" if context == "pattern" else "requires"
+        raise InscriptionError(f"variant {union.name}.{variant.name} {noun} payload fields {_payload_names(variant)}", line)
+    if provided_names != declared_names:
+        raise _constructor_field_order_error(union, variant, line)
+
+
 def infer_union_constructor_type(
     expr: UnionConstructor,
     env: dict[str, ValueType],
@@ -2807,24 +2877,15 @@ def infer_union_constructor_type(
 ) -> UnionType:
     union = _union_info(expr.type_name, expr.line)
     variant = _union_variant(union, expr.variant_name, expr.line)
-    if variant.payload_name is None:
-        if expr.payload_name is not None or expr.payload_expr is not None:
-            raise InscriptionError(f"variant {union.name}.{variant.name} has no payload", expr.line)
-        return UnionType(union.name)
-    if expr.payload_name is None or expr.payload_expr is None:
-        raise InscriptionError(f"variant {union.name}.{variant.name} requires payload {variant.payload_name}", expr.line)
-    if expr.payload_name != variant.payload_name:
-        raise InscriptionError(
-            f"variant {union.name}.{variant.name} payload is {variant.payload_name}, got {expr.payload_name}",
-            expr.line,
-        )
-    assert variant.payload_type is not None
-    actual = _infer_declared_type(expr.payload_expr, variant.payload_type, env, functions, records)
-    if actual != variant.payload_type:
-        raise InscriptionError(
-            f"variant {union.name}.{variant.name} payload {variant.payload_name} must have type {format_type(variant.payload_type)}, got {format_type(actual)}",
-            expr.line,
-        )
+    provided_names = [field.name for field in expr.fields]
+    _validate_union_field_names(union, variant, provided_names, line=expr.line, context="constructor")
+    for field, payload in zip(expr.fields, variant.payload_fields, strict=True):
+        actual = _infer_declared_type(field.expr, payload.type_name, env, functions, records)
+        if actual != payload.type_name:
+            raise InscriptionError(
+                f"variant {union.name}.{variant.name} payload {payload.name} must have type {format_type(payload.type_name)}, got {format_type(actual)}",
+                field.line,
+            )
     return UnionType(union.name)
 
 

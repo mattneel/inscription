@@ -2175,6 +2175,7 @@ class CompilerTests(unittest.TestCase):
                 "highlight arrays gives i32:\n  let numbers be array of 2 i32 containing 1, 2\n  length of numbers\n",
                 "enum HighlightMode: u8:\n  idle be 0\n  active be 1\n\nhighlight enum mode: HighlightMode gives i32:\n  Mode.active as i32\n",
                 "union HighlightMaybe:\n  none\n  some value: i32\n\nhighlight union gives i32:\n  match HighlightMaybe.some with value be 1:\n    HighlightMaybe.some with value gives value\n    otherwise gives 0\n",
+                "union HighlightToken:\n  eof\n  operator symbol: u8 and precedence: u8\n\nhighlight token gives i32:\n  match HighlightToken.operator with symbol be 1 and precedence be 2:\n    HighlightToken.operator with symbol as op and precedence as prec gives (op as i32) plus (prec as i32)\n    otherwise gives 0\n",
             ]
         )
         html = highlight_source(source, output_format="html")
@@ -2946,10 +2947,10 @@ main gives i32:
         self.assertEqual(maybe["name"], "MaybeI32")
         self.assertEqual(maybe["kind"], "union")
         self.assertEqual(maybe["tag_type"], "i32")
-        self.assertEqual(maybe["variants"][0], {"name": "none", "tag": 0, "payload": None})
+        self.assertEqual(maybe["variants"][0], {"name": "none", "tag": 0, "payloads": []})
         self.assertEqual(
             maybe["variants"][1],
-            {"name": "some", "tag": 1, "payload": {"name": "value", "type": "i32"}},
+            {"name": "some", "tag": 1, "payloads": [{"name": "value", "type": "i32"}]},
         )
 
         module_json = subprocess.run(
@@ -3046,6 +3047,137 @@ main gives i32:
             self.assertEqual(exe_proc.returncode, 0, exe_proc.stderr)
             run = subprocess.run([str(executable)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False)
             self.assertEqual(run.returncode, 7, run.stderr)
+
+    def test_v026_multi_payload_unions_and_aliases(self):
+        basic = compile_source(self.fixture("union_multi_payload_basic.ins"))
+        self.assertIn(
+            "func.func @score_token(%token_tag: i32, %token_operator_symbol: i8, %token_operator_precedence: i8) -> i32",
+            basic,
+        )
+        self.assertIn("arith.extui %token_operator_symbol", basic)
+        self.assertIn("arith.extui %token_operator_precedence", basic)
+
+        alias = compile_source(self.fixture("union_payload_alias.ins"))
+        self.assertIn("arith.constant 10 : i8", alias)
+        self.assertIn("arith.addi", alias)
+
+        union_return = compile_source(self.fixture("union_multi_payload_return.ins"))
+        self.assertIn("func.func @make_operator() -> (i32, i64, i8, i8)", union_return)
+        self.assertIn("func.call @make_operator", union_return)
+
+        record_payload = compile_source(self.fixture("union_multi_record_payload.ins"))
+        self.assertIn("arith.constant 3 : i32", record_payload)
+        self.assertIn("arith.constant 4 : i32", record_payload)
+        self.assertIn("arith.constant 2 : i8", record_payload)
+
+        step_match = compile_source(self.fixture("union_multi_match_steps.ins"))
+        self.assertIn("func.func @main() -> i32", step_match)
+        self.assertIn("scf.if", step_match)
+
+        guarded = compile_source(self.fixture("union_multi_guarded_result.ins"))
+        self.assertIn("func.func @choose_token(%flag: i1) -> (i32, i8, i8)", guarded)
+        self.assertIn("scf.if", guarded)
+
+    def test_v026_multi_payload_union_module_interface_and_artifacts(self):
+        fixture = FIXTURES / "union_multi_module" / "main.ins"
+        mlir = compile_file(fixture, module_root=fixture.parent)
+        self.assertIn("func.func @Tokens__score_token(%token_tag: i32, %token_operator_symbol: i8, %token_operator_precedence: i8) -> i32", mlir)
+        try:
+            result = run_file(fixture, module_root=fixture.parent)
+        except ToolchainError:
+            result = None
+        if result is not None:
+            self.assertEqual(result.exit_status, 15)
+
+        env = {**os.environ, "PYTHONPATH": str(SRC)}
+        union_json = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "inscription",
+                "compile",
+                str(FIXTURES / "union_multi_payload_basic.ins"),
+                "--emit",
+                "interface-json",
+            ],
+            cwd=ROOT,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(union_json.returncode, 0, union_json.stderr)
+        payload = json.loads(union_json.stdout)
+        token = payload["modules"][0]["unions"][0]
+        self.assertEqual(token["name"], "Token")
+        self.assertEqual(token["variants"][0], {"name": "eof", "tag": 0, "payloads": []})
+        self.assertEqual(
+            token["variants"][1],
+            {
+                "name": "operator",
+                "tag": 1,
+                "payloads": [{"name": "symbol", "type": "u8"}, {"name": "precedence", "type": "u8"}],
+            },
+        )
+
+        try:
+            resolve_toolchain()
+        except ToolchainError:
+            return
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            llvm_path = tmp_path / "union_multi_payload_basic.ll"
+            llvm_proc = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "inscription",
+                    "compile",
+                    str(FIXTURES / "union_multi_payload_basic.ins"),
+                    "--emit",
+                    "llvm-ir",
+                    "--verify",
+                    "-o",
+                    str(llvm_path),
+                ],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(llvm_proc.returncode, 0, llvm_proc.stderr)
+            self.assertIn("define i32 @main", llvm_path.read_text())
+
+            try:
+                resolve_toolchain(require_executable=True)
+            except ToolchainError:
+                return
+            executable = tmp_path / "union_multi_payload_basic"
+            exe_proc = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "inscription",
+                    "compile",
+                    str(FIXTURES / "union_multi_payload_basic.ins"),
+                    "--emit",
+                    "executable",
+                    "-o",
+                    str(executable),
+                ],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(exe_proc.returncode, 0, exe_proc.stderr)
+            run = subprocess.run([str(executable)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False)
+            self.assertEqual(run.returncode, 15, run.stderr)
 
     def test_negative_diagnostics(self):
         cases = {
@@ -3862,17 +3994,17 @@ main gives i32:
                 "union MaybeI32:\n  none\n  none\n",
                 "union MaybeI32 has duplicate variant none",
             ),
-            "union multi payload unsupported": (
-                "union Bad:\n  many left: i32 and right: i32\n",
-                "union variants support at most one payload in v0.25",
+            "union duplicate payload field": (
+                "union Token:\n  operator symbol: u8 and symbol: u8\n",
+                "variant Token.operator has duplicate payload field symbol",
             ),
             "union payload buffer unsupported": (
                 "union Bad:\n  data bytes: buffer of 4 u8\n",
-                "union payloads may not be buffer types in v0.25",
+                "union payloads may not be buffer types in v0.26",
             ),
             "union payload union unsupported": (
                 "union MaybeI32:\n  none\n\nunion Bad:\n  nested value: MaybeI32\n",
-                "union payloads may not be union types in v0.25",
+                "union payloads may not be union types in v0.26",
             ),
             "unknown union variant constructor": (
                 "union MaybeI32:\n  none\n\nbad gives i32:\n  let maybe be MaybeI32.some with value be 1\n  0\n",
@@ -3880,7 +4012,7 @@ main gives i32:
             ),
             "union constructor missing payload": (
                 "union MaybeI32:\n  some value: i32\n\nbad gives i32:\n  let maybe be MaybeI32.some\n  0\n",
-                "variant MaybeI32.some requires payload value",
+                "variant MaybeI32.some requires payload fields value",
             ),
             "union constructor extra payload": (
                 "union MaybeI32:\n  none\n\nbad gives i32:\n  let maybe be MaybeI32.none with value be 1\n  0\n",
@@ -3888,7 +4020,19 @@ main gives i32:
             ),
             "union constructor wrong payload name": (
                 "union MaybeI32:\n  some value: i32\n\nbad gives i32:\n  let maybe be MaybeI32.some with other be 1\n  0\n",
-                "variant MaybeI32.some payload is value, got other",
+                "variant MaybeI32.some has no payload field other",
+            ),
+            "union constructor field order mismatch": (
+                "union Token:\n  operator symbol: u8 and precedence: u8\n\nbad gives i32:\n  let token be Token.operator with precedence be 5 and symbol be 10\n  0\n",
+                "variant Token.operator payload fields must appear in declaration order: symbol, precedence",
+            ),
+            "union constructor missing field": (
+                "union Token:\n  operator symbol: u8 and precedence: u8\n\nbad gives i32:\n  let token be Token.operator with symbol be 10\n  0\n",
+                "variant Token.operator requires payload fields symbol, precedence",
+            ),
+            "union constructor extra field": (
+                "union Token:\n  operator symbol: u8 and precedence: u8\n\nbad gives i32:\n  let token be Token.operator with symbol be 10 and precedence be 5 and associativity be 1\n  0\n",
+                "variant Token.operator has no payload field associativity",
             ),
             "union constructor payload type mismatch": (
                 "union MaybeI32:\n  some value: i32\n\nbad gives i32:\n  let maybe be MaybeI32.some with value be true\n  0\n",
@@ -3904,11 +4048,39 @@ main gives i32:
             ),
             "union match payload missing": (
                 "union MaybeI32:\n  some value: i32\n\nbad maybe: MaybeI32 gives i32:\n  match maybe:\n    MaybeI32.some gives 1\n    otherwise gives 0\n",
-                "variant MaybeI32.some pattern requires payload value",
+                "variant MaybeI32.some pattern requires payload fields value",
             ),
             "union match payload on payload-free variant": (
                 "union MaybeI32:\n  none\n\nbad maybe: MaybeI32 gives i32:\n  match maybe:\n    MaybeI32.none with value gives value\n    otherwise gives 0\n",
                 "variant MaybeI32.none has no payload",
+            ),
+            "union pattern field order mismatch": (
+                "union Token:\n  operator symbol: u8 and precedence: u8\n\nbad token: Token gives i32:\n  match token:\n    Token.operator with precedence and symbol gives 0\n    otherwise gives 1\n",
+                "variant Token.operator payload fields must appear in declaration order: symbol, precedence",
+            ),
+            "union pattern missing field": (
+                "union Token:\n  operator symbol: u8 and precedence: u8\n\nbad token: Token gives i32:\n  match token:\n    Token.operator with symbol gives 0\n    otherwise gives 1\n",
+                "variant Token.operator pattern requires payload fields symbol, precedence",
+            ),
+            "union pattern extra field": (
+                "union Token:\n  operator symbol: u8\n\nbad token: Token gives i32:\n  match token:\n    Token.operator with symbol and precedence gives 0\n    otherwise gives 1\n",
+                "variant Token.operator has no payload field precedence",
+            ),
+            "union pattern duplicate alias": (
+                "union Token:\n  operator symbol: u8 and precedence: u8\n\nbad token: Token gives i32:\n  match token:\n    Token.operator with symbol as x and precedence as x gives 0\n    otherwise gives 1\n",
+                "match pattern has duplicate binding x",
+            ),
+            "union payload binding shadows existing": (
+                "union Token:\n  operator symbol: u8 and precedence: u8\n\nbad token: Token gives i32:\n  let symbol be 1\n  match token:\n    Token.operator with symbol and precedence gives symbol\n    otherwise gives 0\n",
+                "match payload binding symbol conflicts with existing binding symbol",
+            ),
+            "union payload alias shadows existing": (
+                "union Token:\n  operator symbol: u8 and precedence: u8\n\nbad token: Token gives i32:\n  let op be 1\n  match token:\n    Token.operator with symbol as op and precedence as prec gives op\n    otherwise gives 0\n",
+                "match payload binding op conflicts with existing binding op",
+            ),
+            "union original field unavailable after alias": (
+                "union MaybeI32:\n  some value: i32\n\nbad maybe: MaybeI32 gives i32:\n  match maybe:\n    MaybeI32.some with value as n gives value\n    otherwise gives 0\n",
+                "unknown binding value",
             ),
             "union match duplicate variant": (
                 "union MaybeI32:\n  none\n\nbad maybe: MaybeI32 gives i32:\n  match maybe:\n    MaybeI32.none gives 1\n    MaybeI32.none gives 2\n    otherwise gives 0\n",

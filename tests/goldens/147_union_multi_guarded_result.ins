@@ -1,0 +1,15 @@
+union Token:
+  eof
+  operator symbol: u8 and precedence: u8
+
+choose token flag: i1 gives Token:
+  match flag:
+    true gives Token.operator with symbol be 10 and precedence be 5
+    false gives Token.eof
+    otherwise gives Token.eof
+
+main gives i32:
+  let token be choose token true
+  match token:
+    Token.operator with symbol and precedence gives (symbol as i32) plus (precedence as i32)
+    otherwise gives 0

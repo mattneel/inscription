@@ -196,13 +196,14 @@ def _union_json(union: UnionInfo, module_name: str | None) -> dict[str, Any]:
     variants = []
     for variant_name in union.variant_order:
         variant = union.variants[variant_name]
-        payload = None
-        if variant.payload_name is not None and variant.payload_type is not None:
-            payload = {
-                "name": variant.payload_name,
-                "type": _format_interface_type(variant.payload_type, module_name),
+        payloads = [
+            {
+                "name": payload.name,
+                "type": _format_interface_type(payload.type_name, module_name),
             }
-        variants.append({"name": variant.name, "tag": variant.tag, "payload": payload})
+            for payload in variant.payload_fields
+        ]
+        variants.append({"name": variant.name, "tag": variant.tag, "payloads": payloads})
     return {
         "name": _display_name(union.name, module_name),
         "kind": "union",

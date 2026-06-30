@@ -82,10 +82,16 @@ class EnumDecl:
 
 
 @dataclass(frozen=True)
+class UnionPayloadField:
+    name: str
+    type_name: "ValueType"
+    line: int
+
+
+@dataclass(frozen=True)
 class UnionVariantDecl:
     name: str
-    payload_name: str | None
-    payload_type: "ValueType | None"
+    payload_fields: tuple[UnionPayloadField, ...]
     line: int
 
 
@@ -232,11 +238,24 @@ class EnumCase:
 
 
 @dataclass(frozen=True)
+class UnionFieldInit:
+    name: str
+    expr: "Expr"
+    line: int
+
+
+@dataclass(frozen=True)
 class UnionConstructor:
     type_name: str
     variant_name: str
-    payload_name: str | None
-    payload_expr: "Expr | None"
+    fields: tuple[UnionFieldInit, ...]
+    line: int
+
+
+@dataclass(frozen=True)
+class UnionPatternBinding:
+    field_name: str
+    alias_name: str | None
     line: int
 
 
@@ -244,7 +263,7 @@ class UnionConstructor:
 class UnionPattern:
     type_name: str
     variant_name: str
-    payload_name: str | None
+    bindings: tuple[UnionPatternBinding, ...]
     line: int
 
 
