@@ -37,6 +37,10 @@ from .ast import (
     LengthOf,
     LayoutRead,
     LayoutWriteStmt,
+    MatchExpr,
+    MatchExprArm,
+    MatchStep,
+    MatchStepArm,
     OffsetOfField,
     Parameter,
     Program,
@@ -71,7 +75,7 @@ RESERVED = {
     "address", "alignment", "and", "arguments", "array", "as", "at", "be", "becomes", "bitwise", "buffer", "by", "call",
     "check", "constant", "containing", "divided", "do", "does", "each", "else", "equal", "export", "extern", "false", "filled", "float", "for", "from",
     "enum", "function", "gives", "greater", "f32", "f64", "i1", "i32", "i64", "if", "in", "index", "input", "into", "import",
-    "i8", "i16", "is", "layout", "length", "less", "let", "memref", "minus", "module", "no", "not", "or", "otherwise", "output", "packed", "parameters",
+    "i8", "i16", "is", "layout", "length", "less", "let", "match", "memref", "minus", "module", "no", "not", "or", "otherwise", "output", "packed", "parameters",
     "pointer", "plus", "print", "read", "remainder", "require", "return", "set", "shifted", "size", "takes", "than", "then", "times", "to",
     "track", "true", "u8", "u16", "u32", "u64", "up", "record", "view", "when", "while", "with", "write", "xor", "zero",
 }
@@ -218,12 +222,20 @@ class Parser:
                 enums.append(enum)
                 continue
             if line.text.startswith("constant "):
-                constants.append(self._parse_constant_decl(line))
-                index += 1
+                if line.is_header and re.fullmatch(rf"constant [a-z][a-z0-9_]*:\s*{TYPE_REF_PATTERN} be match .+", line.text):
+                    constant, index = self._parse_constant_match_decl(index)
+                    constants.append(constant)
+                else:
+                    constants.append(self._parse_constant_decl(line))
+                    index += 1
                 continue
             if line.text.startswith("check "):
-                checks.append(self._parse_check_stmt(line))
-                index += 1
+                if line.is_header and line.text.startswith("check match "):
+                    check, index = self._parse_check_match_stmt(index)
+                    checks.append(check)
+                else:
+                    checks.append(self._parse_check_stmt(line))
+                    index += 1
                 continue
             if line.text.startswith("extern "):
                 template, return_type, external_symbol = self._parse_extern_decl(line)
@@ -363,15 +375,43 @@ class Parser:
         name = self._name(raw_name, line.number) if NAME_RE.fullmatch(raw_name) else raw_name
         return ConstantDecl(name, self._return_type(match.group(2), line.number), self._parse_expression(match.group(3), line.number), line.number)
 
+    def _parse_constant_match_decl(self, index: int) -> tuple[ConstantDecl, int]:
+        line = self.lines[index]
+        match = re.fullmatch(rf"constant ([A-Za-z][A-Za-z0-9_]*):\s*({TYPE_PATTERN}) be match (.+)", line.text)
+        if not line.is_header or match is None:
+            raise InscriptionError("malformed constant declaration", line.number)
+        raw_name = match.group(1)
+        name = self._name(raw_name, line.number) if NAME_RE.fullmatch(raw_name) else raw_name
+        expr, next_index = self._parse_match_expression(index, scrutinee_text=match.group(3))
+        return ConstantDecl(name, self._return_type(match.group(2), line.number), expr, line.number), next_index
+
     def _parse_check_stmt(self, line: Line) -> CheckStmt:
         if line.is_header:
             raise InscriptionError("malformed check", line.number)
+        if not line.text.startswith("check "):
+            raise InscriptionError("malformed check", line.number)
         return CheckStmt(self._parse_expression(line.text[len("check ") :], line.number), line.number)
+
+    def _parse_check_match_stmt(self, index: int) -> tuple[CheckStmt, int]:
+        line = self.lines[index]
+        if not line.is_header or not line.text.startswith("check match "):
+            raise InscriptionError("malformed check", line.number)
+        expr, next_index = self._parse_match_expression(index, scrutinee_text=line.text[len("check match ") :])
+        return CheckStmt(expr, line.number), next_index
 
     def _parse_require_stmt(self, line: Line) -> RequireStmt:
         if line.is_header:
             raise InscriptionError("malformed require", line.number)
+        if not line.text.startswith("require "):
+            raise InscriptionError("malformed require", line.number)
         return RequireStmt(self._parse_expression(line.text[len("require ") :], line.number), line.number)
+
+    def _parse_require_match_stmt(self, index: int) -> tuple[RequireStmt, int]:
+        line = self.lines[index]
+        if not line.is_header or not line.text.startswith("require match "):
+            raise InscriptionError("malformed require", line.number)
+        expr, next_index = self._parse_match_expression(index, scrutinee_text=line.text[len("require match ") :])
+        return RequireStmt(expr, line.number), next_index
 
     def _looks_like_phrase_header(self, line: Line) -> bool:
         return line.is_header and re.fullmatch(r".+? (?:gives .+|does)", line.text) is not None
@@ -514,6 +554,11 @@ class Parser:
             current = self.lines[index]
             if self._looks_like_top_level_item(current):
                 break
+            if self._is_match_expression_start(index):
+                if value_lines:
+                    raise InscriptionError("value block can contain only one unconditional expression", current.number)
+                value_lines, index = self._collect_match_expression_lines(index)
+                continue
             if self._is_gives_body_item_start(current, index):
                 if value_lines:
                     if current.text.startswith("let "):
@@ -531,6 +576,8 @@ class Parser:
         return [*body_items, ReturnStmt(self._parse_value_block(value_lines), value_lines[-1].number)], index
 
     def _is_gives_body_item_start(self, line: Line, index: int) -> bool:
+        if line.is_header and line.text.startswith("match ") and self._is_match_expression_start(index):
+            return False
         if self._is_body_item_start(line, include_phrase_calls=False):
             return True
         call = self._parse_phrase_call_expr(line)
@@ -559,19 +606,27 @@ class Parser:
             or line.text.startswith("track ")
             or self._layout_write_match(line) is not None
             or self._field_assignment_match(line) is not None
+            or self._field_match_assignment_match(line) is not None
             or self._buffer_store_match(line) is not None
+            or self._buffer_match_store_match(line) is not None
             or self._assignment_match(line) is not None
+            or self._match_assignment_match(line) is not None
             or (line.is_header and line.text.startswith("if "))
             or (line.is_header and line.text.startswith("while "))
             or (line.is_header and line.text.startswith("for "))
+            or (line.is_header and line.text.startswith("match "))
             or (include_phrase_calls and self._parse_phrase_call_expr(line) is not None)
         )
 
     def _parse_body_item(self, index: int, *, include_phrase_calls: bool) -> tuple[BodyStmt, int]:
         current = self.lines[index]
         if current.text.startswith("check "):
+            if current.is_header and current.text.startswith("check match "):
+                return self._parse_check_match_stmt(index)
             return self._parse_check_stmt(current), index + 1
         if current.text.startswith("require "):
+            if current.is_header and current.text.startswith("require match "):
+                return self._parse_require_match_stmt(index)
             if include_phrase_calls:
                 call = self._parse_phrase_call_expr(current)
                 target = self._template_for_call(call) if call is not None else None
@@ -579,6 +634,8 @@ class Parser:
                     return CallStmt(call, current.number), index + 1
             return self._parse_require_stmt(current), index + 1
         if current.text.startswith("let "):
+            if current.is_header and " be match " in current.text:
+                return self._parse_let_match(index)
             return self._parse_let(current), index + 1
         if current.text.startswith("track "):
             raise InscriptionError("`track` is not valid Inscription syntax; use `let name be ...`", current.number)
@@ -588,18 +645,29 @@ class Parser:
         field_assignment = self._field_assignment_match(current)
         if field_assignment is not None:
             return self._parse_field_assignment(current, field_assignment), index + 1
+        field_match_assignment = self._field_match_assignment_match(current)
+        if field_match_assignment is not None:
+            return self._parse_field_match_assignment(index, field_match_assignment)
         buffer_store = self._buffer_store_match(current)
         if buffer_store is not None:
             return self._parse_buffer_store(current, buffer_store), index + 1
+        buffer_match_store = self._buffer_match_store_match(current)
+        if buffer_match_store is not None:
+            return self._parse_buffer_match_store(index, buffer_match_store)
         assignment = self._assignment_match(current)
         if assignment is not None:
             return self._parse_assignment(current, assignment), index + 1
+        match_assignment = self._match_assignment_match(current)
+        if match_assignment is not None:
+            return self._parse_match_assignment(index, match_assignment)
         if current.is_header and current.text.startswith("if "):
             return self._parse_if(index)
         if current.is_header and current.text.startswith("while "):
             return self._parse_while(index)
         if current.is_header and current.text.startswith("for "):
             return self._parse_for(index)
+        if current.is_header and current.text.startswith("match "):
+            return self._parse_match_step(index)
         if include_phrase_calls:
             call = self._parse_phrase_call_expr(current)
             if call is not None:
@@ -692,7 +760,133 @@ class Parser:
             body.append(item)
         return body, body_index
 
+    def _is_match_expression_start(self, index: int) -> bool:
+        if index >= len(self.lines):
+            return False
+        line = self.lines[index]
+        if not line.is_header or not line.text.startswith("match "):
+            return False
+        first_child_index = index + 1
+        if first_child_index >= len(self.lines) or self.lines[first_child_index].indent <= line.indent:
+            return False
+        first_child = self.lines[first_child_index]
+        return (not first_child.is_header) and (" gives " in first_child.text or first_child.text.startswith("otherwise gives "))
+
+    def _collect_match_expression_lines(self, index: int) -> tuple[list[Line], int]:
+        header = self.lines[index]
+        lines = [header]
+        current_index = index + 1
+        while current_index < len(self.lines):
+            current = self.lines[current_index]
+            if current.indent <= header.indent:
+                break
+            lines.append(current)
+            current_index += 1
+        return lines, current_index
+
+    def _parse_match_expression(self, index: int, *, scrutinee_text: str | None = None) -> tuple[MatchExpr, int]:
+        header = self.lines[index]
+        if not header.is_header:
+            raise InscriptionError("malformed match expression", header.number)
+        if scrutinee_text is None:
+            match = re.fullmatch(r"match (.+)", header.text)
+            if match is None:
+                raise InscriptionError("malformed match expression", header.number)
+            scrutinee_text = match.group(1)
+        scrutinee = self._parse_expression(scrutinee_text, header.number)
+        arms: list[MatchExprArm] = []
+        otherwise: Expr | None = None
+        current_index = index + 1
+        while current_index < len(self.lines):
+            current = self.lines[current_index]
+            if current.indent <= header.indent:
+                break
+            if current.is_header:
+                raise InscriptionError("match expression arms must use `pattern gives expression`", current.number)
+            if current.text.startswith("otherwise gives "):
+                if otherwise is not None:
+                    raise InscriptionError("match expression can contain only one otherwise", current.number)
+                otherwise = self._parse_expression(current.text[len("otherwise gives ") :], current.number)
+                current_index += 1
+                if current_index < len(self.lines) and self.lines[current_index].indent > header.indent:
+                    raise InscriptionError("otherwise must be the final match arm", self.lines[current_index].number)
+                break
+            if otherwise is not None:
+                raise InscriptionError("otherwise must be the final match arm", current.number)
+            if " gives " not in current.text:
+                raise InscriptionError("match expression arms must use `pattern gives expression`", current.number)
+            pattern_text, expr_text = current.text.split(" gives ", 1)
+            arms.append(
+                MatchExprArm(
+                    self._parse_expression(pattern_text.strip(), current.number),
+                    self._parse_expression(expr_text.strip(), current.number),
+                    current.number,
+                )
+            )
+            current_index += 1
+        if otherwise is None:
+            raise InscriptionError("match expression requires otherwise", header.number)
+        return MatchExpr(scrutinee, tuple(arms), otherwise, header.number), current_index
+
+    def _parse_match_step(self, index: int) -> tuple[MatchStep, int]:
+        header = self.lines[index]
+        match = re.fullmatch(r"match (.+)", header.text)
+        if not header.is_header or match is None:
+            raise InscriptionError("malformed match block", header.number)
+        scrutinee = self._parse_expression(match.group(1), header.number)
+        arms: list[MatchStepArm] = []
+        otherwise_body: tuple[BodyStmt, ...] | None = None
+        current_index = index + 1
+        while current_index < len(self.lines):
+            current = self.lines[current_index]
+            if current.indent <= header.indent:
+                break
+            if not current.is_header:
+                raise InscriptionError("match block arms must use `pattern:`", current.number)
+            if current.text == "otherwise":
+                if otherwise_body is not None:
+                    raise InscriptionError("match block can contain only one otherwise", current.number)
+                body, next_index = self._parse_step_block(current_index + 1, current.indent, "match arm")
+                if not body:
+                    raise InscriptionError("match arm must contain at least one step", current.number)
+                otherwise_body = tuple(body)
+                current_index = next_index
+                if current_index < len(self.lines) and self.lines[current_index].indent > header.indent:
+                    raise InscriptionError("otherwise must be the final match arm", self.lines[current_index].number)
+                break
+            if otherwise_body is not None:
+                raise InscriptionError("otherwise must be the final match arm", current.number)
+            body, next_index = self._parse_step_block(current_index + 1, current.indent, "match arm")
+            if not body:
+                raise InscriptionError("match arm must contain at least one step", current.number)
+            arms.append(MatchStepArm(self._parse_expression(current.text, current.number), tuple(body), current.number))
+            current_index = next_index
+        if otherwise_body is None:
+            raise InscriptionError("match block requires otherwise", header.number)
+        return MatchStep(scrutinee, tuple(arms), otherwise_body, header.number), current_index
+
+    def _parse_let_match(self, index: int) -> tuple[SetStmt, int]:
+        line = self.lines[index]
+        match = re.fullmatch(rf"let ([a-z][a-z0-9_]*)(?::\s*({TYPE_REF_PATTERN}))? be match (.+)", line.text)
+        if not line.is_header or match is None:
+            raise InscriptionError("malformed let binding", line.number)
+        expr, next_index = self._parse_match_expression(index, scrutinee_text=match.group(3))
+        return (
+            SetStmt(
+                self._name(match.group(1), line.number),
+                self._return_type(match.group(2), line.number) if match.group(2) is not None else None,
+                expr,
+                line.number,
+            ),
+            next_index,
+        )
+
     def _parse_value_block(self, lines: list[Line]) -> Expr:
+        if len(lines) > 1 and lines[0].is_header and lines[0].text.startswith("match "):
+            expr, next_index = self._parse_match_expression_from_lines(lines)
+            if next_index != len(lines):
+                raise InscriptionError("unconditional value expression must be the final value block line", lines[next_index].number)
+            return expr
         cases: list[WhenCase] = []
         otherwise: Expr | None = None
         unconditional: Expr | None = None
@@ -733,6 +927,14 @@ class Parser:
         if unconditional is None:
             raise InscriptionError("value block must evaluate to an expression", lines[-1].number)
         return unconditional
+
+    def _parse_match_expression_from_lines(self, lines: list[Line]) -> tuple[MatchExpr, int]:
+        original_lines = self.lines
+        self.lines = lines
+        try:
+            return self._parse_match_expression(0)
+        finally:
+            self.lines = original_lines
 
     def _parse_let(self, line: Line) -> SetStmt | BufferBinding | ArrayBinding | ViewBinding:
         buffer_match = re.fullmatch(
@@ -834,15 +1036,30 @@ class Parser:
             return None
         return re.fullmatch(r"([a-z][a-z0-9_]*) becomes (.+)", line.text)
 
+    def _match_assignment_match(self, line: Line) -> re.Match[str] | None:
+        if not line.is_header:
+            return None
+        return re.fullmatch(r"([a-z][a-z0-9_]*) becomes match (.+)", line.text)
+
     def _buffer_store_match(self, line: Line) -> re.Match[str] | None:
         if line.is_header:
             return None
         return re.fullmatch(r"([a-z][a-z0-9_]*) at (.+) becomes (.+)", line.text)
 
+    def _buffer_match_store_match(self, line: Line) -> re.Match[str] | None:
+        if not line.is_header:
+            return None
+        return re.fullmatch(r"([a-z][a-z0-9_]*) at (.+) becomes match (.+)", line.text)
+
     def _field_assignment_match(self, line: Line) -> re.Match[str] | None:
         if line.is_header:
             return None
         return re.fullmatch(r"([a-z][a-z0-9_]*)\.([a-z][a-z0-9_]*) becomes (.+)", line.text)
+
+    def _field_match_assignment_match(self, line: Line) -> re.Match[str] | None:
+        if not line.is_header:
+            return None
+        return re.fullmatch(r"([a-z][a-z0-9_]*)\.([a-z][a-z0-9_]*) becomes match (.+)", line.text)
 
     def _layout_write_match(self, line: Line) -> re.Match[str] | None:
         if line.is_header:
@@ -856,6 +1073,11 @@ class Parser:
             line.number,
         )
 
+    def _parse_match_assignment(self, index: int, match: re.Match[str]) -> tuple[AssignStmt, int]:
+        line = self.lines[index]
+        expr, next_index = self._parse_match_expression(index, scrutinee_text=match.group(2))
+        return AssignStmt(self._name(match.group(1), line.number), expr, line.number), next_index
+
     def _parse_buffer_store(self, line: Line, match: re.Match[str]) -> BufferStoreStmt:
         return BufferStoreStmt(
             self._name(match.group(1), line.number),
@@ -864,12 +1086,38 @@ class Parser:
             line.number,
         )
 
+    def _parse_buffer_match_store(self, index: int, match: re.Match[str]) -> tuple[BufferStoreStmt, int]:
+        line = self.lines[index]
+        expr, next_index = self._parse_match_expression(index, scrutinee_text=match.group(3))
+        return (
+            BufferStoreStmt(
+                self._name(match.group(1), line.number),
+                self._parse_expression(match.group(2), line.number),
+                expr,
+                line.number,
+            ),
+            next_index,
+        )
+
     def _parse_field_assignment(self, line: Line, match: re.Match[str]) -> FieldAssignStmt:
         return FieldAssignStmt(
             self._name(match.group(1), line.number),
             self._field_name(match.group(2), line.number),
             self._parse_expression(match.group(3), line.number),
             line.number,
+        )
+
+    def _parse_field_match_assignment(self, index: int, match: re.Match[str]) -> tuple[FieldAssignStmt, int]:
+        line = self.lines[index]
+        expr, next_index = self._parse_match_expression(index, scrutinee_text=match.group(3))
+        return (
+            FieldAssignStmt(
+                self._name(match.group(1), line.number),
+                self._field_name(match.group(2), line.number),
+                expr,
+                line.number,
+            ),
+            next_index,
         )
 
     def _parse_layout_write(self, line: Line, match: re.Match[str]) -> LayoutWriteStmt:

@@ -36,6 +36,10 @@ from .ast import (
     LengthOf,
     LayoutRead,
     LayoutWriteStmt,
+    MatchExpr,
+    MatchExprArm,
+    MatchStep,
+    MatchStepArm,
     OffsetOfField,
     Parameter,
     Program,
@@ -410,6 +414,20 @@ def qualify_stmt(stmt: Stmt, module_name: str, record_names: set[str], constant_
             tuple(qualify_stmt(s, module_name, record_names, constant_names) for s in stmt.else_body),
             stmt.line,
         )
+    if isinstance(stmt, MatchStep):
+        return MatchStep(
+            qualify_expr(stmt.scrutinee, module_name, record_names, constant_names),
+            tuple(
+                MatchStepArm(
+                    qualify_expr(arm.pattern, module_name, record_names, constant_names),
+                    tuple(qualify_stmt(s, module_name, record_names, constant_names) for s in arm.body),
+                    arm.line,
+                )
+                for arm in stmt.arms
+            ),
+            tuple(qualify_stmt(s, module_name, record_names, constant_names) for s in stmt.otherwise_body),
+            stmt.line,
+        )
     if isinstance(stmt, ReturnStmt):
         return ReturnStmt(qualify_expr(stmt.expr, module_name, record_names, constant_names), stmt.line)
     raise AssertionError(stmt)  # pragma: no cover
@@ -460,6 +478,20 @@ def qualify_expr(expr: Expr, module_name: str, record_names: set[str], constant_
     if isinstance(expr, WhenExpr):
         return WhenExpr(
             tuple(WhenCase(qualify_expr(case.expr, module_name, record_names, constant_names), qualify_expr(case.condition, module_name, record_names, constant_names), case.line) for case in expr.cases),
+            qualify_expr(expr.otherwise, module_name, record_names, constant_names),
+            expr.line,
+        )
+    if isinstance(expr, MatchExpr):
+        return MatchExpr(
+            qualify_expr(expr.scrutinee, module_name, record_names, constant_names),
+            tuple(
+                MatchExprArm(
+                    qualify_expr(arm.pattern, module_name, record_names, constant_names),
+                    qualify_expr(arm.expr, module_name, record_names, constant_names),
+                    arm.line,
+                )
+                for arm in expr.arms
+            ),
             qualify_expr(expr.otherwise, module_name, record_names, constant_names),
             expr.line,
         )

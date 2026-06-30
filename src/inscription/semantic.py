@@ -39,6 +39,8 @@ from .ast import (
     LayoutInfo,
     LayoutRead,
     LayoutWriteStmt,
+    MatchExpr,
+    MatchStep,
     OffsetOfField,
     Parameter,
     Program,
@@ -728,6 +730,9 @@ def _check_body_stmt(
     if isinstance(stmt, IfStmt):
         _check_if(stmt, bindings, functions, records, constants)
         return
+    if isinstance(stmt, MatchStep):
+        _check_match_step(stmt, bindings, functions, records, constants)
+        return
     raise AssertionError(stmt)  # pragma: no cover
 
 
@@ -1098,6 +1103,34 @@ def _check_if(
     else_scope = dict(bindings)
     for body_stmt in stmt.else_body:
         _check_body_stmt(body_stmt, else_scope, functions, records, constants)
+
+
+def _check_match_step(
+    stmt: MatchStep,
+    bindings: dict[str, Binding],
+    functions: dict[str, Function],
+    records: dict[str, RecordDecl],
+    constants: dict[str, ConstValue],
+) -> None:
+    env = {**_constant_env_types(constants), **_env_types(bindings)}
+    scrutinee_type = infer_match_scrutinee_type(stmt.scrutinee, env, functions, records, constants=constants)
+    _require_match_scrutinee_type(scrutinee_type, stmt.line)
+    if not stmt.arms:
+        raise InscriptionError("match block requires at least one pattern arm", stmt.line)
+    _check_match_patterns(tuple(arm.pattern for arm in stmt.arms), scrutinee_type, env, functions, records, constants)
+
+    for arm in stmt.arms:
+        if not arm.body:
+            raise InscriptionError("match arm must contain at least one step", arm.line)
+        arm_scope = dict(bindings)
+        for body_stmt in arm.body:
+            _check_body_stmt(body_stmt, arm_scope, functions, records, constants)
+
+    if not stmt.otherwise_body:
+        raise InscriptionError("match arm must contain at least one step", stmt.line)
+    otherwise_scope = dict(bindings)
+    for body_stmt in stmt.otherwise_body:
+        _check_body_stmt(body_stmt, otherwise_scope, functions, records, constants)
 
 
 def _lookup_phrase(name: str, line: int, functions: dict[str, Function]) -> Function:
@@ -1587,7 +1620,27 @@ def evaluate_const_expr(
         left = evaluate_const_expr(expr.left, env, functions, records, constants, expected=operand_type)
         right = evaluate_const_expr(expr.right, env, functions, records, constants, expected=operand_type)
         return ConstValue("i1", evaluate_comparison(expr.pred, left.value, right.value, operand_type))
+    if isinstance(expr, MatchExpr):
+        infer_match_expression_type(expr, env, functions, records, expected=type_name, constants=constants)
+        scrutinee_type = infer_expr_type(expr.scrutinee, env, functions, records, constants=constants)
+        scrutinee = evaluate_const_expr(expr.scrutinee, env, functions, records, constants, expected=scrutinee_type)
+        result_type = type_name
+        for arm in expr.arms:
+            pattern = evaluate_const_expr(arm.pattern, env, functions, records, constants, expected=scrutinee_type)
+            if _const_values_equal(scrutinee, pattern):
+                return evaluate_const_expr(arm.expr, env, functions, records, constants, expected=result_type)
+        return evaluate_const_expr(expr.otherwise, env, functions, records, constants, expected=result_type)
     raise CompileTimeEvaluationError("expression is not compile-time evaluable", getattr(expr, "line", None))
+
+
+def _const_values_equal(left: ConstValue, right: ConstValue) -> bool:
+    if left.type_name != right.type_name:
+        return False
+    if left.type_name == "i1":
+        return bool(left.value) == bool(right.value)
+    if is_float_type(left.type_name):
+        return float(left.value) == float(right.value)
+    return int(left.value) == int(right.value)
 
 
 def normalize_integer(value: int, type_name: TypeName) -> int:
@@ -1905,7 +1958,144 @@ def infer_expr_type(
                 expr.line,
             )
         return expected
+    if isinstance(expr, MatchExpr):
+        return infer_match_expression_type(expr, env, functions, records, expected=expected, constants=constants)
     raise AssertionError(expr)  # pragma: no cover
+
+
+def infer_match_expression_type(
+    expr: MatchExpr,
+    env: dict[str, ValueType],
+    functions: dict[str, Function],
+    records: dict[str, RecordDecl],
+    *,
+    expected: ValueType | None = None,
+    constants: dict[str, ConstValue] | None = None,
+) -> ValueType:
+    constants = constants or {}
+    scrutinee_type = infer_match_scrutinee_type(expr.scrutinee, env, functions, records, constants=constants)
+    _require_match_scrutinee_type(scrutinee_type, expr.line)
+    if not expr.arms:
+        raise InscriptionError("match expression requires at least one pattern arm", expr.line)
+    _check_match_patterns(tuple(arm.pattern for arm in expr.arms), scrutinee_type, env, functions, records, constants)
+
+    result_type = expected if expected is not None else (
+        infer_expr_type(expr.arms[0].expr, env, functions, records, constants=constants)
+        if expr.arms
+        else infer_expr_type(expr.otherwise, env, functions, records, constants=constants)
+    )
+    if isinstance(result_type, BufferType | ArrayType | ViewType):
+        raise InscriptionError(f"match expression cannot return {format_type(result_type)}", expr.line)
+    for arm in expr.arms:
+        actual = _infer_declared_type(arm.expr, result_type, env, functions, records, constants)
+        if actual != result_type:
+            raise InscriptionError(
+                f"match expression arms must have matching types, got {format_type(result_type)} and {format_type(actual)}",
+                arm.line,
+            )
+    otherwise_type = _infer_declared_type(expr.otherwise, result_type, env, functions, records, constants)
+    if otherwise_type != result_type:
+        raise InscriptionError(
+            f"match expression arms must have matching types, got {format_type(result_type)} and {format_type(otherwise_type)}",
+            expr.line,
+        )
+    return result_type
+
+
+def infer_match_scrutinee_type(
+    expr: Expr,
+    env: dict[str, ValueType],
+    functions: dict[str, Function],
+    records: dict[str, RecordDecl],
+    *,
+    constants: dict[str, ConstValue] | None = None,
+) -> ValueType:
+    if isinstance(expr, Variable) and expr.name in env:
+        return env[expr.name]
+    return infer_expr_type(expr, env, functions, records, constants=constants)
+
+
+def _require_match_scrutinee_type(type_name: ValueType, line: int) -> None:
+    if type_name == "i1" or is_integer_type(type_name) or isinstance(type_name, EnumType):
+        return
+    raise InscriptionError(f"match scrutinee must be i1, integer, or enum, got {format_type(type_name)}", line)
+
+
+def _check_match_patterns(
+    patterns: tuple[Expr, ...],
+    scrutinee_type: ValueType,
+    env: dict[str, ValueType],
+    functions: dict[str, Function],
+    records: dict[str, RecordDecl],
+    constants: dict[str, ConstValue],
+) -> None:
+    seen: dict[tuple[str, int | bool], str] = {}
+    for pattern in patterns:
+        pattern_type = _infer_match_pattern_type(pattern, scrutinee_type, env, functions, records, constants)
+        if pattern_type != scrutinee_type:
+            raise InscriptionError(
+                f"match pattern must have type {format_type(scrutinee_type)}, got {format_type(pattern_type)}",
+                getattr(pattern, "line", None),
+            )
+        try:
+            value = evaluate_const_expr(pattern, env, functions, records, constants, expected=scrutinee_type)
+        except CompileTimeEvaluationError as exc:
+            raise InscriptionError("match pattern must be compile-time evaluable", exc.line or getattr(pattern, "line", None)) from exc
+        key = _match_pattern_key(value)
+        label = _match_pattern_label(pattern, value)
+        if key in seen:
+            raise InscriptionError(f"match has duplicate pattern {label}", getattr(pattern, "line", None))
+        seen[key] = label
+
+
+def _infer_match_pattern_type(
+    pattern: Expr,
+    scrutinee_type: ValueType,
+    env: dict[str, ValueType],
+    functions: dict[str, Function],
+    records: dict[str, RecordDecl],
+    constants: dict[str, ConstValue],
+) -> ValueType:
+    if isinstance(pattern, Integer):
+        expected: ValueType | None
+        if isinstance(scrutinee_type, EnumType):
+            expected = scrutinee_type.underlying_type
+        elif is_integer_type(scrutinee_type):
+            expected = scrutinee_type
+        else:
+            expected = None
+        return infer_expr_type(pattern, env, functions, records, expected=expected, constants=constants)
+    if isinstance(pattern, Variable):
+        if pattern.name not in constants:
+            raise InscriptionError("match pattern must be compile-time evaluable", pattern.line)
+        return constants[pattern.name].type_name
+    if isinstance(pattern, FieldAccess):
+        qualified_constant = f"{pattern.name}.{pattern.field}"
+        if qualified_constant in constants and pattern.name not in env:
+            return constants[qualified_constant].type_name
+    return infer_expr_type(pattern, env, functions, records, constants=constants)
+
+
+def _match_pattern_key(value: ConstValue) -> tuple[str, int | bool]:
+    if value.type_name == "i1":
+        return ("i1", bool(value.value))
+    if isinstance(value.type_name, EnumType):
+        return (value.type_name.name, int(value.value))
+    return (format_type(value.type_name), int(value.value))
+
+
+def _match_pattern_label(pattern: Expr, value: ConstValue) -> str:
+    if isinstance(pattern, EnumCase):
+        return f"{pattern.type_name}.{pattern.case_name}"
+    if value.type_name == "i1":
+        return "true" if bool(value.value) else "false"
+    if isinstance(value.type_name, EnumType):
+        info = ACTIVE_ENUMS.get(value.type_name.name)
+        if info is not None:
+            for case_name in info.case_order:
+                if info.cases[case_name] == int(value.value):
+                    return f"{value.type_name.name}.{case_name}"
+    return str(int(value.value))
 
 
 def infer_unary_type(

@@ -34,6 +34,8 @@ from .ast import (
     LengthOf,
     LayoutRead,
     LayoutWriteStmt,
+    MatchExpr,
+    MatchStep,
     OffsetOfField,
     Program,
     RecordConstructor,
@@ -409,6 +411,9 @@ class MlirEmitter:
         if isinstance(stmt, IfStmt):
             self.emit_if(stmt, env, lines, indent)
             return
+        if isinstance(stmt, MatchStep):
+            self.emit_match_step(stmt, env, lines, indent)
+            return
         raise AssertionError(stmt)  # pragma: no cover
 
     def emit_expr(
@@ -487,6 +492,8 @@ class MlirEmitter:
             return self.emit_comparison(expr, env, lines, indent)
         if isinstance(expr, WhenExpr):
             return self.emit_when_expr(expr, env, lines, indent, type_name)
+        if isinstance(expr, MatchExpr):
+            return self.emit_match_expr(expr, env, lines, indent, type_name)
         raise AssertionError(expr)  # pragma: no cover
 
     def emit_unary(self, expr: Unary, env: dict[str, EnvValue], lines: list[str], indent: str, type_name: ValueType) -> Value:
@@ -952,6 +959,8 @@ class MlirEmitter:
             )
         if isinstance(expr, WhenExpr):
             return self.emit_record_when_expr(expr, env, lines, indent, expected)
+        if isinstance(expr, MatchExpr):
+            return self.emit_record_match_expr(expr, env, lines, indent, expected)
         raise AssertionError("unsupported record expression")  # pragma: no cover
 
     def emit_record_when_expr(
@@ -1000,6 +1009,79 @@ class MlirEmitter:
             lambda: else_holder.setdefault(
                 "record",
                 self.emit_record_when_cases(cases[1:], otherwise, dict(env), lines, indent + "  ", record_type),
+            )
+        )
+        else_record = else_holder["record"]
+        else_values = [else_record.fields[field.name] for field in fields]
+        lines.append(
+            f"{indent}  scf.yield {', '.join(value.name for value in else_values)} : {self.type_list(result_types)}"
+        )
+        lines.append(f"{indent}}}")
+        return RecordStorage(
+            record_type,
+            {
+                field.name: Value(result_base if len(fields) == 1 else f"{result_base}#{index}", field.type_name)
+                for index, field in enumerate(fields)
+            },
+        )
+
+    def emit_record_match_expr(
+        self,
+        expr: MatchExpr,
+        env: dict[str, EnvValue],
+        lines: list[str],
+        indent: str,
+        record_type: RecordType,
+    ) -> RecordStorage:
+        env_types = self.env_types(env)
+        scrutinee_type = infer_expr_type(
+            expr.scrutinee, env_types, self.functions, self.records, constants=self.top_constants
+        )
+        scrutinee = self.emit_expr(expr.scrutinee, env, lines, indent, expected=scrutinee_type)
+        return self.emit_record_match_arms(
+            list(expr.arms), expr.otherwise, scrutinee, scrutinee_type, env, lines, indent, record_type
+        )
+
+    def emit_record_match_arms(
+        self,
+        arms,
+        otherwise: Expr,
+        scrutinee: Value,
+        scrutinee_type: ValueType,
+        env: dict[str, EnvValue],
+        lines: list[str],
+        indent: str,
+        record_type: RecordType,
+    ) -> RecordStorage:
+        if not arms:
+            return self.emit_record_expr(otherwise, env, lines, indent, expected=record_type)
+        arm = arms[0]
+        cond = self.emit_match_condition(scrutinee, scrutinee_type, arm.pattern, env, lines, indent)
+        fields = self.record_fields(record_type)
+        result_types = [field.type_name for field in fields]
+        result_base = self.fresh()
+        assignment = f"{result_base}:{len(fields)} = " if len(fields) > 1 else f"{result_base} = "
+        lines.append(f"{indent}{assignment}scf.if {cond.name} -> ({self.type_list(result_types)}) {{")
+        then_holder: dict[str, RecordStorage] = {}
+        self.emit_with_local_constants(
+            lambda: then_holder.setdefault(
+                "record",
+                self.emit_record_expr(arm.expr, dict(env), lines, indent + "  ", expected=record_type),
+            )
+        )
+        then_record = then_holder["record"]
+        then_values = [then_record.fields[field.name] for field in fields]
+        lines.append(
+            f"{indent}  scf.yield {', '.join(value.name for value in then_values)} : {self.type_list(result_types)}"
+        )
+        lines.append(f"{indent}}} else {{")
+        else_holder: dict[str, RecordStorage] = {}
+        self.emit_with_local_constants(
+            lambda: else_holder.setdefault(
+                "record",
+                self.emit_record_match_arms(
+                    arms[1:], otherwise, scrutinee, scrutinee_type, dict(env), lines, indent + "  ", record_type
+                ),
             )
         )
         else_record = else_holder["record"]
@@ -1190,6 +1272,75 @@ class MlirEmitter:
         lines.append(f"{indent}  scf.yield {else_value.name} : {mlir_result_type}")
         lines.append(f"{indent}}}")
         return result
+
+    def emit_match_expr(
+        self,
+        expr: MatchExpr,
+        env: dict[str, EnvValue],
+        lines: list[str],
+        indent: str,
+        type_name: ValueType,
+    ) -> Value:
+        env_types = self.env_types(env)
+        scrutinee_type = infer_expr_type(
+            expr.scrutinee, env_types, self.functions, self.records, constants=self.top_constants
+        )
+        scrutinee = self.emit_expr(expr.scrutinee, env, lines, indent, expected=scrutinee_type)
+        return self.emit_match_expr_arms(list(expr.arms), expr.otherwise, scrutinee, scrutinee_type, env, lines, indent, type_name)
+
+    def emit_match_expr_arms(
+        self,
+        arms,
+        otherwise: Expr,
+        scrutinee: Value,
+        scrutinee_type: ValueType,
+        env: dict[str, EnvValue],
+        lines: list[str],
+        indent: str,
+        type_name: ValueType,
+    ) -> Value:
+        if not arms:
+            return self.emit_expr(otherwise, env, lines, indent, expected=type_name)
+        arm = arms[0]
+        cond = self.emit_match_condition(scrutinee, scrutinee_type, arm.pattern, env, lines, indent)
+        result = Value(self.fresh(), type_name)
+        mlir_result_type = mlir_type(type_name)
+        lines.append(f"{indent}{result.name} = scf.if {cond.name} -> ({mlir_result_type}) {{")
+        then_holder: dict[str, Value] = {}
+        self.emit_with_local_constants(
+            lambda: then_holder.setdefault(
+                "value",
+                self.emit_expr(arm.expr, dict(env), lines, indent + "  ", expected=type_name),
+            )
+        )
+        lines.append(f"{indent}  scf.yield {then_holder['value'].name} : {mlir_result_type}")
+        lines.append(f"{indent}}} else {{")
+        else_holder: dict[str, Value] = {}
+        self.emit_with_local_constants(
+            lambda: else_holder.setdefault(
+                "value",
+                self.emit_match_expr_arms(arms[1:], otherwise, scrutinee, scrutinee_type, dict(env), lines, indent + "  ", type_name),
+            )
+        )
+        lines.append(f"{indent}  scf.yield {else_holder['value'].name} : {mlir_result_type}")
+        lines.append(f"{indent}}}")
+        return result
+
+    def emit_match_condition(
+        self,
+        scrutinee: Value,
+        scrutinee_type: ValueType,
+        pattern: Expr,
+        env: dict[str, EnvValue],
+        lines: list[str],
+        indent: str,
+    ) -> Value:
+        pattern_value = self.emit_expr(pattern, env, lines, indent, expected=scrutinee_type)
+        out = Value(self.fresh(), "i1")
+        lines.append(
+            f"{indent}{out.name} = arith.cmpi eq, {scrutinee.name}, {pattern_value.name} : {mlir_type(scrutinee_type)}"
+        )
+        return out
 
     def emit_comparison(self, condition: Comparison, env: dict[str, EnvValue], lines: list[str], indent: str) -> Value:
         env_types = self.env_types(env)
@@ -1482,6 +1633,124 @@ class MlirEmitter:
         else:
             lines.append(f"{branch_indent}scf.yield")
 
+    def emit_match_step(self, stmt: MatchStep, env: dict[str, EnvValue], lines: list[str], indent: str) -> None:
+        visible_binding_order = list(self.binding_order)
+        visible_record_order = list(self.record_order)
+        all_bodies = tuple(body_stmt for arm in stmt.arms for body_stmt in arm.body) + tuple(stmt.otherwise_body)
+        result_slots = self.assigned_binding_slots(all_bodies, visible_binding_order, visible_record_order, env)
+        result_values = [self.slot_value(env, slot) for slot in result_slots]
+        result_types = [value.type_name for value in result_values]
+
+        env_types = self.env_types(env)
+        scrutinee_type = infer_expr_type(
+            stmt.scrutinee, env_types, self.functions, self.records, constants=self.top_constants
+        )
+        scrutinee = self.emit_expr(stmt.scrutinee, env, lines, indent, expected=scrutinee_type)
+        result_base = self.fresh() if result_slots else None
+        self.emit_match_step_arms(
+            list(stmt.arms),
+            stmt.otherwise_body,
+            scrutinee,
+            scrutinee_type,
+            env,
+            result_slots,
+            result_types,
+            lines,
+            indent,
+            result_base,
+        )
+
+    def emit_match_step_arms(
+        self,
+        arms,
+        otherwise_body: tuple[BodyStmt, ...],
+        scrutinee: Value,
+        scrutinee_type: ValueType,
+        env: dict[str, EnvValue],
+        result_slots: list[CarrySlot],
+        result_types: list[ValueType],
+        lines: list[str],
+        indent: str,
+        result_base: str | None = None,
+    ) -> None:
+        if not arms:
+            for body_stmt in otherwise_body:
+                self.emit_body_stmt(body_stmt, env, lines, indent)
+            return
+
+        arm = arms[0]
+        cond = self.emit_match_condition(scrutinee, scrutinee_type, arm.pattern, env, lines, indent)
+        if result_slots:
+            prefix = ""
+            if result_base is not None:
+                prefix = f"{result_base}:{len(result_slots)} = " if len(result_slots) > 1 else f"{result_base} = "
+            lines.append(f"{indent}{prefix}scf.if {cond.name} -> ({self.type_list(result_types)}) {{")
+        else:
+            lines.append(f"{indent}scf.if {cond.name} {{")
+
+        then_env = dict(env)
+        self.emit_with_local_constants(
+            lambda: self.emit_with_binding_scope(
+                lambda: self.emit_if_branch(arm.body, then_env, result_slots, result_types, lines, indent)
+            )
+        )
+        lines.append(f"{indent}}} else {{")
+        else_env = dict(env)
+        self.emit_with_local_constants(
+            lambda: self.emit_with_binding_scope(
+                lambda: self.emit_match_step_else_branch(
+                    arms[1:],
+                    otherwise_body,
+                    scrutinee,
+                    scrutinee_type,
+                    else_env,
+                    result_slots,
+                    result_types,
+                    lines,
+                    indent + "  ",
+                )
+            )
+        )
+        lines.append(f"{indent}}}")
+        if result_base is not None:
+            for index, (slot, type_name) in enumerate(zip(result_slots, result_types, strict=True)):
+                result_name = result_base if len(result_slots) == 1 else f"{result_base}#{index}"
+                self.set_slot_value(env, slot, Value(result_name, type_name))
+
+    def emit_match_step_else_branch(
+        self,
+        arms,
+        otherwise_body: tuple[BodyStmt, ...],
+        scrutinee: Value,
+        scrutinee_type: ValueType,
+        env: dict[str, EnvValue],
+        result_slots: list[CarrySlot],
+        result_types: list[ValueType],
+        lines: list[str],
+        indent: str,
+    ) -> None:
+        if not arms:
+            self.emit_if_branch(otherwise_body, env, result_slots, result_types, lines, indent[:-2] if indent.endswith("  ") else indent)
+            return
+        nested_base = self.fresh() if result_slots else None
+        self.emit_match_step_arms(
+            arms,
+            otherwise_body,
+            scrutinee,
+            scrutinee_type,
+            env,
+            result_slots,
+            result_types,
+            lines,
+            indent,
+            nested_base,
+        )
+        if result_slots:
+            yielded = ", ".join(self.slot_value(env, slot).name for slot in result_slots)
+            lines.append(f"{indent}scf.yield {yielded} : {self.type_list(result_types)}")
+        else:
+            lines.append(f"{indent}scf.yield")
+
     def emit_with_local_constants(self, emit: Callable[[], None]) -> None:
         saved = self.constants
         self.constants = {}
@@ -1537,6 +1806,10 @@ class MlirEmitter:
                 elif isinstance(statement, IfStmt):
                     visit(statement.then_body)
                     visit(statement.else_body)
+                elif isinstance(statement, MatchStep):
+                    for arm in statement.arms:
+                        visit(arm.body)
+                    visit(statement.otherwise_body)
 
         visit(body)
         slots: list[CarrySlot] = []

@@ -1,0 +1,17 @@
+enum Mode: u8:
+  idle be 0
+  active be 1
+
+record Point:
+  x: i32
+  y: i32
+
+point for mode mode: Mode gives Point:
+  match mode:
+    Mode.idle gives Point with x be 0 and y be 0
+    Mode.active gives Point with x be 3 and y be 4
+    otherwise gives Point with x be 1 and y be 1
+
+main gives i32:
+  let p be point for mode Mode.active
+  p.x plus p.y

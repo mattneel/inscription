@@ -1,0 +1,10 @@
+enum Mode: u8:
+  idle be 0
+  active be 1
+
+main gives i32:
+  let value be match Mode.active:
+    Mode.idle gives 0
+    Mode.active gives 42
+    otherwise gives 1
+  value

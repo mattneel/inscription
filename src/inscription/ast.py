@@ -283,6 +283,21 @@ class WhenExpr:
     line: int
 
 
+@dataclass(frozen=True)
+class MatchExprArm:
+    pattern: "Expr"
+    expr: "Expr"
+    line: int
+
+
+@dataclass(frozen=True)
+class MatchExpr:
+    scrutinee: "Expr"
+    arms: tuple[MatchExprArm, ...]
+    otherwise: "Expr"
+    line: int
+
+
 Expr = (
     Integer
     | Float
@@ -303,6 +318,7 @@ Expr = (
     | Call
     | Comparison
     | WhenExpr
+    | MatchExpr
 )
 
 BufferLength = int | Expr
@@ -426,6 +442,21 @@ class IfStmt:
 
 
 @dataclass(frozen=True)
+class MatchStepArm:
+    pattern: Expr
+    body: tuple["BodyStmt", ...]
+    line: int
+
+
+@dataclass(frozen=True)
+class MatchStep:
+    scrutinee: Expr
+    arms: tuple[MatchStepArm, ...]
+    otherwise_body: tuple["BodyStmt", ...]
+    line: int
+
+
+@dataclass(frozen=True)
 class ReturnStmt:
     expr: Expr
     line: int
@@ -447,5 +478,6 @@ BodyStmt = (
     | ForStmt
     | ForEachStmt
     | IfStmt
+    | MatchStep
 )
 Stmt = BodyStmt | ReturnStmt

@@ -2169,6 +2169,7 @@ class CompilerTests(unittest.TestCase):
                 (GOLDENS / "105_float_arithmetic.ins").read_text(),
                 (GOLDENS / "112_buffer_containing.ins").read_text(),
                 (GOLDENS / "113_array_sum.ins").read_text(),
+                (GOLDENS / "127_match_enum_expression.ins").read_text(),
                 "highlight new widths a: i8 and b: i16 and c: u64 gives u64:\n  c bitwise xor c\n",
                 "highlight floats x: f32 and y: f64 gives f64:\n  y plus (x as f64) plus 1.5e2\n",
                 "highlight arrays gives i32:\n  let numbers be array of 2 i32 containing 1, 2\n  length of numbers\n",
@@ -2775,6 +2776,104 @@ main gives i32:
             "unexpected token 'call'",
         )
         self.assertCompileError("main gives i32:\n  Set result to 1\n", "invalid token")
+
+    def test_v024_match_expressions_and_blocks(self):
+        enum_match = compile_source(self.fixture("match_enum_expression.ins"))
+        self.assertIn("scf.if", enum_match)
+        self.assertIn("arith.cmpi eq", enum_match)
+
+        integer_match = compile_source(self.fixture("match_integer_expression.ins"))
+        self.assertIn("func.func @classify(%code: i32) -> i32", integer_match)
+        self.assertIn("arith.cmpi eq", integer_match)
+
+        step_match = compile_source(self.fixture("match_enum_steps.ins"))
+        self.assertIn("scf.if", step_match)
+        self.assertIn("scf.for", step_match)
+
+        record_match = compile_source(self.fixture("match_record_result.ins"))
+        self.assertIn("func.func @point_for_mode(%mode: i8) -> (i32, i32)", record_match)
+        self.assertIn("scf.if", record_match)
+
+        compile_time = compile_source(self.fixture("match_compile_time.ins"))
+        self.assertIn("arith.constant 7 : i32", compile_time)
+        self.assertNotIn("match", compile_time)
+
+        boolean_match = compile_source(self.fixture("match_boolean.ins"))
+        self.assertIn("arith.cmpi eq", boolean_match)
+
+        let_match = compile_source(self.fixture("match_expression_let.ins"))
+        self.assertIn("arith.constant 42 : i32", let_match)
+
+    def test_v024_module_match_and_artifacts(self):
+        fixture = FIXTURES / "match_module_enum" / "main.ins"
+        mlir = compile_file(fixture, module_root=fixture.parent)
+        self.assertIn("func.func @code_for_mode(%mode: i8) -> i32", mlir)
+        self.assertIn("scf.if", mlir)
+        try:
+            result = run_file(fixture, module_root=fixture.parent)
+        except ToolchainError:
+            result = None
+        if result is not None:
+            self.assertEqual(result.exit_status, 7)
+
+        try:
+            resolve_toolchain()
+        except ToolchainError:
+            return
+        env = {**os.environ, "PYTHONPATH": str(SRC)}
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            llvm_path = tmp_path / "match_enum_expression.ll"
+            llvm_proc = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "inscription",
+                    "compile",
+                    str(FIXTURES / "match_enum_expression.ins"),
+                    "--emit",
+                    "llvm-ir",
+                    "--verify",
+                    "-o",
+                    str(llvm_path),
+                ],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(llvm_proc.returncode, 0, llvm_proc.stderr)
+            self.assertIn("define i32 @main", llvm_path.read_text())
+
+            try:
+                resolve_toolchain(require_executable=True)
+            except ToolchainError:
+                return
+            executable = tmp_path / "match_enum_expression"
+            exe_proc = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "inscription",
+                    "compile",
+                    str(FIXTURES / "match_enum_expression.ins"),
+                    "--emit",
+                    "executable",
+                    "-o",
+                    str(executable),
+                ],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(exe_proc.returncode, 0, exe_proc.stderr)
+            run = subprocess.run([str(executable)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False)
+            self.assertEqual(run.returncode, 7, run.stderr)
 
     def test_negative_diagnostics(self):
         cases = {
@@ -3506,6 +3605,74 @@ main gives i32:
             "enum cast through wrong integer type": (
                 "enum Mode: u8:\n  idle be 0\n\nbad gives i32:\n  let value: i32 be 0\n  let mode: Mode be value as Mode\n  0\n",
                 "cannot cast i32 to Mode; cast to u8 first",
+            ),
+            "match expression missing otherwise": (
+                "enum Mode: u8:\n  idle be 0\n  active be 1\n\nbad mode: Mode gives i32:\n  match mode:\n    Mode.idle gives 0\n    Mode.active gives 1\n",
+                "match expression requires otherwise",
+            ),
+            "match block missing otherwise": (
+                "enum Mode: u8:\n  idle be 0\n  active be 1\n\nbad mode: Mode gives i32:\n  let x be 0\n  match mode:\n    Mode.idle:\n      x becomes 1\n  x\n",
+                "match block requires otherwise",
+            ),
+            "match pattern type mismatch": (
+                "enum Mode: u8:\n  idle be 0\n\nbad gives i32:\n  match Mode.idle:\n    0 gives 1\n    otherwise gives 2\n",
+                "match pattern must have type Mode, got u8",
+            ),
+            "match enum mismatch pattern": (
+                "enum Mode: u8:\n  idle be 0\n\nenum Status: u8:\n  idle be 0\n\nbad gives i32:\n  match Mode.idle:\n    Status.idle gives 1\n    otherwise gives 2\n",
+                "match pattern must have type Mode, got Status",
+            ),
+            "match result type mismatch": (
+                "enum Mode: u8:\n  idle be 0\n\nbad gives i32:\n  match Mode.idle:\n    Mode.idle gives 1\n    otherwise gives true\n",
+                "match expression arms must have matching types, got i32 and i1",
+            ),
+            "match record result nominal mismatch": (
+                "enum Mode: u8:\n  idle be 0\n\nrecord Point:\n  x: i32\n\nrecord Other:\n  x: i32\n\nbad gives Point:\n  match Mode.idle:\n    Mode.idle gives Point with x be 1\n    otherwise gives Other with x be 2\n",
+                "match expression arms must have matching types, got Point and Other",
+            ),
+            "match duplicate enum case": (
+                "enum Mode: u8:\n  idle be 0\n\nbad gives i32:\n  match Mode.idle:\n    Mode.idle gives 1\n    Mode.idle gives 2\n    otherwise gives 3\n",
+                "match has duplicate pattern Mode.idle",
+            ),
+            "match duplicate integer pattern": (
+                "bad x: i32 gives i32:\n  match x:\n    1 gives 10\n    1 gives 20\n    otherwise gives 30\n",
+                "match has duplicate pattern 1",
+            ),
+            "match duplicate boolean pattern": (
+                "bad flag: i1 gives i32:\n  match flag:\n    true gives 1\n    true gives 2\n    otherwise gives 3\n",
+                "match has duplicate pattern true",
+            ),
+            "match float scrutinee unsupported": (
+                "bad x: f64 gives i32:\n  match x:\n    1.0 gives 1\n    otherwise gives 2\n",
+                "match scrutinee must be i1, integer, or enum, got f64",
+            ),
+            "match record scrutinee unsupported": (
+                "record Point:\n  x: i32\n\nbad p: Point gives i32:\n  match p:\n    otherwise gives 0\n",
+                "match scrutinee must be i1, integer, or enum, got Point",
+            ),
+            "match float pattern unsupported": (
+                "bad x: i32 gives i32:\n  match x:\n    1.0 gives 1\n    otherwise gives 2\n",
+                "match pattern must have type i32, got f64",
+            ),
+            "match otherwise not last": (
+                "bad x: i32 gives i32:\n  match x:\n    otherwise gives 0\n    1 gives 1\n",
+                "otherwise must be the final match arm",
+            ),
+            "match empty step arm": (
+                "bad x: i32 gives i32:\n  let y be 0\n  match x:\n    0:\n    otherwise:\n      y becomes 1\n  y\n",
+                "match arm must contain at least one step",
+            ),
+            "match step does not satisfy value block": (
+                "bad x: i32 gives i32:\n  match x:\n    0:\n      let y be 1\n    otherwise:\n      let y be 2\n",
+                "gives phrase body must end with a value expression",
+            ),
+            "match arm binding does not escape": (
+                "bad x: i32 gives i32:\n  match x:\n    0:\n      let y be 1\n    otherwise:\n      let y be 2\n  y\n",
+                "unknown binding y",
+            ),
+            "match over buffer unsupported": (
+                "bad gives i32:\n  let cells be buffer of 1 i32 filled with 0\n  match cells:\n    otherwise gives 0\n",
+                "match scrutinee must be i1, integer, or enum, got buffer of 1 i32",
             ),
             "extern with body": (
                 "extern population count of x: i32 gives i32 as llvm.ctpop.i32:\n  x\n",
