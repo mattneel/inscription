@@ -19,8 +19,10 @@ from .semantic import (
     function_table,
     record_table,
     resolve_function_table,
+    type_alias_table,
     union_table,
     validate_external_symbols,
+    validate_type_aliases,
     validate_union_payloads,
 )
 
@@ -532,10 +534,12 @@ def validate_executable_main(program: Program) -> None:
 
 
 def _validate_main(program: Program, *, require_no_hole_main: bool) -> None:
+    type_alias_table(program)
     enum_table(program)
     unions = union_table(program)
     records = record_table(program)
     validate_union_payloads(unions, records)
+    validate_type_aliases(records)
     functions = function_table(program)
     constants = constant_table(program, records, functions)
     functions = resolve_function_table(functions, records, constants)

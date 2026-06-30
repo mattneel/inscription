@@ -3179,6 +3179,219 @@ main gives i32:
             run = subprocess.run([str(executable)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False)
             self.assertEqual(run.returncode, 15, run.stderr)
 
+    def test_v027_type_aliases_lower_transparently(self):
+        scalar = compile_source(self.fixture("type_alias_scalar.ins"))
+        self.assertIn("func.func @add_counts(%left: i32, %right: i32) -> i32", scalar)
+        self.assertIn("arith.addi %left, %right : i32", scalar)
+
+        buffer_array = compile_source(self.fixture("type_alias_buffer_array.ins"))
+        self.assertIn("memref.alloca() : memref<4xi32>", buffer_array)
+        self.assertIn("memref.store", buffer_array)
+
+        storage = compile_source(self.fixture("type_alias_storage.ins"))
+        self.assertIn("memref.alloca() : memref<4xi32>", storage)
+        self.assertIn("scf.for", storage)
+
+        view_parameter = compile_source(self.fixture("type_alias_view_parameter.ins"))
+        self.assertIn("func.func @sum_cells(%cells_base: memref<?xi32>, %cells_start: i32, %cells_length: i32) -> i32", view_parameter)
+
+        record_union = compile_source(self.fixture("type_alias_record_union.ins"))
+        self.assertIn("func.func @score_maybe(%maybe_tag: i32", record_union)
+        self.assertIn("arith.cmpi eq", record_union)
+
+        layout_enum = compile_source(self.fixture("type_alias_layout_enum.ins"))
+        self.assertIn("memref.alloca() : memref<3xi8>", layout_enum)
+        self.assertIn("arith.cmpi eq", layout_enum)
+
+        header_export = compile_source(self.fixture("type_alias_export_header.ins"))
+        self.assertIn("func.func @ins_add_counts(%left: i32, %right: i32) -> i32", header_export)
+
+    def test_v027_module_alias_interface_header_and_artifacts(self):
+        fixture = FIXTURES / "type_alias_module" / "main.ins"
+        mlir = compile_file(fixture, module_root=fixture.parent)
+        self.assertIn("func.func @Types__sum_cells(%cells_base: memref<?xi32>, %cells_start: i32, %cells_length: i32) -> i32", mlir)
+        try:
+            result = run_file(fixture, module_root=fixture.parent)
+        except ToolchainError:
+            result = None
+        if result is not None:
+            self.assertEqual(result.exit_status, 12)
+
+        env = {**os.environ, "PYTHONPATH": str(SRC)}
+        alias_json = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "inscription",
+                "compile",
+                str(FIXTURES / "type_alias_scalar.ins"),
+                "--emit",
+                "interface-json",
+            ],
+            cwd=ROOT,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(alias_json.returncode, 0, alias_json.stderr)
+        payload = json.loads(alias_json.stdout)
+        self.assertEqual(
+            payload["modules"][0]["type_aliases"][0],
+            {"name": "Count", "kind": "type-alias", "target": "i32"},
+        )
+
+        storage_json = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "inscription",
+                "compile",
+                str(FIXTURES / "type_alias_storage.ins"),
+                "--emit",
+                "interface-json",
+            ],
+            cwd=ROOT,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(storage_json.returncode, 0, storage_json.stderr)
+        storage_payload = json.loads(storage_json.stdout)
+        aliases = {entry["name"]: entry["target"] for entry in storage_payload["modules"][0]["type_aliases"]}
+        self.assertEqual(aliases["CellBuffer"], "buffer of 4 i32")
+        self.assertEqual(aliases["CellArray"], "array of 4 i32")
+
+        header_proc = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "inscription",
+                "compile",
+                str(FIXTURES / "type_alias_export_header.ins"),
+                "--emit",
+                "c-header",
+            ],
+            cwd=ROOT,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(header_proc.returncode, 0, header_proc.stderr)
+        self.assertIn("int32_t ins_add_counts(int32_t arg0, int32_t arg1);", header_proc.stdout)
+
+        float_header_proc = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "inscription",
+                "compile",
+                str(FIXTURES / "type_alias_export_float_header.ins"),
+                "--emit",
+                "c-header",
+            ],
+            cwd=ROOT,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(float_header_proc.returncode, 0, float_header_proc.stderr)
+        self.assertIn("double ins_multiply_weights(double arg0, double arg1);", float_header_proc.stdout)
+
+        try:
+            resolve_toolchain(require_static_library=True)
+        except ToolchainError:
+            pass
+        else:
+            with tempfile.TemporaryDirectory() as tmp:
+                archive = Path(tmp) / "libtype_alias_export.a"
+                archive_proc = subprocess.run(
+                    [
+                        sys.executable,
+                        "-m",
+                        "inscription",
+                        "compile",
+                        str(FIXTURES / "type_alias_export_header.ins"),
+                        "--emit",
+                        "static-library",
+                        "-o",
+                        str(archive),
+                    ],
+                    cwd=ROOT,
+                    env=env,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    check=False,
+                )
+                self.assertEqual(archive_proc.returncode, 0, archive_proc.stderr)
+                self.assertGreater(archive.stat().st_size, 0)
+
+        try:
+            resolve_toolchain()
+        except ToolchainError:
+            return
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            llvm_path = tmp_path / "type_alias_scalar.ll"
+            llvm_proc = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "inscription",
+                    "compile",
+                    str(FIXTURES / "type_alias_scalar.ins"),
+                    "--emit",
+                    "llvm-ir",
+                    "--verify",
+                    "-o",
+                    str(llvm_path),
+                ],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(llvm_proc.returncode, 0, llvm_proc.stderr)
+            self.assertIn("define i32 @main", llvm_path.read_text())
+
+            try:
+                resolve_toolchain(require_executable=True)
+            except ToolchainError:
+                return
+            executable = tmp_path / "type_alias_scalar"
+            exe_proc = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "inscription",
+                    "compile",
+                    str(FIXTURES / "type_alias_scalar.ins"),
+                    "--emit",
+                    "executable",
+                    "-o",
+                    str(executable),
+                ],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(exe_proc.returncode, 0, exe_proc.stderr)
+            run = subprocess.run([str(executable)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False)
+            self.assertEqual(run.returncode, 42, run.stderr)
+
     def test_negative_diagnostics(self):
         cases = {
             "malformed top level": ("Please add two numbers\n", "expected phrase definition"),
@@ -4101,6 +4314,66 @@ main gives i32:
             "array of union unsupported": (
                 "union MaybeI32:\n  none\n\nbad gives i32:\n  let values be array of 1 MaybeI32 containing MaybeI32.none\n  0\n",
                 "array element type may not be a union type in v0.25",
+            ),
+            "duplicate type alias": (
+                "type Count be i32\ntype Count be i64\n\nmain gives i32:\n  0\n",
+                "type Count is already defined",
+            ),
+            "type alias collides with record": (
+                "record Count:\n  value: i32\n\ntype Count be i32\n",
+                "type Count conflicts with record Count",
+            ),
+            "type alias collides with constant": (
+                "constant Count: i32 be 1\n\ntype Count be i32\n",
+                "type Count conflicts with constant Count",
+            ),
+            "unknown type alias target": (
+                "type MissingAlias be Missing\n\nmain gives i32:\n  0\n",
+                "unknown type Missing",
+            ),
+            "direct type alias cycle": (
+                "type A be A\n\nmain gives i32:\n  0\n",
+                "type alias cycle detected: A -> A",
+            ),
+            "indirect type alias cycle": (
+                "type A be B\ntype B be C\ntype C be A\n\nmain gives i32:\n  0\n",
+                "type alias cycle detected: A -> B -> C -> A",
+            ),
+            "view alias storage constructor": (
+                "type CellView be view of i32\n\nbad gives i32:\n  let cells be CellView filled with 0\n  0\n",
+                "type alias CellView resolves to view of i32 and cannot be constructed with filled with",
+            ),
+            "scalar alias storage constructor": (
+                "type Count be i32\n\nbad gives i32:\n  let cells be Count filled with 0\n  0\n",
+                "type alias Count resolves to i32 and cannot be constructed with filled with",
+            ),
+            "array alias mutation": (
+                "type CellArray be array of 4 i32\n\nbad gives i32:\n  let numbers be CellArray containing 1, 2, 3, 4\n  numbers at 0 becomes 9\n  0\n",
+                "cannot store into array numbers; arrays are immutable",
+            ),
+            "alias to i1 array element invalid": (
+                "type Flag be i1\n\nbad gives i32:\n  let flags be array of 2 Flag containing true, false\n  0\n",
+                "array element type must be numeric, got i1",
+            ),
+            "alias to union record field invalid": (
+                "union MaybeI32:\n  none\n\ntype OptionalNumber be MaybeI32\n\nrecord Bad:\n  maybe: OptionalNumber\n",
+                "record fields may not be union types in v0.25",
+            ),
+            "alias to f64 layout field invalid": (
+                "type Float be f64\n\nlayout record Bad:\n  value: Float\n",
+                "layout record fields must be integer types, got f64",
+            ),
+            "alias to enum export rejected": (
+                "enum Mode: u8:\n  idle be 0\n\ntype ModeAlias be Mode\n\nexport set mode mode: ModeAlias does as ins_set_mode:\n  require mode is equal to Mode.idle\n",
+                "exported phrase parameters must be primitive scalar types, got Mode",
+            ),
+            "qualified alias unknown": (
+                "module Types\n\ntype Count be i32\n\nmain gives i32:\n  let x: Types.Missing be 0\n  x\n",
+                "unknown type Types.Missing",
+            ),
+            "alias to array parameter rejected": (
+                "type Scores be array of 4 i32\n\nbad scores: Scores gives i32:\n  0\n",
+                "array parameters are not supported in v0.22; use view of i32",
             ),
             "export union unsupported": (
                 "union MaybeI32:\n  none\n\nexport exported maybe maybe: MaybeI32 gives i32 as ins_maybe:\n  0\n",

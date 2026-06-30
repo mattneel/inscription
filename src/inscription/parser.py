@@ -54,6 +54,8 @@ from .ast import (
     ReturnStmt,
     SetStmt,
     SizeOfType,
+    StorageAliasBinding,
+    TypeAliasDecl,
     TypeName,
     Unary,
     UnionConstructor,
@@ -84,7 +86,7 @@ RESERVED = {
     "enum", "function", "gives", "greater", "f32", "f64", "i1", "i32", "i64", "if", "in", "index", "input", "into", "import",
     "i8", "i16", "is", "layout", "length", "less", "let", "match", "memref", "minus", "module", "no", "not", "or", "otherwise", "output", "packed", "parameters",
     "pointer", "plus", "print", "read", "remainder", "require", "return", "set", "shifted", "size", "takes", "than", "then", "times", "to",
-    "track", "true", "u8", "u16", "u32", "u64", "union", "up", "record", "view", "when", "while", "with", "write", "xor", "zero",
+    "track", "true", "type", "u8", "u16", "u32", "u64", "union", "up", "record", "view", "when", "while", "with", "write", "xor", "zero",
 }
 TYPE_NAMES: set[str] = {"i1", "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "f32", "f64"}
 COMPARATORS: tuple[tuple[tuple[str, ...], str], ...] = (
@@ -139,7 +141,7 @@ class PhraseTemplate:
     display_name: str
 
 
-ParsedTopLevel = RecordDecl | EnumDecl | UnionDecl | ConstantDecl | CheckStmt | Function
+ParsedTopLevel = RecordDecl | EnumDecl | UnionDecl | TypeAliasDecl | ConstantDecl | CheckStmt | Function
 
 
 class Parser:
@@ -199,6 +201,7 @@ class Parser:
         records: list[RecordDecl] = []
         enums: list[EnumDecl] = []
         unions: list[UnionDecl] = []
+        type_aliases: list[TypeAliasDecl] = []
         constants: list[ConstantDecl] = []
         checks: list[CheckStmt] = []
         functions: list[Function] = []
@@ -232,6 +235,10 @@ class Parser:
             if self._looks_like_union_header(line):
                 union, index = self._parse_union_decl(index)
                 unions.append(union)
+                continue
+            if line.indent == 0 and line.text.startswith("type "):
+                type_aliases.append(self._parse_type_alias_decl(line))
+                index += 1
                 continue
             if line.text.startswith("constant "):
                 if line.is_header and re.fullmatch(rf"constant [a-z][a-z0-9_]*:\s*{TYPE_REF_PATTERN} be match .+", line.text):
@@ -284,7 +291,7 @@ class Parser:
             if line.text.startswith("require "):
                 raise InscriptionError("require may only appear inside phrase bodies", line.number)
             if not self._looks_like_phrase_header(line):
-                raise InscriptionError("expected phrase definition, record declaration, enum declaration, union declaration, constant declaration, check, extern, export, module, or import", line.number)
+                raise InscriptionError("expected phrase definition, record declaration, enum declaration, union declaration, type alias, constant declaration, check, extern, export, module, or import", line.number)
             template, return_type = self._parse_phrase_header(line)
             body, index = self._parse_phrase_body(index + 1, template, line.number)
             functions.append(
@@ -302,7 +309,7 @@ class Parser:
             if imported.module in seen_imports:
                 raise InscriptionError(f"module {imported.module} is already imported", imported.line)
             seen_imports.add(imported.module)
-        return Program(tuple(records), tuple(enums), tuple(unions), tuple(constants), tuple(checks), tuple(functions), module_name, tuple(imports))
+        return Program(tuple(records), tuple(enums), tuple(unions), tuple(type_aliases), tuple(constants), tuple(checks), tuple(functions), module_name, tuple(imports))
 
     def _looks_like_record_header(self, line: Line) -> bool:
         return (
@@ -312,7 +319,7 @@ class Parser:
         )
 
     def _looks_like_enum_header(self, line: Line) -> bool:
-        return line.is_header and re.fullmatch(r"enum [A-Za-z][A-Za-z0-9_]*:\s*[a-z][a-z0-9_]*", line.text) is not None
+        return line.is_header and re.fullmatch(rf"enum [A-Za-z][A-Za-z0-9_]*:\s*{TYPE_PATTERN}", line.text) is not None
 
     def _looks_like_union_header(self, line: Line) -> bool:
         return line.is_header and re.fullmatch(r"union [A-Za-z][A-Za-z0-9_]*", line.text) is not None
@@ -323,7 +330,7 @@ class Parser:
             or self._looks_like_record_header(line)
             or self._looks_like_enum_header(line)
             or self._looks_like_union_header(line)
-            or (line.indent == 0 and (line.text.startswith("constant ") or line.text.startswith("check ") or line.text.startswith("extern ") or line.text.startswith("export ") or line.text.startswith("module ") or line.text.startswith("import ") or line.text.startswith("require ") or line.text.startswith("enum ") or line.text.startswith("union ")))
+            or (line.indent == 0 and (line.text.startswith("constant ") or line.text.startswith("check ") or line.text.startswith("extern ") or line.text.startswith("export ") or line.text.startswith("module ") or line.text.startswith("import ") or line.text.startswith("require ") or line.text.startswith("enum ") or line.text.startswith("union ") or line.text.startswith("type ")))
         )
 
     def _parse_record_decl(self, index: int) -> tuple[RecordDecl, int]:
@@ -357,11 +364,11 @@ class Parser:
 
     def _parse_enum_decl(self, index: int) -> tuple[EnumDecl, int]:
         line = self.lines[index]
-        match = re.fullmatch(r"enum ([A-Za-z][A-Za-z0-9_]*):\s*([a-z][a-z0-9_]*)", line.text)
+        match = re.fullmatch(rf"enum ([A-Za-z][A-Za-z0-9_]*):\s*({TYPE_PATTERN})", line.text)
         if not line.is_header or match is None:
             raise InscriptionError("malformed enum declaration", line.number)
         name = self._record_name(match.group(1), line.number)
-        underlying_type = self._type_name(match.group(2), line.number)
+        underlying_type = self._value_type(match.group(2), line.number)
         cases: list[EnumCaseDecl] = []
         case_index = index + 1
         while case_index < len(self.lines):
@@ -435,6 +442,16 @@ class Parser:
         if not variants:
             raise InscriptionError(f"union {name} must declare at least one variant", line.number)
         return UnionDecl(name, tuple(variants), line.number), variant_index
+
+    def _parse_type_alias_decl(self, line: Line) -> TypeAliasDecl:
+        match = re.fullmatch(rf"type ([A-Za-z][A-Za-z0-9_]*) be ({TYPE_PATTERN})", line.text)
+        if line.is_header or match is None:
+            raise InscriptionError("malformed type alias declaration", line.number)
+        return TypeAliasDecl(
+            self._record_name(match.group(1), line.number),
+            self._value_type(match.group(2), line.number),
+            line.number,
+        )
 
     def _parse_constant_decl(self, line: Line) -> ConstantDecl:
         match = re.fullmatch(rf"constant ([A-Za-z][A-Za-z0-9_]*):\s*({TYPE_PATTERN}) be (.+)", line.text)
@@ -1005,7 +1022,7 @@ class Parser:
         finally:
             self.lines = original_lines
 
-    def _parse_let(self, line: Line) -> SetStmt | BufferBinding | ArrayBinding | ViewBinding:
+    def _parse_let(self, line: Line) -> SetStmt | BufferBinding | ArrayBinding | StorageAliasBinding | ViewBinding:
         buffer_match = re.fullmatch(
             rf"let ([a-z][a-z0-9_]*) be buffer of ({BUFFER_LENGTH_PATTERN}) ({TYPE_REF_PATTERN}) (filled with|containing) (.+)",
             line.text,
@@ -1062,6 +1079,28 @@ class Parser:
                 self._parse_expression(view_match.group(3), line.number),
                 self._parse_expression(view_match.group(4), line.number),
                 line.number,
+            )
+        storage_alias_match = re.fullmatch(
+            rf"let ([a-z][a-z0-9_]*) be ((?:[A-Za-z][A-Za-z0-9_]*\.)*[A-Z][A-Za-z0-9_]*) (filled with|containing) (.+)",
+            line.text,
+        )
+        if storage_alias_match:
+            initializer = storage_alias_match.group(3)
+            initializer_text = storage_alias_match.group(4)
+            if initializer == "containing":
+                return StorageAliasBinding(
+                    self._name(storage_alias_match.group(1), line.number),
+                    self._return_type(storage_alias_match.group(2), line.number),
+                    line.number,
+                    initializer,
+                    values=self._parse_expression_list(initializer_text, line.number),
+                )
+            return StorageAliasBinding(
+                self._name(storage_alias_match.group(1), line.number),
+                self._return_type(storage_alias_match.group(2), line.number),
+                line.number,
+                initializer,
+                fill=self._parse_expression(initializer_text, line.number),
             )
         match = re.fullmatch(rf"let ([a-z][a-z0-9_]*)(?::\s*({TYPE_REF_PATTERN}))? be (.+)", line.text)
         if not match:

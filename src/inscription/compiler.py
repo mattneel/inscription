@@ -52,7 +52,9 @@ from .ast import (
     ReturnStmt,
     SetStmt,
     SizeOfType,
+    StorageAliasBinding,
     Stmt,
+    TypeAliasDecl,
     Unary,
     UnionConstructor,
     UnionDecl,
@@ -250,6 +252,7 @@ def combine_programs(modules: list[LoadedModule], entry: Program) -> Program:
     records: list[RecordDecl] = []
     enums: list[EnumDecl] = []
     unions: list[UnionDecl] = []
+    type_aliases: list[TypeAliasDecl] = []
     constants: list[ConstantDecl] = []
     checks: list[CheckStmt] = []
     functions: list[Function] = []
@@ -257,31 +260,35 @@ def combine_programs(modules: list[LoadedModule], entry: Program) -> Program:
         records.extend(module.program.records)
         enums.extend(module.program.enums)
         unions.extend(module.program.unions)
+        type_aliases.extend(module.program.type_aliases)
         constants.extend(module.program.constants)
         checks.extend(module.program.checks)
         functions.extend(module.program.functions)
     records.extend(entry.records)
     enums.extend(entry.enums)
     unions.extend(entry.unions)
+    type_aliases.extend(entry.type_aliases)
     constants.extend(entry.constants)
     checks.extend(entry.checks)
     functions.extend(entry.functions)
-    return Program(tuple(records), tuple(enums), tuple(unions), tuple(constants), tuple(checks), tuple(functions), entry.module_name, entry.imports)
+    return Program(tuple(records), tuple(enums), tuple(unions), tuple(type_aliases), tuple(constants), tuple(checks), tuple(functions), entry.module_name, entry.imports)
 
 
 def qualify_imported_program(program: Program, module_name: str) -> Program:
     record_names = {record.name for record in program.records}
     enum_names = {enum.name for enum in program.enums}
     union_names = {union.name for union in program.unions}
-    type_names = record_names | enum_names | union_names
+    alias_names = {alias.name for alias in program.type_aliases}
+    type_names = record_names | enum_names | union_names | alias_names
     constant_names = {constant.name for constant in program.constants}
     records = tuple(qualify_record_decl(record, module_name, type_names) for record in program.records)
     enums = tuple(qualify_enum_decl(enum, module_name, type_names, constant_names) for enum in program.enums)
     unions = tuple(qualify_union_decl(union, module_name, type_names, constant_names) for union in program.unions)
+    type_aliases = tuple(qualify_type_alias(alias, module_name, type_names, constant_names) for alias in program.type_aliases)
     constants = tuple(qualify_constant(constant, module_name, type_names, constant_names) for constant in program.constants)
     checks = tuple(qualify_stmt(check, module_name, type_names, constant_names) for check in program.checks)
     functions = tuple(qualify_function(function, module_name, type_names, constant_names) for function in program.functions)
-    return Program(records, enums, unions, constants, checks, functions, program.module_name, program.imports)
+    return Program(records, enums, unions, type_aliases, constants, checks, functions, program.module_name, program.imports)
 
 
 def qname(module_name: str, name: str) -> str:
@@ -304,7 +311,7 @@ def qualify_record_decl(record: RecordDecl, module_name: str, record_names: set[
 def qualify_enum_decl(enum: EnumDecl, module_name: str, type_names: set[str], constant_names: set[str]) -> EnumDecl:
     return EnumDecl(
         qname(module_name, enum.name),
-        enum.underlying_type,
+        qualify_type(enum.underlying_type, module_name, type_names, constant_names),
         tuple(type(case)(case.name, qualify_expr(case.value, module_name, type_names, constant_names), case.line) for case in enum.cases),
         enum.line,
     )
@@ -329,6 +336,14 @@ def qualify_union_decl(union: UnionDecl, module_name: str, type_names: set[str],
             for variant in union.variants
         ),
         union.line,
+    )
+
+
+def qualify_type_alias(alias: TypeAliasDecl, module_name: str, type_names: set[str], constant_names: set[str]) -> TypeAliasDecl:
+    return TypeAliasDecl(
+        qname(module_name, alias.name),
+        qualify_type(alias.target, module_name, type_names, constant_names),
+        alias.line,
     )
 
 
@@ -412,6 +427,17 @@ def qualify_stmt(stmt: Stmt, module_name: str, record_names: set[str], constant_
         fill = qualify_expr(stmt.fill, module_name, record_names, constant_names) if stmt.fill is not None else None
         values = tuple(qualify_expr(value, module_name, record_names, constant_names) for value in stmt.values)
         return ArrayBinding(stmt.name, array_type, stmt.line, fill, values)
+    if isinstance(stmt, StorageAliasBinding):
+        fill = qualify_expr(stmt.fill, module_name, record_names, constant_names) if stmt.fill is not None else None
+        values = tuple(qualify_expr(value, module_name, record_names, constant_names) for value in stmt.values)
+        return StorageAliasBinding(
+            stmt.name,
+            qualify_type(stmt.alias_type, module_name, record_names, constant_names),
+            stmt.line,
+            stmt.initializer,
+            fill,
+            values,
+        )
     if isinstance(stmt, ViewBinding):
         return ViewBinding(
             stmt.name,

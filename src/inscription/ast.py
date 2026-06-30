@@ -35,6 +35,7 @@ class Program:
     records: tuple["RecordDecl", ...]
     enums: tuple["EnumDecl", ...]
     unions: tuple["UnionDecl", ...]
+    type_aliases: tuple["TypeAliasDecl", ...]
     constants: tuple["ConstantDecl", ...]
     checks: tuple["CheckStmt", ...]
     functions: tuple["Function", ...]
@@ -76,8 +77,15 @@ class EnumCaseDecl:
 @dataclass(frozen=True)
 class EnumDecl:
     name: str
-    underlying_type: TypeName
+    underlying_type: "ValueType"
     cases: tuple[EnumCaseDecl, ...]
+    line: int
+
+
+@dataclass(frozen=True)
+class TypeAliasDecl:
+    name: str
+    target: "ValueType"
     line: int
 
 
@@ -412,6 +420,16 @@ class ArrayBinding:
 
 
 @dataclass(frozen=True)
+class StorageAliasBinding:
+    name: str
+    alias_type: ValueType
+    line: int
+    initializer: Literal["filled with", "containing"]
+    fill: Expr | None = None
+    values: tuple[Expr, ...] = ()
+
+
+@dataclass(frozen=True)
 class ViewBinding:
     name: str
     source_name: str
@@ -529,6 +547,7 @@ BodyStmt = (
     | SetStmt
     | BufferBinding
     | ArrayBinding
+    | StorageAliasBinding
     | ViewBinding
     | AssignStmt
     | BufferStoreStmt

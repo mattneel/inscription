@@ -51,6 +51,8 @@ from .ast import (
     ReturnStmt,
     SetStmt,
     SizeOfType,
+    StorageAliasBinding,
+    TypeAliasDecl,
     TypeName,
     Unary,
     UnionConstructor,
@@ -115,6 +117,13 @@ class ConstValue:
     value: int | bool | float
 
 
+@dataclass(frozen=True)
+class TypeAliasInfo:
+    name: str
+    target: ValueType
+    line: int
+
+
 
 @dataclass(frozen=True)
 class EnumInfo:
@@ -151,6 +160,8 @@ class UnionInfo:
 
 ACTIVE_ENUMS: dict[str, EnumInfo] = {}
 ACTIVE_UNIONS: dict[str, UnionInfo] = {}
+ACTIVE_ALIAS_DECLS: dict[str, TypeAliasDecl] = {}
+ACTIVE_ALIASES: dict[str, TypeAliasInfo] = {}
 
 
 def enum_type_for_name(name: str) -> EnumType | None:
@@ -186,20 +197,91 @@ def primitive_storage_type(type_name: ValueType) -> ValueType:
 
 
 
-def resolve_named_value_type(type_name: ValueType) -> ValueType:
+def resolve_named_value_type(type_name: ValueType, stack: tuple[str, ...] = ()) -> ValueType:
     if isinstance(type_name, BufferType):
-        return BufferType(type_name.length, resolve_named_value_type(type_name.element_type))
+        return BufferType(type_name.length, resolve_named_value_type(type_name.element_type, stack))
     if isinstance(type_name, ArrayType):
-        return ArrayType(type_name.length, resolve_named_value_type(type_name.element_type))
+        return ArrayType(type_name.length, resolve_named_value_type(type_name.element_type, stack))
     if isinstance(type_name, ViewType):
-        return ViewType(resolve_named_value_type(type_name.element_type), type_name.length)
+        return ViewType(resolve_named_value_type(type_name.element_type, stack), type_name.length)
     if isinstance(type_name, RecordType):
+        alias = ACTIVE_ALIAS_DECLS.get(type_name.name)
+        if alias is not None:
+            if alias.name in stack:
+                start = stack.index(alias.name)
+                cycle = (*stack[start:], alias.name)
+                raise InscriptionError(f"type alias cycle detected: {' -> '.join(cycle)}", alias.line)
+            return resolve_named_value_type(alias.target, (*stack, alias.name))
         enum_type = enum_type_for_name(type_name.name)
         if enum_type is not None:
             return enum_type
         union_type = union_type_for_name(type_name.name)
         if union_type is not None:
             return union_type
+    return type_name
+
+
+def type_alias_table(program: Program) -> dict[str, TypeAliasInfo]:
+    global ACTIVE_ALIAS_DECLS, ACTIVE_ALIASES, ACTIVE_ENUMS, ACTIVE_UNIONS
+    ACTIVE_ALIAS_DECLS = {}
+    ACTIVE_ALIASES = {}
+    ACTIVE_ENUMS = {}
+    ACTIVE_UNIONS = {}
+    record_names = {record.name for record in program.records}
+    enum_names = {enum.name for enum in program.enums}
+    union_names = {union.name for union in program.unions}
+    constant_names = {constant.name for constant in program.constants}
+    alias_names: set[str] = set()
+    for alias in program.type_aliases:
+        if alias.name in SCALAR_TYPES:
+            raise InscriptionError(f"type {alias.name} conflicts with scalar type {alias.name}", alias.line)
+        if alias.name in alias_names:
+            raise InscriptionError(f"type {alias.name} is already defined", alias.line)
+        if alias.name in record_names:
+            raise InscriptionError(f"type {alias.name} conflicts with record {alias.name}", alias.line)
+        if alias.name in enum_names:
+            raise InscriptionError(f"type {alias.name} conflicts with enum {alias.name}", alias.line)
+        if alias.name in union_names:
+            raise InscriptionError(f"type {alias.name} conflicts with union {alias.name}", alias.line)
+        if alias.name in constant_names:
+            raise InscriptionError(f"type {alias.name} conflicts with constant {alias.name}", alias.line)
+        alias_names.add(alias.name)
+        ACTIVE_ALIAS_DECLS[alias.name] = alias
+
+    ACTIVE_ALIASES = {
+        name: TypeAliasInfo(name, _resolve_alias_target(name, ()), ACTIVE_ALIAS_DECLS[name].line)
+        for name in ACTIVE_ALIAS_DECLS
+    }
+    return ACTIVE_ALIASES
+
+
+def _resolve_alias_target(name: str, stack: tuple[str, ...]) -> ValueType:
+    alias = ACTIVE_ALIAS_DECLS[name]
+    if name in stack:
+        start = stack.index(name)
+        cycle = (*stack[start:], name)
+        raise InscriptionError(f"type alias cycle detected: {' -> '.join(cycle)}", alias.line)
+    return _resolve_alias_type(alias.target, (*stack, name), alias.line)
+
+
+def _resolve_alias_type(type_name: ValueType, stack: tuple[str, ...], line: int) -> ValueType:
+    if isinstance(type_name, BufferType):
+        return BufferType(type_name.length, _resolve_alias_type(type_name.element_type, stack, line))
+    if isinstance(type_name, ArrayType):
+        return ArrayType(type_name.length, _resolve_alias_type(type_name.element_type, stack, line))
+    if isinstance(type_name, ViewType):
+        return ViewType(_resolve_alias_type(type_name.element_type, stack, line), type_name.length)
+    if isinstance(type_name, RecordType):
+        alias = ACTIVE_ALIAS_DECLS.get(type_name.name)
+        if alias is not None:
+            return _resolve_alias_target(alias.name, stack)
+        if type_name.name in ACTIVE_ENUMS:
+            info = ACTIVE_ENUMS[type_name.name]
+            return EnumType(info.name, info.underlying_type)
+        if type_name.name in ACTIVE_UNIONS:
+            return UnionType(type_name.name)
+        # Records and layout records are resolved after aliases are collected.
+        return type_name
     return type_name
 
 class CompileTimeEvaluationError(Exception):
@@ -209,10 +291,12 @@ class CompileTimeEvaluationError(Exception):
 
 
 def analyze(program: Program) -> None:
+    type_alias_table(program)
     enum_table(program)
     unions = union_table(program)
     records = record_table(program)
     validate_union_payloads(unions, records)
+    validate_type_aliases(records)
     functions = function_table(program)
     constants = constant_table(program, records, functions)
     functions = resolve_function_table(functions, records, constants)
@@ -241,9 +325,10 @@ def enum_table(program: Program) -> dict[str, EnumInfo]:
             raise InscriptionError(f"enum {enum.name} conflicts with record {enum.name}", enum.line)
         if enum.name in constant_names:
             raise InscriptionError(f"enum {enum.name} conflicts with constant {enum.name}", enum.line)
-        if enum.underlying_type not in INTEGER_TYPES:
+        underlying_type = resolve_named_value_type(enum.underlying_type)
+        if not isinstance(underlying_type, str) or underlying_type not in INTEGER_TYPES:
             raise InscriptionError(
-                f"enum underlying type must be an integer type, got {format_type(enum.underlying_type)}", enum.line
+                f"enum underlying type must be an integer type, got {format_type(underlying_type)}", enum.line
             )
         if not enum.cases:
             raise InscriptionError(f"enum {enum.name} must declare at least one case", enum.line)
@@ -260,20 +345,20 @@ def enum_table(program: Program) -> dict[str, EnumInfo]:
                     {},
                     {},
                     case_constants,
-                    expected=enum.underlying_type,
+                    expected=underlying_type,
                 )
             except CompileTimeEvaluationError as exc:
                 raise InscriptionError(f"enum case {case.name} must be compile-time evaluable", exc.line or case.line) from exc
-            if value.type_name != enum.underlying_type:
+            if value.type_name != underlying_type:
                 raise InscriptionError(
-                    f"enum case {case.name} must have type {enum.underlying_type}, got {format_type(value.type_name)}", case.line
+                    f"enum case {case.name} must have type {underlying_type}, got {format_type(value.type_name)}", case.line
                 )
             int_value = int(value.value)
             if int_value in values:
                 raise InscriptionError(f"enum {enum.name} has duplicate case value {int_value}", case.line)
             cases[case.name] = int_value
             values[int_value] = case.name
-        enums[enum.name] = EnumInfo(enum.name, enum.underlying_type, cases, tuple(cases), enum.line)
+        enums[enum.name] = EnumInfo(enum.name, underlying_type, cases, tuple(cases), enum.line)
     ACTIVE_ENUMS = enums
     return enums
 
@@ -351,6 +436,47 @@ def validate_union_payloads(unions: dict[str, UnionInfo], records: dict[str, Rec
                 raise InscriptionError(
                     f"union payload type {format_type(payload_type)} is not supported in v0.26", payload.line
                 )
+
+
+def validate_type_aliases(records: dict[str, RecordDecl]) -> None:
+    for alias in ACTIVE_ALIAS_DECLS.values():
+        _validate_type_alias_target(alias.name, resolve_named_value_type(alias.target), alias.line, records)
+
+
+def _validate_type_alias_target(alias_name: str, type_name: ValueType, line: int, records: dict[str, RecordDecl]) -> None:
+    if isinstance(type_name, BufferType):
+        _validate_storage_alias_element(alias_name, type_name.element_type, line)
+        return
+    if isinstance(type_name, ArrayType):
+        _validate_storage_alias_element(alias_name, type_name.element_type, line)
+        return
+    if isinstance(type_name, ViewType):
+        _validate_storage_alias_element(alias_name, type_name.element_type, line)
+        return
+    if isinstance(type_name, RecordType):
+        if type_name.name not in records:
+            raise InscriptionError(f"unknown type {type_name.name}", line)
+        return
+    if isinstance(type_name, EnumType | UnionType):
+        return
+    if isinstance(type_name, str) and type_name in SCALAR_TYPES:
+        return
+    raise InscriptionError(f"unknown type {format_type(type_name)}", line)
+
+
+def _validate_storage_alias_element(alias_name: str, element_type: ValueType, line: int) -> None:
+    element_type = resolve_named_value_type(element_type)
+    if isinstance(element_type, UnionType):
+        raise InscriptionError(f"type alias {alias_name} may not use union element type {format_type(element_type)}", line)
+    if isinstance(element_type, RecordType):
+        raise InscriptionError(f"type alias {alias_name} may not use record element type {format_type(element_type)}", line)
+    if isinstance(element_type, BufferType | ArrayType | ViewType):
+        raise InscriptionError(f"type alias {alias_name} may not use storage element type {format_type(element_type)}", line)
+    if element_type == "i1":
+        # Preserve existing context-specific i1 diagnostics at use sites.
+        return
+    if not is_numeric_type(element_type) and not isinstance(element_type, EnumType):
+        raise InscriptionError(f"type alias {alias_name} has invalid storage element type {format_type(element_type)}", line)
 
 
 def _primitive_constants_before_enum(program: Program, enum_line: int) -> dict[str, ConstValue]:
@@ -491,6 +617,8 @@ def constant_table(
             raise InscriptionError(f"constant {const.name} conflicts with enum {const.name}", const.line)
         if const.name in ACTIVE_UNIONS:
             raise InscriptionError(f"constant {const.name} conflicts with union {const.name}", const.line)
+        if const.name in ACTIVE_ALIAS_DECLS:
+            raise InscriptionError(f"constant {const.name} conflicts with type {const.name}", const.line)
         resolved_type = resolve_value_type(const.type_name, const.line, records, constants, functions, {})
         if isinstance(resolved_type, UnionType):
             raise InscriptionError("union constants are not supported in v0.25", const.line)
@@ -779,7 +907,7 @@ def _check_parameter_type(
     if isinstance(type_name, ArrayType):
         resolved = resolve_array_type(type_name, line, records, constants, functions, {})
         element = resolved.element_type
-        suffix = f"view of {element}" if isinstance(element, str) else "view"
+        suffix = f"view of {format_type(element)}"
         raise InscriptionError(f"array parameters are not supported in v0.22; use {suffix}", line)
     if isinstance(type_name, ViewType):
         _check_view_type(type_name, line)
@@ -852,6 +980,9 @@ def _check_body_stmt(
         return
     if isinstance(stmt, ArrayBinding):
         _declare_array(stmt, bindings, functions, records, constants)
+        return
+    if isinstance(stmt, StorageAliasBinding):
+        _declare_storage_alias(stmt, bindings, functions, records, constants)
         return
     if isinstance(stmt, ViewBinding):
         _declare_view(stmt, bindings, functions, records, constants)
@@ -989,6 +1120,38 @@ def _declare_array(
                 f"array {stmt.name} fill must have type {format_type(array_type.element_type)}, got {format_type(actual)}", stmt.line
             )
     bindings[stmt.name] = Binding(array_type, "array", stmt.line, writable=False, root=stmt.name)
+
+
+def _declare_storage_alias(
+    stmt: StorageAliasBinding,
+    bindings: dict[str, Binding],
+    functions: dict[str, Function],
+    records: dict[str, RecordDecl],
+    constants: dict[str, ConstValue],
+) -> None:
+    resolved = resolve_value_type(stmt.alias_type, stmt.line, records, constants, functions, _env_types(bindings))
+    if isinstance(resolved, BufferType):
+        _declare_buffer(
+            BufferBinding(stmt.name, resolved, stmt.line, stmt.fill, stmt.values),
+            bindings,
+            functions,
+            records,
+            constants,
+        )
+        return
+    if isinstance(resolved, ArrayType):
+        _declare_array(
+            ArrayBinding(stmt.name, resolved, stmt.line, stmt.fill, stmt.values),
+            bindings,
+            functions,
+            records,
+            constants,
+        )
+        return
+    raise InscriptionError(
+        f"type alias {format_type(stmt.alias_type)} resolves to {format_type(resolved)} and cannot be constructed with {stmt.initializer}",
+        stmt.line,
+    )
 
 
 def _declare_view(
@@ -1692,9 +1855,15 @@ def evaluate_const_expr(
     if isinstance(expr, Boolean):
         return ConstValue("i1", expr.value)
     if isinstance(expr, EnumCase):
-        info = ACTIVE_ENUMS.get(expr.type_name)
+        resolved_member_type = resolve_named_value_type(RecordType(expr.type_name))
+        member_type_name = (
+            resolved_member_type.name
+            if isinstance(resolved_member_type, EnumType | UnionType)
+            else expr.type_name
+        )
+        info = ACTIVE_ENUMS.get(member_type_name)
         if info is None:
-            if expr.type_name in ACTIVE_UNIONS:
+            if member_type_name in ACTIVE_UNIONS:
                 raise CompileTimeEvaluationError("union value is not compile-time evaluable", expr.line)
             raise InscriptionError(f"unknown type {expr.type_name}", expr.line)
         if expr.case_name not in info.cases:
@@ -1724,11 +1893,12 @@ def evaluate_const_expr(
             raise CompileTimeEvaluationError(f"length of {expr.name} is not compile-time evaluable", expr.line)
         return ConstValue("i32", binding_type.length)
     if isinstance(expr, SizeOfType):
-        return ConstValue("i32", layout_info(records[expr.type_name]).size)
+        return ConstValue("i32", layout_info(_require_layout_record_decl(expr.type_name, expr.line, records, f"size of {expr.type_name}")).size)
     if isinstance(expr, AlignmentOfType):
-        return ConstValue("i32", layout_info(records[expr.type_name]).alignment)
+        return ConstValue("i32", layout_info(_require_layout_record_decl(expr.type_name, expr.line, records, f"alignment of {expr.type_name}")).alignment)
     if isinstance(expr, OffsetOfField):
-        return ConstValue("i32", layout_info(records[expr.type_name]).field_offsets[expr.field])
+        record = _require_layout_record_decl(expr.type_name, expr.line, records, f"offset of {expr.field} in {expr.type_name}")
+        return ConstValue("i32", layout_info(record).field_offsets[expr.field])
     if isinstance(expr, FieldAccess):
         qualified_constant = f"{expr.name}.{expr.field}"
         if qualified_constant in constants and expr.name not in env:
@@ -1996,9 +2166,15 @@ def infer_expr_type(
             require_type("i1", expected, expr.line)
         return "i1"
     if isinstance(expr, EnumCase):
-        info = ACTIVE_ENUMS.get(expr.type_name)
+        resolved_member_type = resolve_named_value_type(RecordType(expr.type_name))
+        member_type_name = (
+            resolved_member_type.name
+            if isinstance(resolved_member_type, EnumType | UnionType)
+            else expr.type_name
+        )
+        info = ACTIVE_ENUMS.get(member_type_name)
         if info is None:
-            union = ACTIVE_UNIONS.get(expr.type_name)
+            union = ACTIVE_UNIONS.get(member_type_name)
             if union is None:
                 raise InscriptionError(f"unknown type {expr.type_name}", expr.line)
             variant = _union_variant(union, expr.case_name, expr.line)
@@ -2753,10 +2929,18 @@ def _require_record_type(name: str, line: int, env: dict[str, ValueType]) -> Rec
 
 
 def _record_decl(record_type: RecordType, line: int, records: dict[str, RecordDecl]) -> RecordDecl:
+    record_type = _resolve_record_type(record_type, line)
     record = records.get(record_type.name)
     if record is None:
         raise InscriptionError(f"unknown record type {record_type.name}", line)
     return record
+
+
+def _resolve_record_type(record_type: RecordType, line: int) -> RecordType:
+    resolved = resolve_named_value_type(record_type)
+    if not isinstance(resolved, RecordType):
+        raise InscriptionError(f"unknown record type {record_type.name}", line)
+    return resolved
 
 
 def _require_layout_record_decl(
@@ -2765,9 +2949,12 @@ def _require_layout_record_decl(
     records: dict[str, RecordDecl],
     context: str,
 ) -> RecordDecl:
-    record = records.get(type_name)
-    if record is None:
+    resolved = resolve_named_value_type(RecordType(type_name))
+    if not isinstance(resolved, RecordType):
         raise InscriptionError(f"unknown record type {type_name}", line)
+    record = records.get(resolved.name)
+    if record is None:
+        raise InscriptionError(f"unknown record type {resolved.name}", line)
     if record.layout_kind == "value":
         raise InscriptionError(f"{context} requires a layout record", line)
     return record
@@ -2794,7 +2981,7 @@ def infer_record_constructor_type(
     functions: dict[str, Function],
     records: dict[str, RecordDecl],
 ) -> RecordType:
-    record_type = RecordType(expr.type_name)
+    record_type = _resolve_record_type(RecordType(expr.type_name), expr.line)
     record = _record_decl(record_type, expr.line, records)
     expected_names = [field.name for field in record.fields]
     actual_names = [field.name for field in expr.fields]
@@ -2819,7 +3006,9 @@ def infer_record_constructor_type(
 
 
 def _union_info(type_name: str, line: int) -> UnionInfo:
-    info = ACTIVE_UNIONS.get(type_name)
+    resolved = resolve_named_value_type(RecordType(type_name))
+    name = resolved.name if isinstance(resolved, UnionType) else type_name
+    info = ACTIVE_UNIONS.get(name)
     if info is None:
         raise InscriptionError(f"unknown type {type_name}", line)
     return info
@@ -2897,6 +3086,7 @@ def infer_layout_read_type(
     constants: dict[str, ConstValue] | None = None,
 ) -> RecordType:
     record = _require_layout_record_decl(expr.type_name, expr.line, records, f"read {expr.type_name}")
+    record_type = RecordType(record.name)
     buffer_type = _require_indexable_type(expr.buffer_name, expr.line, env)
     if buffer_type.element_type != "u8":
         if isinstance(buffer_type, ViewType):
@@ -2919,7 +3109,7 @@ def infer_layout_read_type(
         records,
         constants,
     )
-    return RecordType(expr.type_name)
+    return record_type
 
 
 def _check_buffer_index(

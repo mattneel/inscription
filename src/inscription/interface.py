@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .ast import EnumType, Function, Program, RecordDecl, TypeName, ValueType
+from .ast import EnumType, Function, Program, RecordDecl, TypeAliasDecl, TypeName, ValueType
 from .compiler import LoadedCompilation, load_compilation, module_path
 from .diagnostics import InscriptionError
 from .semantic import (
@@ -20,9 +20,13 @@ from .semantic import (
     function_table,
     EnumInfo,
     record_table,
+    resolve_value_type,
     resolve_function_table,
+    TypeAliasInfo,
+    type_alias_table,
     UnionInfo,
     union_table,
+    validate_type_aliases,
     validate_union_payloads,
 )
 
@@ -43,6 +47,7 @@ C_IDENTIFIER_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 @dataclass(frozen=True)
 class InterfaceContext:
     compilation: LoadedCompilation
+    type_aliases: dict[str, TypeAliasInfo]
     enums: dict[str, EnumInfo]
     unions: dict[str, UnionInfo]
     records: dict[str, RecordDecl]
@@ -56,13 +61,15 @@ def load_interface_context(source_path: Path, *, module_root: Path | None = None
     compilation = load_compilation(source_path.read_text(), source_path=source_path, module_root=module_root)
     analyze(compilation.program)
     raw_functions = function_table(compilation.program)
+    aliases = type_alias_table(compilation.program)
     enums = enum_table(compilation.program)
     unions = union_table(compilation.program)
     records = record_table(compilation.program)
     validate_union_payloads(unions, records)
+    validate_type_aliases(records)
     constants = constant_table(compilation.program, records, raw_functions)
     functions = resolve_function_table(raw_functions, records, constants)
-    return InterfaceContext(compilation, enums, unions, records, constants, functions, compilation.module_root)
+    return InterfaceContext(compilation, aliases, enums, unions, records, constants, functions, compilation.module_root)
 
 
 def emit_interface_json(context: InterfaceContext) -> str:
@@ -137,6 +144,7 @@ def _module_json(
         "name": name,
         "path": _relative_path(path, _root_dir(context)),
         "imports": [_import_json(import_decl.module, _root_dir(context)) for import_decl in program.imports],
+        "type_aliases": [_type_alias_json(alias, name, context) for alias in program.type_aliases],
         "constants": [_constant_json(const.name, name, context.constants[const.name], context) for const in program.constants],
         "enums": [_enum_json(context.enums[enum.name], name) for enum in program.enums],
         "unions": [_union_json(context.unions[union.name], name) for union in program.unions],
@@ -181,6 +189,22 @@ def _constant_json(name: str, module_name: str | None, value: ConstValue, contex
                 payload["case"] = _display_name(f"{info.name}.{case_name}", module_name)
                 break
     return payload
+
+
+def _type_alias_json(alias: TypeAliasDecl, module_name: str | None, context: InterfaceContext) -> dict[str, Any]:
+    target = resolve_value_type(
+        alias.target,
+        alias.line,
+        context.records,
+        context.constants,
+        context.functions,
+        {},
+    )
+    return {
+        "name": _display_name(alias.name, module_name),
+        "kind": "type-alias",
+        "target": _format_interface_type(target, module_name),
+    }
 
 
 def _enum_json(enum: EnumInfo, module_name: str | None) -> dict[str, Any]:

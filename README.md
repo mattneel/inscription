@@ -6,11 +6,12 @@ The language is readable, but it is **not** natural-language interpretation: eve
 
 ## Status
 
-This repository currently implements **Inscription v0.26**:
+This repository currently implements **Inscription v0.27**:
 
 - source-visible scalar types: `i1`, signed integers `i8`/`i16`/`i32`/`i64`, unsigned integers `u8`/`u16`/`u32`/`u64`, and floats `f32`/`f64`
 - nominal integer-backed enums declared with `enum TypeName: underlying_integer_type:` and cases such as `active be 1`
 - nominal tagged unions declared with `union TypeName:` using payload-free variants and named single- or multi-payload variants
+- transparent type aliases declared with `type AliasName be type_expression`, including storage aliases for buffers, arrays, and views
 - phrase-shaped function definitions and phrase-shaped calls
 - scalar-only extern phrase declarations such as `extern population count of x: i32 gives i32 as llvm.ctpop.i32` and float externs such as `extern square root of x: f64 gives f64 as llvm.sqrt.f64`
 - scalar-only exported phrase definitions such as `export add x: i32 and y: i32 gives i32 as ins_add:` and `export multiply x: f64 by y: f64 gives f64 as ins_multiply_f64:`
@@ -37,7 +38,9 @@ This repository currently implements **Inscription v0.26**:
 - compile-time assertions with `check expression` at top level or inside phrase bodies
 - runtime requirements with `require expression` inside phrase bodies
 - local fixed-size stack buffers with `let name be buffer of LENGTH TYPE filled with expression` or `let name be buffer of LENGTH TYPE containing a, b, c`, where `LENGTH` may be a literal, constant name, or parenthesized compile-time expression, and `TYPE` may be numeric or enum
+- storage alias construction such as `let cells be CellBuffer containing 1, 2, 3, 4` when `CellBuffer` aliases a fixed-size buffer
 - immutable fixed-size local arrays with `let name be array of LENGTH TYPE containing a, b, c` or `filled with expression`, with numeric or enum elements
+- array alias construction such as `let numbers be Scores filled with 0` when `Scores` aliases a fixed-size array
 - buffer parameter holes with `name: buffer of LENGTH TYPE`
 - buffer/view/array loads with `name at index`, plus mutable buffer/view stores with `name at index becomes expression`
 - borrowed non-owning views over buffers, arrays, or other views with `let name be view of source from start for count`
@@ -73,9 +76,9 @@ This repository currently implements **Inscription v0.26**:
 - MLIR emission using `func`, `arith`, `scf.if`, `scf.for`, `scf.while`, flattened scalar SSA and flattened scalar function results for records, local `memref.alloca`/`memref.load`/`memref.store` for buffers and arrays, private `func.func` declarations for scalar extern phrases, public stable-symbol definitions for exported phrases, and `cf.assert` when runtime assertions are emitted
 - tooling output for frontend source MLIR, optimized source MLIR, lowered MLIR, LLVM IR, optional single-object output through LLVM 22 `llc`, native executable output through LLVM 22 `clang`, deterministic static archives through LLVM 22 `llvm-ar`, deterministic interface JSON, and conservative C headers
 - LLVM 22 lowering and execution through `mlir-opt`, `mlir-translate`, and `lli`
-- no source-level I/O, heap allocation, pointers, dynamic-size buffers, array parameters or returns, enum extern/export ABI, enum C header generation, recursive unions, union constants, union buffers/arrays/views, union record fields, extern/export union ABI, C header union generation, match guards, range patterns, wildcard patterns, fallthrough, buffer/view return values, buffer/view/array aliasing beyond conservative same-root rejection, slices, C ABI structs, C ABI annotations, arbitrary pass pipelines, LLVM `opt`, LTO, linker flags beyond explicit `--link-object`/`--archive-object`, extern/exported buffer/view/record parameters, extern/exported record returns, executable packaging beyond one output file, shared libraries, record/layout C structs, header installation, strings, statement-level `return`, `break`, `continue`, macros, import aliases, wildcard imports, generics, global storage, exceptions, result/error values, source strings, source-level runtime assertion messages, overloading, type coercions, or natural-language inference
+- no source-level I/O, heap allocation, pointers, dynamic-size buffers, array parameters or returns, enum extern/export ABI, enum C header generation, recursive unions, recursive type aliases, parameterized aliases, alias-created nominal identity, C typedef emission, union constants, union buffers/arrays/views, union record fields, extern/export union ABI, C header union generation, match guards, range patterns, wildcard patterns, fallthrough, buffer/view return values, buffer/view/array aliasing beyond conservative same-root rejection, slices, C ABI structs, C ABI annotations, arbitrary pass pipelines, LLVM `opt`, LTO, linker flags beyond explicit `--link-object`/`--archive-object`, extern/exported buffer/view/record parameters, extern/exported record returns, executable packaging beyond one output file, shared libraries, record/layout C structs, header installation, strings, statement-level `return`, `break`, `continue`, macros, import aliases, wildcard imports, generics, global storage, exceptions, result/error values, source strings, source-level runtime assertion messages, overloading, type coercions, or natural-language inference
 
-See [`docs/inscription-v0.26-spec.md`](docs/inscription-v0.26-spec.md) and [`grammar/inscription-v0.26.ebnf`](grammar/inscription-v0.26.ebnf) for the exact current language and tooling contract. The immutable previous contracts remain in [`docs/`](docs) and [`grammar/`](grammar), including the v0.19 interface metadata contract.
+See [`docs/inscription-v0.27-spec.md`](docs/inscription-v0.27-spec.md) and [`grammar/inscription-v0.27.ebnf`](grammar/inscription-v0.27.ebnf) for the exact current language and tooling contract. The immutable previous contracts remain in [`docs/`](docs) and [`grammar/`](grammar), including the v0.19 interface metadata contract.
 
 ## Requirements
 
@@ -199,13 +202,13 @@ python -m inscription check-tools [--show-pipeline] [--require-object] [--requir
 
 Commands return `2` for compiler, diagnostic, toolchain, or filesystem errors. Imports resolve relative to the root source file directory by default; pass `--module-root ROOT` to resolve module paths from another directory.
 
-`compile --emit mlir` emits the frontend source MLIR and is the default exact-golden artifact. `--emit mlir` remains raw frontend output even with `-O1` or `-O2`. `--emit lowered-mlir` emits MLIR after the configured lowering pipeline. `--emit llvm-ir` emits LLVM IR from `mlir-translate`. `--emit object -o file.o` emits a single native object with LLVM 22 `llc`; it does not link or resolve extern symbols. `--emit executable -o program` emits an object and links it with LLVM 22 `clang`; it requires a root no-hole integer-scalar `main` and does not run the executable. `--emit static-library -o libname.a` emits a deterministic native static archive with LLVM 22 `llvm-ar`; it does not require `main`, does not invoke `clang`, and does not resolve extern symbols. When a compilation contains exported phrases, the root executable `main` entry point is omitted from the archive object so generated C callers can provide their own `main`; normal helper phrases remain available according to existing symbol emission. `--emit interface-json` emits deterministic host-integration metadata for loaded modules, constants, enums, unions, records, layout records, exported phrases, and extern phrases. `--emit c-header` emits a deterministic C header for exported scalar phrases only; v0.26 C headers support `i32`, `u32`, `i64`, `u64`, `f32`, and `f64`, reject dotted/non-C exported symbols, and do not include extern declarations. Repeated `--link-object PATH` arguments pass explicit additional objects to clang after the generated object. Repeated `--archive-object PATH` arguments add explicit additional objects to a static archive after the generated object and are valid only with `--emit static-library`. `--opt-level none|basic|aggressive` chooses deterministic MLIR optimization passes before lowering; `-O0`, `-O1`, and `-O2` are aliases for `none`, `basic`, and `aggressive`. Optimization affects lowered MLIR, LLVM IR, object emission, executable emission, static-library emission, and `run`, but not source MLIR, interface JSON, or C header output. `--save-temps DIR` writes deterministic `<stem>.mlir`, `<stem>.lowered.mlir`, `<stem>.ll`, and, for object/executable/static-library emission, `<stem>.o` intermediates; with `basic` or `aggressive` it also writes `<stem>.optimized.mlir`. Interface JSON and C header modes do not create temps unless `--verify` requests the MLIR verification pipeline. `run --save-temps DIR` saves the stages used before execution through `lli`, which remains the default run backend.
+`compile --emit mlir` emits the frontend source MLIR and is the default exact-golden artifact. `--emit mlir` remains raw frontend output even with `-O1` or `-O2`. `--emit lowered-mlir` emits MLIR after the configured lowering pipeline. `--emit llvm-ir` emits LLVM IR from `mlir-translate`. `--emit object -o file.o` emits a single native object with LLVM 22 `llc`; it does not link or resolve extern symbols. `--emit executable -o program` emits an object and links it with LLVM 22 `clang`; it requires a root no-hole integer-scalar `main` and does not run the executable. `--emit static-library -o libname.a` emits a deterministic native static archive with LLVM 22 `llvm-ar`; it does not require `main`, does not invoke `clang`, and does not resolve extern symbols. When a compilation contains exported phrases, the root executable `main` entry point is omitted from the archive object so generated C callers can provide their own `main`; normal helper phrases remain available according to existing symbol emission. `--emit interface-json` emits deterministic host-integration metadata for loaded modules, type aliases, constants, enums, unions, records, layout records, exported phrases, and extern phrases. `--emit c-header` emits a deterministic C header for exported scalar phrases only; v0.27 C headers support `i32`, `u32`, `i64`, `u64`, `f32`, and `f64`, reject dotted/non-C exported symbols, and do not include extern declarations. Repeated `--link-object PATH` arguments pass explicit additional objects to clang after the generated object. Repeated `--archive-object PATH` arguments add explicit additional objects to a static archive after the generated object and are valid only with `--emit static-library`. `--opt-level none|basic|aggressive` chooses deterministic MLIR optimization passes before lowering; `-O0`, `-O1`, and `-O2` are aliases for `none`, `basic`, and `aggressive`. Optimization affects lowered MLIR, LLVM IR, object emission, executable emission, static-library emission, and `run`, but not source MLIR, interface JSON, or C header output. `--save-temps DIR` writes deterministic `<stem>.mlir`, `<stem>.lowered.mlir`, `<stem>.ll`, and, for object/executable/static-library emission, `<stem>.o` intermediates; with `basic` or `aggressive` it also writes `<stem>.optimized.mlir`. Interface JSON and C header modes do not create temps unless `--verify` requests the MLIR verification pipeline. `run --save-temps DIR` saves the stages used before execution through `lli`, which remains the default run backend.
 
 `highlight` uses Pygments with a built-in Inscription lexer. The default output is ANSI-colored terminal text. Use `--format html --full -o file.html` to emit a complete HTML document.
 
 ## Language summary
 
-A program is an optional module declaration followed by imports, top-level constants, compile-time checks, record declarations, layout-record declarations, enum declarations, union declarations, extern phrase declarations, exported phrase definitions, and phrase definitions:
+A program is an optional module declaration followed by imports, top-level constants, compile-time checks, record declarations, layout-record declarations, enum declarations, union declarations, type alias declarations, extern phrase declarations, exported phrase definitions, and phrase definitions:
 
 ```text
 module module.name
@@ -221,6 +224,9 @@ enum Mode: u8:
 union MaybeI32:
   none
   some value: i32
+
+type Count be i32
+type CellView be view of Count
 
 extern phrase hole: i32 gives i32 as external.symbol
 extern side effect code: i32 does as host_notify
@@ -285,6 +291,29 @@ main gives i32:
   square of 12
 ```
 
+Type aliases are transparent source-level names for existing types:
+
+```text
+type Count be i32
+type Byte be u8
+type Scores be array of 4 Count
+type CellView be view of Count
+```
+
+Aliases can target primitive scalars, enums, records, layout records, unions, fixed-size buffers, fixed-size arrays, and borrowed views. They do not create new nominal identity: `Count` is exactly `i32`, and an alias to `Mode` is exactly the original enum type. Aliases work across modules through qualification, such as `Types.Count`, and mutually recursive aliases are rejected. Storage aliases can be constructed directly when they resolve to a buffer or array:
+
+```text
+type CellBuffer be buffer of 4 i32
+type CellArray be array of 4 i32
+
+main gives i32:
+  let cells be CellBuffer containing 1, 2, 3, 4
+  let numbers be CellArray filled with 2
+  cells at 0 plus numbers at 1
+```
+
+View aliases are accepted in phrase parameter type positions but cannot be constructed with `filled with` or `containing`. Export and extern restrictions are applied after alias resolution, and generated C headers use resolved primitive scalar types without emitting C `typedef`s.
+
 Enums are nominal integer-backed values with explicit cases:
 
 ```text
@@ -297,7 +326,7 @@ choose mode mode: Mode gives i32:
   otherwise 3
 ```
 
-Cases are referenced as `Mode.active` or, for imports, `Protocol.Mode.active`. Enum equality works directly for matching enum types. Enum arithmetic and ordered comparisons are not supported directly; cast to the underlying integer first, for example `mode as u8 is greater than 0`. Enums can appear in constants, phrase parameters/returns, value records, buffers, arrays, views, layout records, and match scrutinees/patterns. Extern/export enum ABI and C header enum generation are not supported in v0.26.
+Cases are referenced as `Mode.active` or, for imports, `Protocol.Mode.active`. Enum equality works directly for matching enum types. Enum arithmetic and ordered comparisons are not supported directly; cast to the underlying integer first, for example `mode as u8 is greater than 0`. Enums can appear in constants, phrase parameters/returns, value records, buffers, arrays, views, layout records, and match scrutinees/patterns. Extern/export enum ABI and C header enum generation are not supported in v0.27.
 
 Unions are nominal tagged value types with deterministic declaration-order tags and flattened payload slots:
 
@@ -313,7 +342,7 @@ value or zero maybe: MaybeI32 gives i32:
     otherwise gives 0
 ```
 
-Constructors are written `MaybeI32.none` for payload-free variants and `MaybeI32.some with value be 42` for single-payload variants and `Token.operator with symbol be 43 and precedence be 10` for multi-payload variants. Imported constructors are qualified, for example `Maybe.MaybeI32.some with value be 7`. Union values can be local bindings, normal phrase parameters, normal phrase returns, guarded value results, match expression results, and whole-value rebinding targets. Payloads are accessed only by binding them in match arms. Patterns bind fields by declared name, as in `Token.operator with symbol and precedence`, or by arm-local aliases, as in `Token.operator with symbol as op and precedence as prec`. Union payloads may be primitive scalars, enums, value records, or layout records; union payloads, buffers, arrays, and views are not supported. Multi-payload fields are written in declaration order, and constructors must use the same order. Unions are not allowed in constants, records, buffers, arrays, views, layout records, extern/export ABI, or C headers in v0.26.
+Constructors are written `MaybeI32.none` for payload-free variants and `MaybeI32.some with value be 42` for single-payload variants and `Token.operator with symbol be 43 and precedence be 10` for multi-payload variants. Imported constructors are qualified, for example `Maybe.MaybeI32.some with value be 7`. Union values can be local bindings, normal phrase parameters, normal phrase returns, guarded value results, match expression results, and whole-value rebinding targets. Payloads are accessed only by binding them in match arms. Patterns bind fields by declared name, as in `Token.operator with symbol and precedence`, or by arm-local aliases, as in `Token.operator with symbol as op and precedence as prec`. Union payloads may be primitive scalars, enums, value records, or layout records; union payloads, buffers, arrays, and views are not supported. Multi-payload fields are written in declaration order, and constructors must use the same order. Unions are not allowed in constants, records, buffers, arrays, views, layout records, extern/export ABI, or C headers in v0.27.
 
 Match expressions provide deterministic multi-way value branching over booleans, integer scalars, enums, and unions:
 
@@ -335,7 +364,7 @@ match mode:
     active becomes active
 ```
 
-Patterns are compile-time constants or union variants: enum cases, integer literals/constants, boolean literals/constants, payload-free union variants, and union variants such as `MaybeI32.some with value` or `Token.operator with symbol as op and precedence as prec`. `otherwise` is required and final in v0.26. Union payload bindings are scoped to their arm. There is no fallthrough, wildcard `_`, ranges, OR patterns, guards, destructuring outside union payload binding, or float/record/buffer/view/array matching.
+Patterns are compile-time constants or union variants: enum cases, integer literals/constants, boolean literals/constants, payload-free union variants, and union variants such as `MaybeI32.some with value` or `Token.operator with symbol as op and precedence as prec`. `otherwise` is required and final in v0.27. Union payload bindings are scoped to their arm. There is no fallthrough, wildcard `_`, ranges, OR patterns, guards, destructuring outside union payload binding, or float/record/buffer/view/array matching.
 
 Records are source-level value aggregates with scalar or enum fields. `record` declarations remain value-only and have no byte layout; the compiler flattens record fields into scalar SSA values and function operands:
 
@@ -582,19 +611,23 @@ mode is equal to Mode.active
 mode is not equal to Mode.failed
 ```
 
-Important v0.26 rules:
+Important v0.27 rules:
 
+- type aliases are transparent source ergonomics and do not change nominal identity, runtime representation, MLIR lowering, or ABI behavior
+- aliases can target primitive scalars, enums, records, layout records, unions, buffers, arrays, and views; recursive and parameterized aliases are rejected
+- storage aliases that resolve to buffers or arrays can be constructed with `filled with` or `containing`; aliases to views or scalars cannot
+- C headers use resolved primitive types for alias-based exported signatures and do not emit C typedefs in v0.27
 - enums are nominal integer-backed types with explicit case values, equality comparisons, explicit casts to/from the underlying integer, and no implicit enum/integer conversion
 - match expressions and match step blocks branch over `i1`, integer scalar, enum, and union scrutinees
 - match expression arms use `pattern gives expression`; match step arms use `pattern:` followed by steps
-- match `otherwise` arms are required and must be final in v0.26
+- match `otherwise` arms are required and must be final in v0.27
 - match patterns are enum cases, union variants, integer literals/constants, or boolean literals/constants; duplicates are rejected when statically identical
 - match expressions can produce scalar, enum, union, value-record, or layout-record values and lower to nested `scf.if`
 - tagged unions use declaration-order `i32` tags and flattened payload slots; payloads are bound only by match arms such as `MaybeI32.some with value` or `Token.operator with symbol as op and precedence as prec`
-- v0.26 does not add recursive unions, union constants, union storage elements, extern/export union ABI, C header unions, destructuring outside union payload binding, wildcard/range/or patterns, guards, fallthrough, exhaustive matches without otherwise, float matching, or record/storage matching
+- v0.27 does not add recursive unions, union constants, union storage elements, extern/export union ABI, C header unions, destructuring outside union payload binding, wildcard/range/or patterns, guards, fallthrough, exhaustive matches without otherwise, float matching, or record/storage matching
 - enum cases use `Mode.case` or `Module.Mode.case`; imported enum cases are not visible unqualified
 - enum values can be used in constants, normal phrase parameters/returns, records, buffers, arrays, views, and layout records; layout records encode enums as their underlying integer
-- enum arithmetic, ordered comparisons, extern/export enum ABI, and C header enum generation are not supported in v0.26
+- enum arithmetic, ordered comparisons, extern/export enum ABI, and C header enum generation are not supported in v0.27
 - buffers can be literal-initialized with `containing` expression lists; the element count must exactly match the evaluated length
 - arrays are immutable fixed-size local storage initialized with `containing` or `filled with`, lowered through local memrefs, and readable with `array at index`
 - arrays expose `length of`, support `for each index`, can be viewed, and can be passed to `view of TYPE` parameters as read-only full views
@@ -620,10 +653,10 @@ Important v0.26 rules:
 - repeated `--archive-object PATH` adds explicit additional objects to static archives after the generated object and is valid only with `--emit static-library`
 - unresolved externs may compile to object but fail executable linking with `executable link failed`
 - `compile --emit interface-json` requires no `main` and emits deterministic metadata without timestamps, absolute paths, usernames, hostnames, or git hashes
-- interface JSON includes extern declarations; C headers describe only exported functions provided by the Inscription compilation unit
-- `compile --emit c-header` supports exported ABI types `i32`, `u32`, `i64`, `u64`, `f32`, and `f64` in v0.26 and uses generated C parameter names `arg0`, `arg1`, ...
+- interface JSON includes type aliases and extern declarations; C headers describe only exported functions provided by the Inscription compilation unit
+- `compile --emit c-header` supports exported ABI types `i32`, `u32`, `i64`, `u64`, `f32`, and `f64` in v0.27 and uses generated C parameter names `arg0`, `arg1`, ...
 - `compile/run --save-temps DIR` saves produced compiler intermediates under deterministic filenames, including `<stem>.optimized.mlir` for non-`none` optimization
-- v0.26 does not expose arbitrary pass pipelines, LLVM `opt`, LTO, linker flags beyond `--link-object`/`--archive-object`, target triples, optimization remarks, inlining, symbol DCE by default, native runtime libraries, executable packaging beyond one output file, shared libraries, C ABI structs, buffer/view C ABI, record/layout C structs, or header installation
+- v0.27 does not expose arbitrary pass pipelines, LLVM `opt`, LTO, linker flags beyond `--link-object`/`--archive-object`, target triples, optimization remarks, inlining, symbol DCE by default, native runtime libraries, executable packaging beyond one output file, shared libraries, C ABI structs, buffer/view C ABI, record/layout C structs, or header installation
 - function names are generated from the leading literal words in a phrase definition
 - extern phrase declarations have no body and emit external `func.func private` declarations
 - exported phrase definitions have bodies and emit public definitions with the symbol named after `as`
@@ -706,7 +739,7 @@ Run the full test suite:
 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python -m unittest discover -s tests -v
 ```
 
-The suite includes exact source-MLIR golden conformance files under [`tests/goldens`](tests/goldens). Each `*.ins` source must compile byte-for-byte to its sibling `*.mlir`. v0.16/v0.17/v0.18/v0.19/v0.20/v0.21/v0.22/v0.23/v0.24/v0.25/v0.26 artifact tests also exercise lowered MLIR, LLVM IR, object emission when `llc` is available, executable emission when `clang` is available, static-library emission when `llvm-ar` is available, saved intermediates, optimization presets, generated interface metadata/headers, and C header/archive smoke integration without making lowered or optimized tool output byte-for-byte golden-stable.
+The suite includes exact source-MLIR golden conformance files under [`tests/goldens`](tests/goldens). Each `*.ins` source must compile byte-for-byte to its sibling `*.mlir`. v0.16/v0.17/v0.18/v0.19/v0.20/v0.21/v0.22/v0.23/v0.24/v0.25/v0.26/v0.27 artifact tests also exercise lowered MLIR, LLVM IR, object emission when `llc` is available, executable emission when `clang` is available, static-library emission when `llvm-ar` is available, saved intermediates, optimization presets, generated interface metadata/headers, and C header/archive smoke integration without making lowered or optimized tool output byte-for-byte golden-stable.
 
 With LLVM/MLIR 22 available, verify the toolchain and fixture exit codes:
 
@@ -805,7 +838,8 @@ docs/inscription-v0.22-spec.md v0.22 fixed-size array specification
 docs/inscription-v0.23-spec.md v0.23 nominal enum specification
 docs/inscription-v0.24-spec.md v0.24 match specification
 docs/inscription-v0.25-spec.md v0.25 tagged union specification
-docs/inscription-v0.26-spec.md current v0.26 multi-payload union specification
+docs/inscription-v0.26-spec.md v0.26 multi-payload union specification
+docs/inscription-v0.27-spec.md current v0.27 type alias specification
 grammar/inscription-v0.ebnf   original v0 grammar
 grammar/inscription-v0.1.ebnf v0.1 grammar
 grammar/inscription-v0.2.ebnf v0.2 grammar
@@ -832,7 +866,8 @@ grammar/inscription-v0.22.ebnf v0.22 grammar mirror
 grammar/inscription-v0.23.ebnf v0.23 grammar mirror
 grammar/inscription-v0.24.ebnf v0.24 grammar mirror
 grammar/inscription-v0.25.ebnf v0.25 grammar mirror
-grammar/inscription-v0.26.ebnf current v0.26 grammar mirror
+grammar/inscription-v0.26.ebnf v0.26 grammar mirror
+grammar/inscription-v0.27.ebnf current v0.27 grammar mirror
 tests/goldens/                exact MLIR conformance goldens
 tests/                        unit tests and executable fixtures
 ```

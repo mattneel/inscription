@@ -44,6 +44,7 @@ from .ast import (
     ReturnStmt,
     SetStmt,
     SizeOfType,
+    StorageAliasBinding,
     Stmt,
     TypeName,
     Unary,
@@ -79,8 +80,11 @@ from .semantic import (
     resolve_array_type,
     resolve_buffer_type,
     resolve_function_table,
+    resolve_named_value_type,
+    resolve_value_type,
     storage_type,
     type_width,
+    type_alias_table,
     union_table,
     validate_union_payloads,
 )
@@ -193,6 +197,7 @@ def emit_mlir(program: Program, *, runtime_checks: bool = False) -> str:
 
 class MlirEmitter:
     def __init__(self, program: Program, *, runtime_checks: bool = False):
+        type_alias_table(program)
         self.enums = enum_table(program)
         self.unions = union_table(program)
         self.records = record_table(program)
@@ -397,8 +402,12 @@ class MlirEmitter:
             return
         if isinstance(stmt, SetStmt):
             env_types = self.env_types(env)
-            type_name = stmt.type_name or infer_expr_type(
-                stmt.expr, env_types, self.functions, self.records, constants=self.top_constants
+            type_name = (
+                resolve_value_type(stmt.type_name, stmt.line, self.records, self.top_constants, self.functions, env_types)
+                if stmt.type_name is not None
+                else infer_expr_type(
+                    stmt.expr, env_types, self.functions, self.records, constants=self.top_constants
+                )
             )
             if isinstance(type_name, RecordType):
                 env[stmt.name] = self.emit_record_expr(stmt.expr, env, lines, indent, expected=type_name)
@@ -417,6 +426,9 @@ class MlirEmitter:
             return
         if isinstance(stmt, ArrayBinding):
             self.emit_array_binding(stmt, env, lines, indent)
+            return
+        if isinstance(stmt, StorageAliasBinding):
+            self.emit_storage_alias_binding(stmt, env, lines, indent)
             return
         if isinstance(stmt, ViewBinding):
             self.emit_view_binding(stmt, env, lines, indent)
@@ -488,7 +500,9 @@ class MlirEmitter:
         if isinstance(expr, Boolean):
             return self.emit_boolean(expr.value, lines, indent)
         if isinstance(expr, EnumCase):
-            info = self.enums.get(expr.type_name)
+            resolved_member_type = resolve_named_value_type(RecordType(expr.type_name))
+            member_type_name = resolved_member_type.name if isinstance(resolved_member_type, EnumType | UnionType) else expr.type_name
+            info = self.enums.get(member_type_name)
             if info is None:
                 raise AssertionError("union constructor used where scalar value was expected")  # pragma: no cover
             return self.emit_integer(info.cases[expr.case_name], type_name, lines, indent)
@@ -506,11 +520,11 @@ class MlirEmitter:
                 return self.emit_integer(storage.array_type.length, "i32", lines, indent)
             return storage.length
         if isinstance(expr, SizeOfType):
-            return self.emit_integer(layout_info(self.records[expr.type_name]).size, "i32", lines, indent)
+            return self.emit_integer(layout_info(self.layout_record(expr.type_name)).size, "i32", lines, indent)
         if isinstance(expr, AlignmentOfType):
-            return self.emit_integer(layout_info(self.records[expr.type_name]).alignment, "i32", lines, indent)
+            return self.emit_integer(layout_info(self.layout_record(expr.type_name)).alignment, "i32", lines, indent)
         if isinstance(expr, OffsetOfField):
-            return self.emit_integer(layout_info(self.records[expr.type_name]).field_offsets[expr.field], "i32", lines, indent)
+            return self.emit_integer(layout_info(self.layout_record(expr.type_name)).field_offsets[expr.field], "i32", lines, indent)
         if isinstance(expr, FieldAccess):
             qualified_constant = f"{expr.name}.{expr.field}"
             if expr.name not in env and qualified_constant in self.top_constants:
@@ -771,6 +785,29 @@ class MlirEmitter:
         lines.append(f"{indent}  memref.store {fill.name}, {array.name}[{iv}] : {memref_type(array_type)}")
         lines.append(f"{indent}}}")
         env[stmt.name] = array
+
+    def emit_storage_alias_binding(
+        self,
+        stmt: StorageAliasBinding,
+        env: dict[str, EnvValue],
+        lines: list[str],
+        indent: str,
+    ) -> None:
+        resolved = resolve_value_type(
+            stmt.alias_type,
+            stmt.line,
+            self.records,
+            self.top_constants,
+            self.functions,
+            self.env_types(env),
+        )
+        if isinstance(resolved, BufferType):
+            self.emit_buffer_binding(BufferBinding(stmt.name, resolved, stmt.line, stmt.fill, stmt.values), env, lines, indent)
+            return
+        if isinstance(resolved, ArrayType):
+            self.emit_array_binding(ArrayBinding(stmt.name, resolved, stmt.line, stmt.fill, stmt.values), env, lines, indent)
+            return
+        raise AssertionError("storage alias binding should be rejected by semantic analysis")  # pragma: no cover
 
     def emit_literal_storage_initializers(
         self,
@@ -2257,6 +2294,11 @@ class MlirEmitter:
 
     def record_fields(self, record_type: RecordType):
         return self.records[record_type.name].fields
+
+    def layout_record(self, type_name: str):
+        resolved = resolve_named_value_type(RecordType(type_name))
+        assert isinstance(resolved, RecordType)
+        return self.records[resolved.name]
 
     def call_symbol(self, fn: Function) -> str:
         return fn.extern_symbol or fn.name

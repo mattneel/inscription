@@ -1,0 +1,7 @@
+type Weight be f64
+
+export multiply weights left: Weight and right: Weight gives Weight as ins_multiply_weights:
+  left times right
+
+main gives i32:
+  (multiply weights 2.0 and 3.0) as i32

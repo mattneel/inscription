@@ -1,0 +1,8 @@
+type Cell be i32
+
+main gives i32:
+  let cells be buffer of 4 Cell containing 1, 2, 3, 4
+  let total: Cell be 0
+  for each index i of cells:
+    total becomes total plus cells at i
+  total
