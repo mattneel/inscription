@@ -1,11 +1,10 @@
-type CellView be view of i32
+Type CellView be view of i32.
 
-sum cells cells: CellView gives i32:
-  let total be 0
-  for each index i of cells:
-    total becomes total plus cells at i
-  total
+To sum cells cells: CellView, giving i32.
+Let total be 0.
+For each index i of cells: total becomes total plus cells at i.
+Give total.
 
-main gives i32:
-  let cells be array of 4 i32 containing 3, 3, 3, 3
-  sum cells cells
+To main, giving i32.
+Let cells be array of 4 i32 containing 3, 3, 3, 3.
+Give sum cells cells.

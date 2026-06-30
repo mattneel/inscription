@@ -1,15 +1,12 @@
-make cells count: i32 gives owned buffer of i32:
-  let cells be owned buffer of count i32 filled with 2
-  cells
+To make cells count: i32, giving owned buffer of i32.
+Let cells be owned buffer of count i32 filled with 2.
+Give cells.
 
-nested caller flag: i1 gives i32:
-  let result be 0
-  if flag:
-    let cells be make cells 4
-    result becomes length of cells
-  otherwise:
-    result becomes 1
-  result
+To nested caller flag: i1, giving i32.
+Let result be 0.
+When flag: Let cells be make cells 4; result becomes length of cells.
+Otherwise: result becomes 1.
+Give result.
 
-main gives i32:
-  nested caller true
+To main, giving i32.
+Give nested caller true.

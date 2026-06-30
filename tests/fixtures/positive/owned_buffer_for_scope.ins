@@ -1,9 +1,7 @@
-loop owned gives i32:
-  let total be 0
-  for i from 0 up to 4:
-    let cells be owned buffer of 2 i32 filled with i
-    total becomes total plus cells at 0 plus cells at 1
-  total
+To loop owned, giving i32.
+Let total be 0.
+For i from 0 up to 4: Let cells be owned buffer of 2 i32 filled with i; total becomes total plus cells at 0 plus cells at 1.
+Give total.
 
-main gives i32:
-  loop owned
+To main, giving i32.
+Give loop owned.

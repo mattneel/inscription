@@ -22,14 +22,14 @@ module {
     %1:2 = func.call @make_cells(%0) : (i32) -> (memref<?xi32>, i32)
     %2 = arith.constant 0 : i32
     %3 = arith.cmpi sge, %start, %2 : i32
-    cf.assert %3, "view start check failed at line 8"
+    cf.assert %3, "view start check failed at line 7"
     %4 = arith.cmpi sge, %count, %2 : i32
-    cf.assert %4, "view count check failed at line 8"
+    cf.assert %4, "view count check failed at line 7"
     %5 = arith.cmpi sle, %start, %1#1 : i32
-    cf.assert %5, "view start range check failed at line 8"
+    cf.assert %5, "view start range check failed at line 7"
     %6 = arith.subi %1#1, %start : i32
     %7 = arith.cmpi sle, %count, %6 : i32
-    cf.assert %7, "view count range check failed at line 8"
+    cf.assert %7, "view count range check failed at line 7"
     %8 = arith.constant 0 : index
     %9 = arith.index_cast %start : i32 to index
     %10 = arith.addi %9, %8 : index

@@ -16,12 +16,12 @@ module {
     %9 = arith.index_cast %start : i32 to index
     %10 = arith.constant 0 : index
     %11 = arith.cmpi sge, %9, %10 : index
-    cf.assert %11, "storage lower-bound check failed at line 8"
+    cf.assert %11, "storage lower-bound check failed at line 7"
     %12 = arith.constant 4 : index
     %13 = arith.constant 2 : index
     %14 = arith.subi %12, %13 : index
     %15 = arith.cmpi sle, %9, %14 : index
-    cf.assert %15, "storage range check failed at line 8"
+    cf.assert %15, "storage range check failed at line 7"
     %16 = memref.load %0[%9] : memref<4xi8>
     %17 = arith.extui %16 : i8 to i16
     %18 = arith.constant 1 : index

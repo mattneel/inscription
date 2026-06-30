@@ -1,11 +1,10 @@
-packed layout record Word:
-  value: u16
+Packed layout record Word has value: u16.
 
-little endian write gives i32:
-  let bytes be buffer of 2 u8 filled with 0
-  let word be Word with value be 258
-  write word into bytes at 0
-  (bytes at 0 as i32) plus ((bytes at 1 as i32) times 10)
+To little endian write, giving i32.
+Let bytes be buffer of 2 u8 filled with 0.
+Let word be Word with value be 258.
+Write word into bytes at 0.
+Give (bytes at 0 as i32) plus ((bytes at 1 as i32) times 10).
 
-main gives i32:
-  little endian write
+To main, giving i32.
+Give little endian write.

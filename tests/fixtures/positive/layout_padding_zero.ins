@@ -1,13 +1,10 @@
-layout record Header:
-  tag: u8
-  length: u16
-  flags: u8
+Layout record Header has tag: u8; length: u16; flags: u8.
 
-padding zero gives i32:
-  let bytes be buffer of 6 u8 filled with 255
-  let header be Header with tag be 1 and length be 2 and flags be 3
-  write header into bytes at 0
-  bytes at 1 as i32
+To padding zero, giving i32.
+Let bytes be buffer of 6 u8 filled with 255.
+Let header be Header with tag be 1 and length be 2 and flags be 3.
+Write header into bytes at 0.
+Give bytes at 1 as i32.
 
-main gives i32:
-  padding zero
+To main, giving i32.
+Give padding zero.

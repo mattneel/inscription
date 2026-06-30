@@ -1,14 +1,11 @@
-layout record Header:
-  tag: u8
-  length: u16
-  flags: u8
+Layout record Header has tag: u8; length: u16; flags: u8.
 
-parse header bytes: buffer of (size of Header) u8 gives i32:
-  check length of bytes is equal to size of Header
-  let header be read Header from bytes at 0
-  header.tag as i32
+To parse header bytes: buffer of (size of Header) u8, giving i32.
+Check length of bytes is equal to size of Header.
+Let header be read Header from bytes at 0.
+Give header.tag as i32.
 
-main gives i32:
-  let bytes be buffer of (size of Header) u8 filled with 0
-  bytes at 0 becomes 7
-  parse header bytes
+To main, giving i32.
+Let bytes be buffer of (size of Header) u8 filled with 0.
+bytes at 0 becomes 7.
+Give parse header bytes.

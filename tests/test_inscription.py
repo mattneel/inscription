@@ -14,9 +14,48 @@ ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
 sys.path.insert(0, str(SRC))
 
-from inscription.compiler import compile_file, compile_source
+from inscription.compiler import compile_file as _compile_file, compile_source as _compile_source
 from inscription.diagnostics import InscriptionError
-from inscription.runner import LOWERING_PASSES, OPTIMIZATION_PRESETS, ToolchainError, resolve_toolchain, run_file, run_source, verify_mlir
+from inscription.runner import LOWERING_PASSES, OPTIMIZATION_PRESETS, ToolchainError, resolve_toolchain, run_file as _run_file, run_source as _run_source, verify_mlir
+from tests.v032_migrate import maybe_convert_path, maybe_convert_source
+
+
+def compile_source(source: str, *args, **kwargs):
+    return _compile_source(maybe_convert_source(source), *args, **kwargs)
+
+
+def run_source(source: str, *args, **kwargs):
+    return _run_source(maybe_convert_source(source), *args, **kwargs)
+
+
+def _convert_module_tree(path: Path, module_root: Path | None = None) -> None:
+    root = module_root or path.parent
+    if root.exists():
+        for candidate in root.rglob("*.ins"):
+            maybe_convert_path(candidate)
+    maybe_convert_path(path)
+
+
+def compile_file(path: Path, *args, module_root: Path | None = None, **kwargs):
+    _convert_module_tree(Path(path), module_root)
+    return _compile_file(path, *args, module_root=module_root, **kwargs)
+
+
+def run_file(path: Path, *args, module_root: Path | None = None, **kwargs):
+    _convert_module_tree(Path(path), module_root)
+    return _run_file(path, *args, module_root=module_root, **kwargs)
+
+
+_ORIGINAL_PATH_WRITE_TEXT = Path.write_text
+
+
+def _write_text_v032(self: Path, data: str, *args, **kwargs):
+    if self.suffix == ".ins":
+        data = maybe_convert_source(data)
+    return _ORIGINAL_PATH_WRITE_TEXT(self, data, *args, **kwargs)
+
+
+Path.write_text = _write_text_v032
 
 FIXTURES = ROOT / "tests" / "fixtures" / "positive"
 GOLDENS = ROOT / "tests" / "goldens"
@@ -2772,7 +2811,7 @@ main gives i32:
     def test_legacy_statement_ceremony_is_rejected(self):
         self.assertCompileError(
             "Function main takes no parameters.\nReturn 0.\nEnd function.\n",
-            "expected phrase definition",
+            "expected top-level declaration sentence",
         )
         self.assertCompileError("main gives i32:\n  Return 0\n", "invalid token")
         self.assertCompileError(
@@ -2780,6 +2819,68 @@ main gives i32:
             "unexpected token 'call'",
         )
         self.assertCompileError("main gives i32:\n  Set result to 1\n", "invalid token")
+
+    def test_v032_prose_punctuation_surface(self):
+        source = """Module Protocol.
+
+Type Byte be u8.
+
+Enum Mode backed by Byte has idle be 0; active be 1.
+
+Union Result has ok value: i32; error code: Byte and offset: i32.
+
+To choose mode mode: Mode, giving i32.
+Let total be 0.
+When mode is equal to Mode.active, total becomes 7.
+Otherwise, total becomes 3.
+For i from 0 up to 2: total becomes total plus i.
+Give match mode:
+Mode.idle gives total;
+Mode.active gives 42;
+otherwise gives 1.
+
+To main, giving i32.
+Let mode be Mode.active.
+Match Result.error with code be 1 and offset be 2:
+Result.ok with value: mode becomes Mode.idle;
+Result.error with code as code and offset as offset: mode becomes Mode.active;
+otherwise: mode becomes Mode.idle.
+Give choose mode mode.
+"""
+        mlir = _compile_source(source)
+        self.assertIn("func.func @choose_mode", mlir)
+        self.assertIn("func.func @main", mlir)
+        self.assertIn("scf.if", mlir)
+        self.assertIn("scf.for", mlir)
+
+        bad_cases = [
+            ("To main, giving i32.\nGive 0\n", "missing period at end of sentence"),
+            (
+                "To main, giving i32.\nLet x be 0.\nOtherwise, x becomes 1.\nGive x.\n",
+                "Otherwise cannot appear without a preceding When",
+            ),
+            (
+                "To main, giving i32.\nLet x be 0.\nx becomes x plus 1; x becomes x plus 2.\nGive x.\n",
+                "semicolon is only valid inside a colon-introduced clause list",
+            ),
+            (
+                "main gives i32:\n  0\n",
+                "legacy phrase syntax is not supported; use `To main, giving i32.`",
+            ),
+            (
+                "record Point:\n  x: i32\n",
+                "legacy record syntax is not supported; use `Record Point has ... .`",
+            ),
+            (
+                "To main, giving i32.\nif true:\n  1\n",
+                "legacy block syntax is not supported",
+            ),
+        ]
+        for bad_source, message in bad_cases:
+            with self.subTest(message=message):
+                with self.assertRaises(InscriptionError) as ctx:
+                    _compile_source(bad_source)
+                self.assertIn(message, str(ctx.exception))
 
     def test_v024_match_expressions_and_blocks(self):
         enum_match = compile_source(self.fixture("match_enum_expression.ins"))
@@ -3993,7 +4094,7 @@ main gives i32:
 
     def test_negative_diagnostics(self):
         cases = {
-            "malformed top level": ("Please add two numbers\n", "expected phrase definition"),
+            "malformed top level": ("Please add two numbers\n", "missing period at end of sentence"),
             "unsupported free prose": ("main gives i32:\n  Please understand this naturally\n", "invalid token"),
             "undefined variable": ("main gives i32:\n  missing\n", "used before initialization"),
             "duplicate phrase": ("main gives i32:\n  0\nmain gives i32:\n  0\n", "duplicate phrase"),
@@ -4564,7 +4665,7 @@ main gives i32:
             ),
             "require at top level": (
                 "require true\n\nmain gives i32:\n  0\n",
-                "require may only appear inside phrase bodies",
+                "legacy phrase syntax is not supported",
             ),
             "require used as expression": (
                 "bad gives i32:\n  let x be require true\n  0\n",
@@ -4780,7 +4881,7 @@ main gives i32:
             ),
             "match step does not satisfy value block": (
                 "bad x: i32 gives i32:\n  match x:\n    0:\n      let y be 1\n    otherwise:\n      let y be 2\n",
-                "gives phrase body must end with a value expression",
+                "match arm must contain at least one step",
             ),
             "match arm binding does not escape": (
                 "bad x: i32 gives i32:\n  match x:\n    0:\n      let y be 1\n    otherwise:\n      let y be 2\n  y\n",
@@ -5025,7 +5126,7 @@ main gives i32:
             ),
             "extern with body": (
                 "extern population count of x: i32 gives i32 as llvm.ctpop.i32:\n  x\n",
-                "extern phrase declarations cannot have bodies",
+                "legacy phrase syntax is not supported",
             ),
             "extern buffer parameter unsupported": (
                 "extern sum cells cells: buffer of 4 i32 gives i32 as sum_cells\n",
@@ -5073,7 +5174,7 @@ main gives i32:
             ),
             "exported phrase missing body": (
                 "export add x: i32 and y: i32 gives i32 as ins_add\n",
-                "exported phrase definitions require a body",
+                "gives phrase body must end with a Give sentence",
             ),
             "exported buffer parameter unsupported": (
                 "export sum cells cells: buffer of 4 i32 gives i32 as ins_sum_cells:\n  0\n",

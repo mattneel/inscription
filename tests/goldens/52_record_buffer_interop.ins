@@ -1,12 +1,10 @@
-record Offset:
-  index: i32
-  value: i32
+Record Offset has index: i32; value: i32.
 
-write offset offset: Offset into cells: buffer of 4 i32 does:
-  cells at offset.index becomes offset.value
+To write offset offset: Offset into cells: buffer of 4 i32.
+cells at offset.index becomes offset.value.
 
-main gives i32:
-  let cells be buffer of 4 i32 filled with 0
-  let offset be Offset with index be 2 and value be 9
-  write offset offset into cells
-  cells at 2
+To main, giving i32.
+Let cells be buffer of 4 i32 filled with 0.
+Let offset be Offset with index be 2 and value be 9.
+Write offset offset into cells.
+Give cells at 2.

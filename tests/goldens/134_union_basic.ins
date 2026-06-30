@@ -1,12 +1,10 @@
-union MaybeI32:
-  none
-  some value: i32
+Union MaybeI32 has none; some value: i32.
 
-value or zero maybe: MaybeI32 gives i32:
-  match maybe:
-    MaybeI32.some with value gives value
-    MaybeI32.none gives 0
-    otherwise gives 0
+To value or zero maybe: MaybeI32, giving i32.
+Give match maybe:
+MaybeI32.some with value gives value;
+MaybeI32.none gives 0;
+otherwise gives 0.
 
-main gives i32:
-  value or zero MaybeI32.some with value be 7
+To main, giving i32.
+Give value or zero MaybeI32.some with value be 7.

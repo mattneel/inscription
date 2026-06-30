@@ -1,15 +1,13 @@
-sum buffer cells: buffer of 4 i32 gives i32:
-  let total be 0
-  let i be 0
-  while i is less than 4:
-    total becomes total plus cells at i
-    i becomes i plus 1
-  total
+To sum buffer cells: buffer of 4 i32, giving i32.
+Let total be 0.
+Let i be 0.
+While i is less than 4: total becomes total plus cells at i; i becomes i plus 1.
+Give total.
 
-main gives i32:
-  let cells be buffer of 4 i32 filled with 0
-  cells at 0 becomes 1
-  cells at 1 becomes 2
-  cells at 2 becomes 3
-  cells at 3 becomes 4
-  sum buffer cells
+To main, giving i32.
+Let cells be buffer of 4 i32 filled with 0.
+cells at 0 becomes 1.
+cells at 1 becomes 2.
+cells at 2 becomes 3.
+cells at 3 becomes 4.
+Give sum buffer cells.

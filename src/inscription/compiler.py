@@ -79,7 +79,7 @@ from .ast import (
 )
 from .diagnostics import InscriptionError
 from .mlir import emit_mlir
-from .parser import Parser, PhrasePart, PhraseTemplate, parse_source
+from .parser import Parser, PhrasePart, PhraseTemplate, parse_source, scan_punctuation_module_header
 
 MODULE_RE = re.compile(r"[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z][A-Za-z0-9_]*)*")
 
@@ -205,27 +205,19 @@ def _source_has_imports(source: str) -> bool:
 
 
 def scan_module_header(source: str) -> tuple[str | None, tuple[ImportDecl, ...]]:
-    module_name: str | None = None
-    imports: list[ImportDecl] = []
-    for number, raw in enumerate(source.splitlines(), start=1):
-        indent = len(raw) - len(raw.lstrip(" "))
-        text = raw.strip()
-        if not text or indent != 0:
-            continue
-        if text.endswith(":"):
-            text = text[:-1].strip()
-        if text.startswith("module "):
-            if module_name is not None:
-                raise InscriptionError("program can declare only one module", number)
-            module_name = validate_module_name(text[len("module ") :].strip(), number)
-        elif text.startswith("import "):
-            imports.append(ImportDecl(validate_module_name(text[len("import ") :].strip(), number), number))
-    seen: set[str] = set()
-    for imported in imports:
-        if imported.module in seen:
-            raise InscriptionError(f"module {imported.module} is already imported", imported.line)
-        seen.add(imported.module)
-    return module_name, tuple(imports)
+    scanned = scan_punctuation_module_header(source)
+    if scanned is not None:
+        module_name, imports = scanned
+        if module_name is not None:
+            module_name = validate_module_name(module_name)
+        imports = tuple(ImportDecl(validate_module_name(imported.module, imported.line), imported.line) for imported in imports)
+        seen: set[str] = set()
+        for imported in imports:
+            if imported.module in seen:
+                raise InscriptionError(f"module {imported.module} is already imported", imported.line)
+            seen.add(imported.module)
+        return module_name, imports
+    raise InscriptionError("source must use v0.32 punctuation syntax")
 
 
 def validate_module_name(name: str, line: int = 0) -> str:

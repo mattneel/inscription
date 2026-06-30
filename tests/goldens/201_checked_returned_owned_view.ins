@@ -1,12 +1,12 @@
-make cells count: i32 gives owned buffer of i32:
-  let cells be owned buffer of count i32 filled with 0
-  cells at 1 becomes 7
-  cells
+To make cells count: i32, giving owned buffer of i32.
+Let cells be owned buffer of count i32 filled with 0.
+cells at 1 becomes 7.
+Give cells.
 
-checked returned view start: i32 and count: i32 gives i32:
-  let cells be make cells 4
-  let window be view of cells from start for count
-  window at 0
+To checked returned view start: i32 and count: i32, giving i32.
+Let cells be make cells 4.
+Let window be view of cells from start for count.
+Give window at 0.
 
-main gives i32:
-  checked returned view 1 and 2
+To main, giving i32.
+Give checked returned view 1 and 2.

@@ -1,12 +1,10 @@
-owned view sum gives i32:
-  let cells be owned buffer of 6 i32 filled with 0
-  for each index i of cells:
-    cells at i becomes i plus 1
-  let middle be view of cells from 2 for 3
-  let total be 0
-  for each index i of middle:
-    total becomes total plus middle at i
-  total
+To owned view sum, giving i32.
+Let cells be owned buffer of 6 i32 filled with 0.
+For each index i of cells: cells at i becomes i plus 1.
+Let middle be view of cells from 2 for 3.
+Let total be 0.
+For each index i of middle: total becomes total plus middle at i.
+Give total.
 
-main gives i32:
-  owned view sum
+To main, giving i32.
+Give owned view sum.

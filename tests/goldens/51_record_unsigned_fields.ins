@@ -1,10 +1,8 @@
-record BytePair:
-  high: u8
-  low: u8
+Record BytePair has high: u8; low: u8.
 
-pack pair p: BytePair gives u16:
-  ((p.high as u16) shifted left by 8) bitwise or (p.low as u16)
+To pack pair p: BytePair, giving u16.
+Give ((p.high as u16) shifted left by 8) bitwise or (p.low as u16).
 
-main gives i32:
-  let p be BytePair with high be 0 and low be 42
-  (pack pair p) as i32
+To main, giving i32.
+Let p be BytePair with high be 0 and low be 42.
+Give (pack pair p) as i32.

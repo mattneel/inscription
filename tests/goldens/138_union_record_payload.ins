@@ -1,14 +1,10 @@
-record Point:
-  x: i32
-  y: i32
+Record Point has x: i32; y: i32.
 
-union MaybePoint:
-  none
-  some point: Point
+Union MaybePoint has none; some point: Point.
 
-main gives i32:
-  let p be Point with x be 3 and y be 4
-  let maybe be MaybePoint.some with point be p
-  match maybe:
-    MaybePoint.some with point gives point.x plus point.y
-    otherwise gives 0
+To main, giving i32.
+Let p be Point with x be 3 and y be 4.
+Let maybe be MaybePoint.some with point be p.
+Give match maybe:
+MaybePoint.some with point gives point.x plus point.y;
+otherwise gives 0.

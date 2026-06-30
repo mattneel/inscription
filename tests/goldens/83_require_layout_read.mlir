@@ -2,7 +2,7 @@ module {
   func.func @read_word_checked(%bytes_base: memref<?xi8>, %bytes_start: i32, %bytes_length: i32) -> i32 {
     %0 = arith.constant 2 : i32
     %1 = arith.cmpi sge, %bytes_length, %0 : i32
-    cf.assert %1, "require failed at line 5"
+    cf.assert %1, "require failed at line 4"
     %2 = arith.constant 0 : index
     %3 = arith.index_cast %bytes_start : i32 to index
     %4 = arith.addi %3, %2 : index

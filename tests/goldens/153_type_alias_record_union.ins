@@ -1,19 +1,16 @@
-record Point:
-  x: i32
-  y: i32
+Record Point has x: i32; y: i32.
 
-union MaybePoint:
-  none
-  some point: Point
+Union MaybePoint has none; some point: Point.
 
-type Position be Point
-type OptionalPosition be MaybePoint
+Type Position be Point.
 
-score maybe maybe: OptionalPosition gives i32:
-  match maybe:
-    MaybePoint.some with point gives point.x plus point.y
-    otherwise gives 0
+Type OptionalPosition be MaybePoint.
 
-main gives i32:
-  let p: Position be Point with x be 3 and y be 4
-  score maybe MaybePoint.some with point be p
+To score maybe maybe: OptionalPosition, giving i32.
+Give match maybe:
+MaybePoint.some with point gives point.x plus point.y;
+otherwise gives 0.
+
+To main, giving i32.
+Let p: Position be Point with x be 3 and y be 4.
+Give score maybe MaybePoint.some with point be p.

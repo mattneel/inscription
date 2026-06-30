@@ -1,12 +1,11 @@
-packed layout record Word:
-  value: u16
+Packed layout record Word has value: u16.
 
-checked dynamic layout index start: i32 gives i32:
-  let bytes be buffer of 4 u8 filled with 0
-  bytes at 1 becomes 42
-  bytes at 2 becomes 0
-  let word be read Word from bytes at start
-  word.value as i32
+To checked dynamic layout index start: i32, giving i32.
+Let bytes be buffer of 4 u8 filled with 0.
+bytes at 1 becomes 42.
+bytes at 2 becomes 0.
+Let word be read Word from bytes at start.
+Give word.value as i32.
 
-main gives i32:
-  checked dynamic layout index 1
+To main, giving i32.
+Give checked dynamic layout index 1.

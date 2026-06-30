@@ -1,12 +1,10 @@
-record Pair:
-  left: i32
-  right: i32
+Record Pair has left: i32; right: i32.
 
-swap pair gives i32:
-  let p be Pair with left be 3 and right be 5
-  let q be p
-  p becomes Pair with left be q.right and right be q.left
-  p.left times 10 plus p.right
+To swap pair, giving i32.
+Let p be Pair with left be 3 and right be 5.
+Let q be p.
+p becomes Pair with left be q.right and right be q.left.
+Give p.left times 10 plus p.right.
 
-main gives i32:
-  swap pair
+To main, giving i32.
+Give swap pair.

@@ -1,14 +1,10 @@
-record Point:
-  x: i32
-  y: i32
+Record Point has x: i32; y: i32.
 
-branch point flag: i1 gives i32:
-  let p be Point with x be 0 and y be 0
-  if flag:
-    p.x becomes 7
-  otherwise:
-    p.y becomes 3
-  p.x plus p.y
+To branch point flag: i1, giving i32.
+Let p be Point with x be 0 and y be 0.
+When flag: p.x becomes 7.
+Otherwise: p.y becomes 3.
+Give p.x plus p.y.
 
-main gives i32:
-  branch point true
+To main, giving i32.
+Give branch point true.

@@ -1,11 +1,9 @@
-record Point:
-  x: i32
-  y: i32
+Record Point has x: i32; y: i32.
 
-copy point p: Point gives Point:
-  p
+To copy point p: Point, giving Point.
+Give p.
 
-main gives i32:
-  let p be Point with x be 7 and y be 8
-  let q be copy point p
-  q.x plus q.y
+To main, giving i32.
+Let p be Point with x be 7 and y be 8.
+Let q be copy point p.
+Give q.x plus q.y.

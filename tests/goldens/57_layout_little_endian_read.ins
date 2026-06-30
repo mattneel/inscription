@@ -1,12 +1,11 @@
-packed layout record Word:
-  value: u16
+Packed layout record Word has value: u16.
 
-little endian read gives i32:
-  let bytes be buffer of 2 u8 filled with 0
-  bytes at 0 becomes 42
-  bytes at 1 becomes 0
-  let word be read Word from bytes at 0
-  word.value as i32
+To little endian read, giving i32.
+Let bytes be buffer of 2 u8 filled with 0.
+bytes at 0 becomes 42.
+bytes at 1 becomes 0.
+Let word be read Word from bytes at 0.
+Give word.value as i32.
 
-main gives i32:
-  little endian read
+To main, giving i32.
+Give little endian read.

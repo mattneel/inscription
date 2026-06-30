@@ -31,10 +31,10 @@ module {
     %2 = arith.index_cast %i : i32 to index
     %3 = arith.constant 0 : index
     %4 = arith.cmpi sge, %2, %3 : index
-    cf.assert %4, "storage lower-bound check failed at line 11"
+    cf.assert %4, "storage lower-bound check failed at line 10"
     %5 = arith.index_cast %1#1 : i32 to index
     %6 = arith.cmpi slt, %2, %5 : index
-    cf.assert %6, "storage upper-bound check failed at line 11"
+    cf.assert %6, "storage upper-bound check failed at line 10"
     %7 = memref.load %1#0[%2] : memref<?xi32>
     memref.dealloc %1#0 : memref<?xi32>
     return %7 : i32

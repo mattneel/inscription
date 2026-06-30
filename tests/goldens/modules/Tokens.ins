@@ -1,10 +1,8 @@
-module modules.Tokens
+Module modules.Tokens.
 
-union Token:
-  eof
-  operator symbol: u8 and precedence: u8
+Union Token has eof; operator symbol: u8 and precedence: u8.
 
-score token token: Token gives i32:
-  match token:
-    Token.operator with symbol as op and precedence as prec gives (op as i32) plus (prec as i32)
-    otherwise gives 0
+To score token token: Token, giving i32.
+Give match token:
+Token.operator with symbol as op and precedence as prec gives (op as i32) plus (prec as i32);
+otherwise gives 0.

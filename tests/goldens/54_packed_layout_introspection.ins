@@ -1,7 +1,4 @@
-packed layout record PackedHeader:
-  tag: u8
-  length: u16
-  flags: u8
+Packed layout record PackedHeader has tag: u8; length: u16; flags: u8.
 
-main gives i32:
-  size of PackedHeader plus alignment of PackedHeader plus offset of flags in PackedHeader
+To main, giving i32.
+Give size of PackedHeader plus alignment of PackedHeader plus offset of flags in PackedHeader.

@@ -1,8 +1,8 @@
-classify byte b: u8 gives i32:
-  match b:
-    byte "A" gives 1
-    byte "\n" gives 2
-    otherwise gives 3
+To classify byte b: u8, giving i32.
+Give match b:
+byte "A" gives 1;
+byte "\n" gives 2;
+otherwise gives 3.
 
-main gives i32:
-  classify byte byte "A"
+To main, giving i32.
+Give classify byte byte "A".

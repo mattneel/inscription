@@ -1,19 +1,15 @@
-copy from source: buffer of 4 i32 to destination: buffer of 4 i32 does:
-  let i be 0
-  while i is less than 4:
-    destination at i becomes source at i
-    i becomes i plus 1
+To copy from source: buffer of 4 i32 to destination: buffer of 4 i32.
+Let i be 0.
+While i is less than 4: destination at i becomes source at i; i becomes i plus 1.
 
-sum buffer cells: buffer of 4 i32 gives i32:
-  let total be 0
-  let i be 0
-  while i is less than 4:
-    total becomes total plus cells at i
-    i becomes i plus 1
-  total
+To sum buffer cells: buffer of 4 i32, giving i32.
+Let total be 0.
+Let i be 0.
+While i is less than 4: total becomes total plus cells at i; i becomes i plus 1.
+Give total.
 
-main gives i32:
-  let source be buffer of 4 i32 filled with 3
-  let destination be buffer of 4 i32 filled with 0
-  copy from source to destination
-  sum buffer destination
+To main, giving i32.
+Let source be buffer of 4 i32 filled with 3.
+Let destination be buffer of 4 i32 filled with 0.
+copy from source to destination.
+Give sum buffer destination.

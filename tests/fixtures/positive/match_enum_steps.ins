@@ -1,21 +1,14 @@
-enum Mode: u8:
-  idle be 0
-  active be 1
-  failed be 2
+Enum Mode backed by u8 has idle be 0; active be 1; failed be 2.
 
-count active modes modes: view of Mode gives i32:
-  let active be 0
-  let failed be 0
-  for each index i of modes:
-    match modes at i:
-      Mode.active:
-        active becomes active plus 1
-      Mode.failed:
-        failed becomes failed plus 1
-      otherwise:
-        active becomes active
-  active plus failed
+To count active modes modes: view of Mode, giving i32.
+Let active be 0.
+Let failed be 0.
+For each index i of modes: Match modes at i:
+Mode.active: active becomes active plus 1;
+Mode.failed: failed becomes failed plus 1;
+otherwise: active becomes active.
+Give active plus failed.
 
-main gives i32:
-  let modes be array of 4 Mode containing Mode.idle, Mode.active, Mode.failed, Mode.active
-  count active modes modes
+To main, giving i32.
+Let modes be array of 4 Mode containing Mode.idle, Mode.active, Mode.failed, Mode.active.
+Give count active modes modes.

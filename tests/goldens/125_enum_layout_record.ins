@@ -1,13 +1,8 @@
-enum Mode: u8:
-  idle be 0
-  active be 1
+Enum Mode backed by u8 has idle be 0; active be 1.
 
-packed layout record Header:
-  mode: Mode
-  code: u8
+Packed layout record Header has mode: Mode; code: u8.
 
-main gives i32:
-  let bytes be buffer of 2 u8 containing 1, 5
-  let header be read Header from bytes at 0
-  header.code as i32 when header.mode is equal to Mode.active
-  otherwise 0
+To main, giving i32.
+Let bytes be buffer of 2 u8 containing 1, 5.
+Let header be read Header from bytes at 0.
+Give header.code as i32 when header.mode is equal to Mode.active; otherwise 0.

@@ -1,15 +1,13 @@
-buffer sum gives i32:
-  let bytes be buffer of 4 u8 filled with 0
-  bytes at 0 becomes 10
-  bytes at 1 becomes 20
-  bytes at 2 becomes 30
-  bytes at 3 becomes 40
-  let total be 0
-  let i be 0
-  while i is less than 4:
-    total becomes total plus (bytes at i as i32)
-    i becomes i plus 1
-  total
+To buffer sum, giving i32.
+Let bytes be buffer of 4 u8 filled with 0.
+bytes at 0 becomes 10.
+bytes at 1 becomes 20.
+bytes at 2 becomes 30.
+bytes at 3 becomes 40.
+Let total be 0.
+Let i be 0.
+While i is less than 4: total becomes total plus (bytes at i as i32); i becomes i plus 1.
+Give total.
 
-main gives i32:
-  buffer sum
+To main, giving i32.
+Give buffer sum.

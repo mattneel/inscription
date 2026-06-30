@@ -1,13 +1,10 @@
-enum Mode: u8:
-  idle be 0
-  active be 1
+Enum Mode backed by u8 has idle be 0; active be 1.
 
-make modes gives owned buffer of Mode:
-  let modes be owned buffer of 3 Mode filled with Mode.idle
-  modes at 1 becomes Mode.active
-  modes
+To make modes, giving owned buffer of Mode.
+Let modes be owned buffer of 3 Mode filled with Mode.idle.
+modes at 1 becomes Mode.active.
+Give modes.
 
-main gives i32:
-  let modes be make modes
-  7 when modes at 1 is equal to Mode.active
-  otherwise 3
+To main, giving i32.
+Let modes be make modes.
+Give 7 when modes at 1 is equal to Mode.active; otherwise 3.

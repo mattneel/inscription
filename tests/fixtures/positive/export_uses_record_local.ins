@@ -1,10 +1,8 @@
-record Point:
-  x: i32
-  y: i32
+Record Point has x: i32; y: i32.
 
-export make and sum x: i32 and y: i32 gives i32 as ins_make_and_sum:
-  let p be Point with x be x and y be y
-  p.x plus p.y
+To make and sum x: i32 and y: i32, giving i32, exported as ins_make_and_sum.
+Let p be Point with x be x and y be y.
+Give p.x plus p.y.
 
-main gives i32:
-  make and sum 20 and 22
+To main, giving i32.
+Give make and sum 20 and 22.

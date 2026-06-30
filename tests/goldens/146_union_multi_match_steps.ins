@@ -1,16 +1,11 @@
-union ParseResult:
-  value value: i32
-  error code: u8 and offset: i32
+Union ParseResult has value value: i32; error code: u8 and offset: i32.
 
-main gives i32:
-  let result be ParseResult.error with code be 2 and offset be 8
-  let total be 0
-  let errors be 0
-  match result:
-    ParseResult.value with value:
-      total becomes total plus value
-    ParseResult.error with code as c and offset as pos:
-      errors becomes errors plus (c as i32) plus pos
-    otherwise:
-      total becomes total
-  total plus errors
+To main, giving i32.
+Let result be ParseResult.error with code be 2 and offset be 8.
+Let total be 0.
+Let errors be 0.
+Match result:
+ParseResult.value with value: total becomes total plus value;
+ParseResult.error with code as c and offset as pos: errors becomes errors plus (c as i32) plus pos;
+otherwise: total becomes total.
+Give total plus errors.

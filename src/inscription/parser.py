@@ -208,6 +208,753 @@ def _is_string_token(token: str) -> bool:
 ParsedTopLevel = RecordDecl | EnumDecl | UnionDecl | TypeAliasDecl | ConstantDecl | CheckStmt | Function
 
 
+TOP_LEVEL_SENTENCE_PREFIXES = (
+    "Module ",
+    "Import ",
+    "Type ",
+    "Constant ",
+    "Check ",
+    "Record ",
+    "Layout record ",
+    "Packed layout record ",
+    "Enum ",
+    "Union ",
+    "External ",
+    "To ",
+)
+
+LEGACY_TOP_LEVEL_RE = re.compile(
+    rf"(?:module|import|type|constant|check|record|layout record|packed layout record|enum|union|extern|export)\b|.+\s+gives\s+.+:|.+\s+does:"
+)
+
+
+@dataclass(frozen=True)
+class PunctuationSentence:
+    text: str
+    line: int
+
+
+def normalize_punctuation_source(source: str) -> str:
+    _reject_legacy_surface(source)
+    if _uses_line_oriented_punctuation(source):
+        return _normalize_line_punctuation_source(source)
+    sentences = _split_punctuation_sentences(source)
+    aliases = _import_aliases(sentences)
+    output: list[str] = []
+    index = 0
+    while index < len(sentences):
+        sentence = sentences[index]
+        text = _apply_import_aliases(sentence.text, aliases)
+        if text.startswith("Module "):
+            output.append(f"module {text[len('Module '):].strip()}")
+            index += 1
+            continue
+        if text.startswith("Import "):
+            output.append(_translate_import_sentence(text))
+            index += 1
+            continue
+        if text.startswith("Record ") or text.startswith("Layout record ") or text.startswith("Packed layout record "):
+            output.extend(_translate_record_sentence(text, sentence.line))
+            index += 1
+            continue
+        if text.startswith("Enum "):
+            output.extend(_translate_enum_sentence(text, sentence.line))
+            index += 1
+            continue
+        if text.startswith("Union "):
+            output.extend(_translate_union_sentence(text, sentence.line))
+            index += 1
+            continue
+        if text.startswith("Type "):
+            output.append("type " + text[len("Type "):].strip())
+            index += 1
+            continue
+        if text.startswith("Constant "):
+            output.extend(_translate_top_level_match_line("constant " + text[len("Constant "):].strip(), 0))
+            index += 1
+            continue
+        if text.startswith("Check "):
+            output.extend(_translate_top_level_match_line("check " + text[len("Check "):].strip(), 0))
+            index += 1
+            continue
+        if text.startswith("External "):
+            output.append(_translate_external_sentence(text, sentence.line))
+            index += 1
+            continue
+        if text.startswith("To "):
+            header = _translate_to_sentence(text, sentence.line)
+            output.append(header)
+            is_gives = " gives " in header
+            index += 1
+            body: list[PunctuationSentence] = []
+            while index < len(sentences):
+                candidate = sentences[index]
+                candidate_text = _apply_import_aliases(candidate.text, aliases)
+                if _is_phrase_boundary_sentence(candidate_text):
+                    break
+                body.append(PunctuationSentence(candidate_text, candidate.line))
+                index += 1
+                if is_gives and candidate_text.startswith("Give "):
+                    break
+            body_lines = _translate_body_sentences(body, is_gives=is_gives, indent=2)
+            output.extend(body_lines)
+            continue
+        raise InscriptionError(
+            "expected top-level declaration sentence starting with Module, Import, Type, Constant, Check, Record, Layout record, Packed layout record, Enum, Union, External, or To",
+            sentence.line,
+        )
+    return "\n".join(output) + ("\n" if output else "")
+
+
+def scan_punctuation_module_header(source: str) -> tuple[str | None, tuple[ImportDecl, ...]] | None:
+    _reject_legacy_surface(source)
+    try:
+        sentences = _split_punctuation_sentences(source)
+    except InscriptionError:
+        raise
+    module_name: str | None = None
+    imports: list[ImportDecl] = []
+    for sentence in sentences:
+        text = sentence.text
+        if text.startswith("Module "):
+            if module_name is not None:
+                raise InscriptionError("program can declare only one module", sentence.line)
+            module_name = text[len("Module ") :].strip()
+            continue
+        if text.startswith("Import "):
+            module_text = text[len("Import ") :].strip()
+            if " as " in module_text:
+                module_text = module_text.split(" as ", 1)[0].strip()
+            imports.append(ImportDecl(module_text, sentence.line))
+            continue
+        if _is_top_level_sentence(text):
+            break
+    return module_name, tuple(imports)
+
+
+
+
+def _uses_line_oriented_punctuation(source: str) -> bool:
+    for raw in source.splitlines():
+        if raw.strip() == ".":
+            return True
+    return False
+
+
+def _normalize_line_punctuation_source(source: str) -> str:
+    aliases: dict[str, str] = {}
+    raw_lines = source.splitlines()
+    for number, raw in enumerate(raw_lines, start=1):
+        text = raw.strip()
+        if text.startswith("Import ") and " as " in text:
+            cleaned = text[:-1] if text.endswith(".") else text
+            module_text = cleaned[len("Import ") :].strip()
+            module_name, alias = module_text.split(" as ", 1)
+            aliases[alias.strip()] = module_name.strip()
+    lines: list[str] = []
+    for number, raw in enumerate(raw_lines, start=1):
+        if "\t" in raw:
+            raise InscriptionError("tabs are not valid indentation", number)
+        indent = len(raw) - len(raw.lstrip(" "))
+        text = raw.strip()
+        if not text or text == ".":
+            continue
+        if text.endswith("."):
+            text = text[:-1].strip()
+        text = _apply_import_aliases(text, aliases)
+        prefix = " " * indent
+        if indent == 0 and text.startswith("Module "):
+            lines.append(f"module {text[len('Module '):].strip()}")
+            continue
+        if indent == 0 and text.startswith("Import "):
+            lines.append(_translate_import_sentence(text))
+            continue
+        if indent == 0 and (text.startswith("Record ") or text.startswith("Layout record ") or text.startswith("Packed layout record ")):
+            lines.extend(_translate_record_sentence(text, number))
+            continue
+        if indent == 0 and text.startswith("Enum "):
+            lines.extend(_translate_enum_sentence(text, number))
+            continue
+        if indent == 0 and text.startswith("Union "):
+            lines.extend(_translate_union_sentence(text, number))
+            continue
+        if indent == 0 and text.startswith("Type "):
+            lines.append("type " + text[len("Type "):].strip())
+            continue
+        if indent == 0 and text.startswith("Constant "):
+            lines.extend(_translate_top_level_match_line("constant " + text[len("Constant "):].strip(), 0))
+            continue
+        if indent == 0 and text.startswith("Check "):
+            lines.extend(_translate_top_level_match_line("check " + text[len("Check "):].strip(), 0))
+            continue
+        if indent == 0 and text.startswith("External "):
+            lines.append(_translate_external_sentence(text, number))
+            continue
+        if indent == 0 and text.startswith("To "):
+            lines.append(_translate_to_sentence(text, number))
+            continue
+        if text.startswith("Give "):
+            lines.extend(_translate_give_sentence(text, number, indent))
+            continue
+        if text.startswith("Let "):
+            lines.extend(_translate_match_expression_line("let " + text[len("Let ") :].strip(), indent))
+            continue
+        if text.startswith("Require "):
+            lines.extend(_translate_match_expression_line("require " + text[len("Require ") :].strip(), indent))
+            continue
+        if text.startswith("Check "):
+            lines.extend(_translate_match_expression_line("check " + text[len("Check ") :].strip(), indent))
+            continue
+        if text.startswith("Write "):
+            lines.append(prefix + "write " + text[len("Write ") :].strip())
+            continue
+        if text.startswith("When "):
+            lines.append(prefix + "if " + text[len("When ") :].strip())
+            continue
+        if text.startswith("Otherwise"):
+            rest = text[len("Otherwise") :].strip()
+            if not rest or rest == ":":
+                lines.append(prefix + "otherwise:")
+            elif rest.startswith(":"):
+                lines.append(prefix + "otherwise:")
+                lines.extend(_translate_clause_body(rest[1:].strip(), number, indent + 2))
+            elif rest.startswith(","):
+                lines.extend(_translate_clause_body(rest[1:].strip(), number, indent))
+            else:
+                lines.append(prefix + "otherwise " + rest)
+            continue
+        if text.startswith("While "):
+            lines.append(prefix + "while " + text[len("While ") :].strip())
+            continue
+        if text.startswith("For "):
+            lines.append(prefix + "for " + text[len("For ") :].strip())
+            continue
+        if text.startswith("Match "):
+            lines.append(prefix + "match " + text[len("Match ") :].strip())
+            continue
+        lines.extend(_translate_match_expression_line(prefix + text, 0))
+    return "\n".join(lines) + ("\n" if lines else "")
+
+def _reject_legacy_surface(source: str) -> None:
+    for number, raw in enumerate(source.splitlines(), start=1):
+        text = raw.strip()
+        if not text:
+            continue
+        if re.fullmatch(r"[a-z][a-z0-9_]*(?:\s+[a-z][a-z0-9_]*|\s+[a-z][a-z0-9_]*:\s*[^:]+)*\s+gives\s+.+:", text):
+            raise InscriptionError("legacy phrase syntax is not supported; use `To main, giving i32.`", number)
+        if re.fullmatch(r"(?:record|layout record|packed layout record)\s+[A-Za-z][A-Za-z0-9_]*:", text):
+            raise InscriptionError("legacy record syntax is not supported; use `Record Point has ... .`", number)
+        if re.fullmatch(r"(?:if|while|for|match)\b.*:", text):
+            raise InscriptionError("legacy block syntax is not supported", number)
+        if re.fullmatch(r"(?:module|import|type|constant|check|enum|union|extern|export)\b.*", text):
+            raise InscriptionError("legacy syntax is not supported; use v0.32 punctuation sentences", number)
+
+
+def _split_punctuation_sentences(source: str) -> list[PunctuationSentence]:
+    sentences: list[PunctuationSentence] = []
+    start = 0
+    start_line = 1
+    line = 1
+    in_string = False
+    escaped = False
+    for index, char in enumerate(source):
+        if char == "\n":
+            line += 1
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+            continue
+        if char != ".":
+            continue
+        prev = source[index - 1] if index > 0 else ""
+        nxt = source[index + 1] if index + 1 < len(source) else ""
+        if prev.isdigit() and nxt.isdigit():
+            continue
+        if nxt and not nxt.isspace():
+            continue
+        text = source[start:index].strip()
+        if text:
+            sentences.append(PunctuationSentence(_collapse_sentence_whitespace(text), start_line))
+        start = index + 1
+        start_line = line
+    if in_string:
+        raise InscriptionError("unterminated string literal", line)
+    if source[start:].strip():
+        raise InscriptionError("missing period at end of sentence", start_line)
+    return sentences
+
+
+def _collapse_sentence_whitespace(text: str) -> str:
+    pieces: list[str] = []
+    current: list[str] = []
+    in_string = False
+    escaped = False
+    for char in text:
+        if in_string:
+            current.append(char)
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            current.append(char)
+            in_string = True
+            continue
+        if char.isspace():
+            if current and current[-1] != " ":
+                current.append(" ")
+            continue
+        current.append(char)
+    return "".join(current).strip()
+
+
+def _is_top_level_sentence(text: str) -> bool:
+    return text.startswith(TOP_LEVEL_SENTENCE_PREFIXES)
+
+
+def _is_phrase_boundary_sentence(text: str) -> bool:
+    return text.startswith(
+        (
+            "Module ",
+            "Import ",
+            "Type ",
+            "Constant ",
+            "Record ",
+            "Layout record ",
+            "Packed layout record ",
+            "Enum ",
+            "Union ",
+            "External ",
+            "To ",
+        )
+    )
+
+
+def _import_aliases(sentences: list[PunctuationSentence]) -> dict[str, str]:
+    aliases: dict[str, str] = {}
+    for sentence in sentences:
+        text = sentence.text
+        if not text.startswith("Import "):
+            continue
+        module_text = text[len("Import ") :].strip()
+        if " as " not in module_text:
+            continue
+        module_name, alias = module_text.split(" as ", 1)
+        alias = alias.strip()
+        if not re.fullmatch(r"[A-Z][A-Za-z0-9_]*", alias):
+            raise InscriptionError(f"invalid import alias '{alias}'", sentence.line)
+        aliases[alias] = module_name.strip()
+    return aliases
+
+
+def _apply_import_aliases(text: str, aliases: dict[str, str]) -> str:
+    if not aliases:
+        return text
+    out = text
+    for alias, module_name in aliases.items():
+        out = re.sub(rf"(?<![A-Za-z0-9_]){re.escape(alias)}\.", f"{module_name}.", out)
+    return out
+
+
+def _translate_import_sentence(text: str) -> str:
+    module_text = text[len("Import ") :].strip()
+    if " as " in module_text:
+        module_text = module_text.split(" as ", 1)[0].strip()
+    return f"import {module_text}"
+
+
+def _split_top_level(text: str, separator: str) -> list[str]:
+    parts: list[str] = []
+    start = 0
+    depth = 0
+    in_string = False
+    escaped = False
+    index = 0
+    while index < len(text):
+        char = text[index]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            index += 1
+            continue
+        if char == '"':
+            in_string = True
+            index += 1
+            continue
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+        elif char == separator and depth == 0:
+            parts.append(text[start:index].strip())
+            start = index + 1
+        index += 1
+    parts.append(text[start:].strip())
+    return [part for part in parts if part]
+
+
+def _split_commas(text: str) -> list[str]:
+    return _split_top_level(text, ",")
+
+
+def _split_semicolons(text: str) -> list[str]:
+    return _split_top_level(text, ";")
+
+
+def _translate_record_sentence(text: str, line: int) -> list[str]:
+    match = re.fullmatch(r"(Record|Layout record|Packed layout record) ([A-Za-z][A-Za-z0-9_]*) has(?: (.*))?", text)
+    if match is None:
+        raise InscriptionError("malformed record declaration", line)
+    kind = {"Record": "record", "Layout record": "layout record", "Packed layout record": "packed layout record"}[match.group(1)]
+    lines = [f"{kind} {match.group(2)}:"]
+    fields = match.group(3)
+    if fields:
+        lines.extend(f"  {field}" for field in _split_semicolons(fields))
+    return lines
+
+
+def _translate_enum_sentence(text: str, line: int) -> list[str]:
+    match = re.fullmatch(r"Enum ([A-Za-z][A-Za-z0-9_]*) backed by (.+?) has(?: (.*))?", text)
+    if match is None:
+        raise InscriptionError("malformed enum declaration", line)
+    lines = [f"enum {match.group(1)}: {match.group(2).strip()}:"]
+    cases = match.group(3)
+    if cases:
+        lines.extend(f"  {case}" for case in _split_semicolons(cases))
+    return lines
+
+
+def _translate_union_sentence(text: str, line: int) -> list[str]:
+    match = re.fullmatch(r"Union ([A-Za-z][A-Za-z0-9_]*) has(?: (.*))?", text)
+    if match is None:
+        raise InscriptionError("malformed union declaration", line)
+    lines = [f"union {match.group(1)}:"]
+    variants = match.group(2)
+    if variants:
+        lines.extend(f"  {variant}" for variant in _split_semicolons(variants))
+    return lines
+
+
+def _translate_external_sentence(text: str, line: int) -> str:
+    parts = _split_commas(text[len("External ") :].strip())
+    phrase = parts[0]
+    giving: str | None = None
+    symbol: str | None = None
+    for part in parts[1:]:
+        if part.startswith("giving "):
+            giving = part[len("giving ") :].strip()
+        elif part.startswith("as "):
+            symbol = part[len("as ") :].strip()
+        else:
+            raise InscriptionError("malformed external phrase declaration", line)
+    if symbol is None:
+        raise InscriptionError("external phrase declaration requires `as symbol`", line)
+    if giving is None:
+        return f"extern {phrase} does as {symbol}"
+    return f"extern {phrase} gives {giving} as {symbol}"
+
+
+def _translate_to_sentence(text: str, line: int) -> str:
+    parts = _split_commas(text[len("To ") :].strip())
+    phrase = parts[0]
+    giving: str | None = None
+    exported: str | None = None
+    for part in parts[1:]:
+        if part.startswith("giving "):
+            giving = part[len("giving ") :].strip()
+        elif part.startswith("exported as "):
+            exported = part[len("exported as ") :].strip()
+        else:
+            raise InscriptionError("malformed phrase declaration", line)
+    if exported is not None:
+        if giving is None:
+            return f"export {phrase} does as {exported}:"
+        return f"export {phrase} gives {giving} as {exported}:"
+    if giving is None:
+        return f"{phrase} does:"
+    return f"{phrase} gives {giving}:"
+
+
+def _translate_body_sentences(sentences: list[PunctuationSentence], *, is_gives: bool, indent: int) -> list[str]:
+    lines: list[str] = []
+    index = 0
+    saw_give = False
+    while index < len(sentences):
+        sentence = sentences[index]
+        text = sentence.text
+        if saw_give:
+            raise InscriptionError("Give must be the final phrase body sentence", sentence.line)
+        if text.startswith("Otherwise"):
+            raise InscriptionError("Otherwise cannot appear without a preceding When", sentence.line)
+        if text.startswith("When "):
+            if index + 1 >= len(sentences) or not sentences[index + 1].text.startswith("Otherwise"):
+                raise InscriptionError("When requires an immediately following Otherwise", sentence.line)
+            lines.extend(_translate_when_pair(text, sentences[index + 1].text, sentence.line, indent))
+            index += 2
+            continue
+        if text.startswith("Give "):
+            if not is_gives:
+                raise InscriptionError("Give is valid only inside returning phrases", sentence.line)
+            lines.extend(_translate_give_sentence(text, sentence.line, indent))
+            saw_give = True
+            index += 1
+            continue
+        lines.extend(_translate_step_sentence(text, sentence.line, indent))
+        index += 1
+    if is_gives and not saw_give:
+        line = sentences[-1].line if sentences else None
+        raise InscriptionError("gives phrase body must end with a Give sentence", line)
+    return lines
+
+
+def _translate_top_level_match_line(line: str, indent: int) -> list[str]:
+    return _translate_match_expression_line(line, indent)
+
+
+def _translate_give_sentence(text: str, line: int, indent: int) -> list[str]:
+    expr = text[len("Give ") :].strip()
+    guarded = _split_guarded_value_clauses(expr)
+    if guarded is not None:
+        return [" " * indent + clause for clause in guarded]
+    return _translate_match_expression_line(expr, indent)
+
+
+def _split_guarded_value_clauses(expr: str) -> list[str] | None:
+    if expr.startswith("match ") or ";" not in expr:
+        return None
+    clauses = _split_semicolons(expr)
+    if len(clauses) < 2:
+        return None
+    if not clauses[-1].startswith("otherwise "):
+        return None
+    if not all(" when " in clause for clause in clauses[:-1]):
+        return None
+    return clauses
+
+
+def _translate_step_sentence(text: str, line: int, indent: int) -> list[str]:
+    if text.startswith("Let "):
+        return _translate_match_expression_line("let " + text[len("Let ") :].strip(), indent)
+    if text.startswith("Require "):
+        return _translate_match_expression_line("require " + text[len("Require ") :].strip(), indent)
+    if text.startswith("Check "):
+        return _translate_match_expression_line("check " + text[len("Check ") :].strip(), indent)
+    if text.startswith("Write "):
+        return [" " * indent + "write " + text[len("Write ") :].strip()]
+    if text.startswith("While "):
+        return _translate_loop_sentence("while", text[len("While ") :].strip(), line, indent)
+    if text.startswith("For "):
+        return _translate_loop_sentence("for", text[len("For ") :].strip(), line, indent)
+    if text.startswith("Match "):
+        return _translate_match_step_sentence(text, line, indent)
+    if ";" in text:
+        raise InscriptionError("semicolon is only valid inside a colon-introduced clause list", line)
+    return _translate_match_expression_line(text, indent)
+
+
+def _translate_when_pair(when_text: str, otherwise_text: str, line: int, indent: int) -> list[str]:
+    condition, then_body = _split_control_head_body(when_text[len("When ") :].strip(), line, "When")
+    else_rest = otherwise_text[len("Otherwise") :].strip()
+    if not else_rest:
+        raise InscriptionError("Otherwise requires a branch body", line)
+    if else_rest.startswith(":"):
+        else_body = else_rest[1:].strip()
+    elif else_rest.startswith(","):
+        else_body = else_rest[1:].strip()
+    else:
+        raise InscriptionError("Otherwise must use `Otherwise, step` or `Otherwise: steps`", line)
+    lines = [" " * indent + f"if {condition}:"]
+    lines.extend(_translate_clause_body(then_body, line, indent + 2))
+    lines.append(" " * indent + "otherwise:")
+    lines.extend(_translate_clause_body(else_body, line, indent + 2))
+    return lines
+
+
+def _translate_loop_sentence(kind: str, rest: str, line: int, indent: int) -> list[str]:
+    head, body = _split_control_head_body(rest, line, kind.capitalize())
+    lines = [" " * indent + f"{kind} {head}:"]
+    lines.extend(_translate_clause_body(body, line, indent + 2))
+    return lines
+
+
+def _split_control_head_body(rest: str, line: int, keyword: str) -> tuple[str, str]:
+    colon = _find_top_level_char(rest, ":")
+    comma = _find_top_level_char(rest, ",")
+    if colon == -1 and comma == -1:
+        raise InscriptionError(f"{keyword} requires a comma or colon body", line)
+    if colon != -1 and (comma == -1 or colon < comma):
+        head = rest[:colon].strip()
+        body = rest[colon + 1 :].strip()
+    else:
+        head = rest[:comma].strip()
+        body = rest[comma + 1 :].strip()
+    if not head or not body:
+        raise InscriptionError(f"malformed {keyword} sentence", line)
+    return head, body
+
+
+def _find_top_level_char(text: str, target: str) -> int:
+    depth = 0
+    in_string = False
+    escaped = False
+    for index, char in enumerate(text):
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+            continue
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+        elif char == target and depth == 0:
+            return index
+    return -1
+
+
+def _translate_clause_body(body: str, line: int, indent: int) -> list[str]:
+    clauses = _split_step_clauses(body)
+    if not clauses:
+        raise InscriptionError("clause list must contain at least one step", line)
+    lines: list[str] = []
+    index = 0
+    while index < len(clauses):
+        clause = clauses[index]
+        if clause.startswith("When "):
+            if index + 1 >= len(clauses) or not clauses[index + 1].startswith("Otherwise"):
+                raise InscriptionError("When requires an immediately following Otherwise", line)
+            lines.extend(_translate_when_pair(clause, clauses[index + 1], line, indent))
+            index += 2
+            continue
+        lines.extend(_translate_step_sentence(clause, line, indent))
+        index += 1
+    return lines
+
+
+def _split_step_clauses(body: str) -> list[str]:
+    clauses: list[str] = []
+    rest = body.strip()
+    while rest:
+        if rest.startswith(("While ", "For ", "Match ")):
+            clauses.append(rest)
+            break
+        parts = _split_top_level(rest, ";")
+        if len(parts) <= 1:
+            clauses.append(rest)
+            break
+        clauses.append(parts[0])
+        semicolon = _find_top_level_char(rest, ";")
+        if semicolon == -1:
+            break
+        rest = rest[semicolon + 1 :].strip()
+    return [clause for clause in clauses if clause]
+
+
+def _translate_match_expression_line(text: str, indent: int) -> list[str]:
+    marker = "match "
+    match_index = text.find(marker)
+    if match_index == -1 or not text[match_index:].startswith("match ") or ":" not in text[match_index:]:
+        return [" " * indent + text]
+    prefix = text[:match_index]
+    match_text = text[match_index:]
+    colon = _find_top_level_char(match_text, ":")
+    if colon == -1:
+        return [" " * indent + text]
+    header = prefix + match_text[:colon]
+    arms_text = match_text[colon + 1 :].strip()
+    lines = [" " * indent + header.strip() + ":"]
+    for arm in _split_semicolons(arms_text):
+        lines.append(" " * (indent + 2) + arm)
+    return lines
+
+
+def _translate_match_step_sentence(text: str, line: int, indent: int) -> list[str]:
+    rest = text[len("Match ") :].strip()
+    colon = _find_top_level_char(rest, ":")
+    if colon == -1:
+        raise InscriptionError("malformed match block", line)
+    scrutinee = rest[:colon].strip()
+    arms_text = rest[colon + 1 :].strip()
+    lines = [" " * indent + f"match {scrutinee}:"]
+    for arm in _split_match_step_arms(arms_text):
+        arm_colon = _find_top_level_char(arm, ":")
+        if arm_colon == -1:
+            raise InscriptionError("match block arms must use `pattern: steps`", line)
+        pattern = arm[:arm_colon].strip()
+        body = arm[arm_colon + 1 :].strip()
+        lines.append(" " * (indent + 2) + f"{pattern}:")
+        lines.extend(_translate_clause_body(body, line, indent + 4))
+    return lines
+
+
+def _split_match_step_arms(arms_text: str) -> list[str]:
+    arms: list[str] = []
+    start = 0
+    depth = 0
+    in_string = False
+    escaped = False
+    index = 0
+    while index < len(arms_text):
+        char = arms_text[index]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            index += 1
+            continue
+        if char == '"':
+            in_string = True
+            index += 1
+            continue
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+        elif char == ";" and depth == 0:
+            remainder = arms_text[index + 1 :].lstrip()
+            if _looks_like_match_arm_start(remainder):
+                arm = arms_text[start:index].strip()
+                if arm:
+                    arms.append(arm)
+                start = index + 1
+        index += 1
+    final = arms_text[start:].strip()
+    if final:
+        arms.append(final)
+    return arms
+
+
+def _looks_like_match_arm_start(text: str) -> bool:
+    if text.startswith(("otherwise:", "true:", "false:")):
+        return True
+    if re.match(r"-?\d+\s*:", text):
+        return True
+    return re.match(r"[A-Z][A-Za-z0-9_.]*(?:\s+with\b[^:]*)?\s*:", text) is not None
+
+
 class Parser:
     def __init__(
         self,
@@ -216,6 +963,7 @@ class Parser:
         external_phrases: tuple[PhraseTemplate, ...] = (),
         symbol_prefix: str | None = None,
     ):
+        source = normalize_punctuation_source(source)
         self.lines = self._preprocess(source)
         self.symbol_prefix = symbol_prefix
         self.external_phrases = external_phrases

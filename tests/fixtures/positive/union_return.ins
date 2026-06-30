@@ -1,16 +1,13 @@
-union MaybeI32:
-  none
-  some value: i32
+Union MaybeI32 has none; some value: i32.
 
-make maybe flag: i1 gives MaybeI32:
-  MaybeI32.some with value be 42 when flag
-  otherwise MaybeI32.none
+To make maybe flag: i1, giving MaybeI32.
+Give MaybeI32.some with value be 42 when flag; otherwise MaybeI32.none.
 
-value or zero maybe: MaybeI32 gives i32:
-  match maybe:
-    MaybeI32.some with value gives value
-    otherwise gives 0
+To value or zero maybe: MaybeI32, giving i32.
+Give match maybe:
+MaybeI32.some with value gives value;
+otherwise gives 0.
 
-main gives i32:
-  let maybe be make maybe true
-  value or zero maybe
+To main, giving i32.
+Let maybe be make maybe true.
+Give value or zero maybe.

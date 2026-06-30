@@ -1,10 +1,8 @@
-record Point:
-  x: i32
-  y: i32
+Record Point has x: i32; y: i32.
 
-sum point p: Point gives i32:
-  p.x plus p.y
+To sum point p: Point, giving i32.
+Give p.x plus p.y.
 
-main gives i32:
-  let p be Point with x be 10 and y be 20
-  sum point p
+To main, giving i32.
+Let p be Point with x be 10 and y be 20.
+Give sum point p.

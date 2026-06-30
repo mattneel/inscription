@@ -1,14 +1,11 @@
-enum Mode: u8:
-  idle be 0
-  active be 1
-  failed be 2
+Enum Mode backed by u8 has idle be 0; active be 1; failed be 2.
 
-code for mode mode: Mode gives i32:
-  match mode:
-    Mode.idle gives 0
-    Mode.active gives 7
-    Mode.failed gives 255
-    otherwise gives 1
+To code for mode mode: Mode, giving i32.
+Give match mode:
+Mode.idle gives 0;
+Mode.active gives 7;
+Mode.failed gives 255;
+otherwise gives 1.
 
-main gives i32:
-  code for mode Mode.active
+To main, giving i32.
+Give code for mode Mode.active.

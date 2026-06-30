@@ -1,13 +1,12 @@
-packed layout record Word:
-  value: u16
+Packed layout record Word has value: u16.
 
-make bytes gives owned buffer of u8:
-  let bytes be owned buffer of 2 u8 filled with 0
-  let word be Word with value be 42
-  write word into bytes at 0
-  bytes
+To make bytes, giving owned buffer of u8.
+Let bytes be owned buffer of 2 u8 filled with 0.
+Let word be Word with value be 42.
+Write word into bytes at 0.
+Give bytes.
 
-main gives i32:
-  let bytes be make bytes
-  let word be read Word from bytes at 0
-  word.value as i32
+To main, giving i32.
+Let bytes be make bytes.
+Let word be read Word from bytes at 0.
+Give word.value as i32.

@@ -1,10 +1,8 @@
-module Maybe
+Module Maybe.
 
-union MaybeI32:
-  none
-  some value: i32
+Union MaybeI32 has none; some value: i32.
 
-value or zero maybe: MaybeI32 gives i32:
-  match maybe:
-    MaybeI32.some with value gives value
-    otherwise gives 0
+To value or zero maybe: MaybeI32, giving i32.
+Give match maybe:
+MaybeI32.some with value gives value;
+otherwise gives 0.

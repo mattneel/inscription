@@ -1,14 +1,12 @@
-union MaybeI32:
-  none
-  some value: i32
+Union MaybeI32 has none; some value: i32.
 
-unwrap positive maybe: MaybeI32 gives i32:
-  require match maybe:
-    MaybeI32.some with value gives value is greater than 0
-    otherwise gives false
-  match maybe:
-    MaybeI32.some with value gives value
-    otherwise gives 0
+To unwrap positive maybe: MaybeI32, giving i32.
+Require match maybe:
+MaybeI32.some with value gives value is greater than 0;
+otherwise gives false.
+Give match maybe:
+MaybeI32.some with value gives value;
+otherwise gives 0.
 
-main gives i32:
-  unwrap positive MaybeI32.some with value be 7
+To main, giving i32.
+Give unwrap positive MaybeI32.some with value be 7.

@@ -6,7 +6,7 @@ The language is readable, but it is **not** natural-language interpretation: eve
 
 ## Status
 
-This repository currently implements **Inscription v0.31**:
+This repository currently implements **Inscription v0.32**:
 
 - source-visible scalar types: `i1`, signed integers `i8`/`i16`/`i32`/`i64`, unsigned integers `u8`/`u16`/`u32`/`u64`, and floats `f32`/`f64`
 - nominal integer-backed enums declared with `enum TypeName: underlying_integer_type:` and cases such as `active be 1`
@@ -83,7 +83,7 @@ This repository currently implements **Inscription v0.31**:
 - LLVM 22 lowering and execution through `mlir-opt`, `mlir-translate`, and `lli`
 - no source-level I/O, owned buffer parameters, owned buffer copying/rebinding, resizing, manual deallocation syntax, pointers, array parameters or returns, enum extern/export ABI, enum C header generation, recursive unions, recursive type aliases, parameterized aliases, alias-created nominal identity, C typedef emission, union constants, union buffers/arrays/views, union record fields, extern/export union ABI, C header union generation, match guards, range patterns, wildcard patterns, fallthrough, buffer/view return values, buffer/view/array aliasing beyond conservative same-root rejection, slices, C ABI structs, C ABI annotations, arbitrary pass pipelines, LLVM `opt`, LTO, linker flags beyond explicit `--link-object`/`--archive-object`, extern/exported buffer/view/record/owned-buffer parameters, extern/exported record or owned-buffer returns, executable packaging beyond one output file, shared libraries, record/layout C structs, header installation, heap strings, dynamic strings, source-level `String` type, string parameters or returns, string concatenation or interpolation, null-termination by default, statement-level `return`, `break`, `continue`, macros, import aliases, wildcard imports, generics, global storage, exceptions, result/error values, string constants, byte-array constants, source-level runtime assertion messages, overloading, type coercions, or natural-language inference
 
-See [`docs/inscription-v0.31-spec.md`](docs/inscription-v0.31-spec.md) and [`grammar/inscription-v0.31.ebnf`](grammar/inscription-v0.31.ebnf) for the exact current language and tooling contract. The immutable previous contracts remain in [`docs/`](docs) and [`grammar/`](grammar), including the v0.19 interface metadata contract.
+See [`docs/inscription-v0.32-spec.md`](docs/inscription-v0.32-spec.md) and [`grammar/inscription-v0.32.ebnf`](grammar/inscription-v0.32.ebnf) for the exact current language and tooling contract. The immutable previous contracts remain in [`docs/`](docs) and [`grammar/`](grammar), including the v0.19 interface metadata contract.
 
 ## Requirements
 
@@ -893,7 +893,8 @@ docs/inscription-v0.27-spec.md v0.27 type alias specification
 docs/inscription-v0.28-spec.md v0.28 byte literal specification
 docs/inscription-v0.29-spec.md v0.29 owned dynamic buffer specification
 docs/inscription-v0.30-spec.md v0.30 nested-scope owned buffer specification
-docs/inscription-v0.31-spec.md current v0.31 owned buffer return and transfer specification
+docs/inscription-v0.31-spec.md v0.31 owned buffer return and transfer specification
+docs/inscription-v0.32-spec.md current v0.32 prose-punctuation syntax specification
 grammar/inscription-v0.ebnf   original v0 grammar
 grammar/inscription-v0.1.ebnf v0.1 grammar
 grammar/inscription-v0.2.ebnf v0.2 grammar
@@ -925,7 +926,8 @@ grammar/inscription-v0.27.ebnf v0.27 grammar mirror
 grammar/inscription-v0.28.ebnf v0.28 grammar mirror
 grammar/inscription-v0.29.ebnf v0.29 grammar mirror
 grammar/inscription-v0.30.ebnf v0.30 grammar mirror
-grammar/inscription-v0.31.ebnf current v0.31 grammar mirror
+grammar/inscription-v0.31.ebnf v0.31 grammar mirror
+grammar/inscription-v0.32.ebnf current v0.32 grammar mirror
 tests/goldens/                exact MLIR conformance goldens
 tests/                        unit tests and executable fixtures
 ```

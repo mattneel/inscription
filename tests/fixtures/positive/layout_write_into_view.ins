@@ -1,12 +1,11 @@
-packed layout record Word:
-  value: u16
+Packed layout record Word has value: u16.
 
-layout write into view gives i32:
-  let bytes be buffer of 4 u8 filled with 0
-  let window be view of bytes from 1 for 2
-  let word be Word with value be 258
-  write word into window at 0
-  (bytes at 1 as i32) plus ((bytes at 2 as i32) times 10)
+To layout write into view, giving i32.
+Let bytes be buffer of 4 u8 filled with 0.
+Let window be view of bytes from 1 for 2.
+Let word be Word with value be 258.
+Write word into window at 0.
+Give (bytes at 1 as i32) plus ((bytes at 2 as i32) times 10).
 
-main gives i32:
-  layout write into view
+To main, giving i32.
+Give layout write into view.

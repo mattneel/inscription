@@ -1,13 +1,10 @@
-union Token:
-  eof
-  integer value: i64
-  operator symbol: u8 and precedence: u8
+Union Token has eof; integer value: i64; operator symbol: u8 and precedence: u8.
 
-make operator gives Token:
-  Token.operator with symbol be 10 and precedence be 5
+To make operator, giving Token.
+Give Token.operator with symbol be 10 and precedence be 5.
 
-main gives i32:
-  let token be make operator
-  match token:
-    Token.operator with symbol and precedence gives (symbol as i32) plus (precedence as i32)
-    otherwise gives 0
+To main, giving i32.
+Let token be make operator.
+Give match token:
+Token.operator with symbol and precedence gives (symbol as i32) plus (precedence as i32);
+otherwise gives 0.

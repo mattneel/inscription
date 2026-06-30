@@ -1,8 +1,8 @@
-checked owned view start: i32 and count: i32 gives i32:
-  let cells be owned buffer of 4 i32 filled with 0
-  cells at 1 becomes 7
-  let window be view of cells from start for count
-  window at 0
+To checked owned view start: i32 and count: i32, giving i32.
+Let cells be owned buffer of 4 i32 filled with 0.
+cells at 1 becomes 7.
+Let window be view of cells from start for count.
+Give window at 0.
 
-main gives i32:
-  checked owned view 1 and 2
+To main, giving i32.
+Give checked owned view 1 and 2.

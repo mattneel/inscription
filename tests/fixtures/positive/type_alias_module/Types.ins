@@ -1,10 +1,10 @@
-module Types
+Module Types.
 
-type Count be i32
-type CellView be view of Count
+Type Count be i32.
 
-sum cells cells: CellView gives Count:
-  let total: Count be 0
-  for each index i of cells:
-    total becomes total plus cells at i
-  total
+Type CellView be view of Count.
+
+To sum cells cells: CellView, giving Count.
+Let total: Count be 0.
+For each index i of cells: total becomes total plus cells at i.
+Give total.

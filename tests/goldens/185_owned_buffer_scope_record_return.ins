@@ -1,13 +1,11 @@
-record Pair:
-  left: i32
-  right: i32
+Record Pair has left: i32; right: i32.
 
-make pair from owned gives Pair:
-  let cells be owned buffer of 2 i32 filled with 0
-  cells at 0 becomes 3
-  cells at 1 becomes 4
-  Pair with left be cells at 0 and right be cells at 1
+To make pair from owned, giving Pair.
+Let cells be owned buffer of 2 i32 filled with 0.
+cells at 0 becomes 3.
+cells at 1 becomes 4.
+Give Pair with left be cells at 0 and right be cells at 1.
 
-main gives i32:
-  let pair be make pair from owned
-  pair.left plus pair.right
+To main, giving i32.
+Let pair be make pair from owned.
+Give pair.left plus pair.right.

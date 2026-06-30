@@ -1,13 +1,11 @@
-record Vec2:
-  x: f64
-  y: f64
+Record Vec2 has x: f64; y: f64.
 
-make vec x: f64 and y: f64 gives Vec2:
-  Vec2 with x be x and y be y
+To make vec x: f64 and y: f64, giving Vec2.
+Give Vec2 with x be x and y be y.
 
-length squared of v: Vec2 gives f64:
-  v.x times v.x plus v.y times v.y
+To length squared of v: Vec2, giving f64.
+Give v.x times v.x plus v.y times v.y.
 
-main gives i32:
-  let v be make vec 3.0 and 4.0
-  length squared of v as i32
+To main, giving i32.
+Let v be make vec 3.0 and 4.0.
+Give length squared of v as i32.

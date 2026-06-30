@@ -1,10 +1,8 @@
-union Token:
-  eof
-  operator symbol: u8 and precedence: u8
+Union Token has eof; operator symbol: u8 and precedence: u8.
 
-main gives i32:
-  let symbol be 1
-  let token be Token.operator with symbol be 10 and precedence be 5
-  match token:
-    Token.operator with symbol as op and precedence as prec gives symbol plus (op as i32) plus (prec as i32)
-    otherwise gives symbol
+To main, giving i32.
+Let symbol be 1.
+Let token be Token.operator with symbol be 10 and precedence be 5.
+Give match token:
+Token.operator with symbol as op and precedence as prec gives symbol plus (op as i32) plus (prec as i32);
+otherwise gives symbol.

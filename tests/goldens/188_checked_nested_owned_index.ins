@@ -1,15 +1,8 @@
-checked nested owned index i: i32 gives i32:
-  let result be 0
-  if true:
-    let cells be owned buffer of 4 i32 filled with 0
-    cells at 0 becomes 1
-    cells at 1 becomes 2
-    cells at 2 becomes 3
-    cells at 3 becomes 4
-    result becomes cells at i
-  otherwise:
-    result becomes 0
-  result
+To checked nested owned index i: i32, giving i32.
+Let result be 0.
+When true: Let cells be owned buffer of 4 i32 filled with 0; cells at 0 becomes 1; cells at 1 becomes 2; cells at 2 becomes 3; cells at 3 becomes 4; result becomes cells at i.
+Otherwise: result becomes 0.
+Give result.
 
-main gives i32:
-  checked nested owned index 2
+To main, giving i32.
+Give checked nested owned index 2.

@@ -1,16 +1,12 @@
-type Byte be u8
-type Word be u16
+Type Byte be u8.
 
-enum Mode: Byte:
-  idle be 0
-  active be 1
+Type Word be u16.
 
-packed layout record Header:
-  mode: Mode
-  length: Word
+Enum Mode backed by Byte has idle be 0; active be 1.
 
-main gives i32:
-  let bytes be array of 3 Byte containing 1, 42, 0
-  let header be read Header from bytes at 0
-  header.length as i32 when header.mode is equal to Mode.active
-  otherwise 0
+Packed layout record Header has mode: Mode; length: Word.
+
+To main, giving i32.
+Let bytes be array of 3 Byte containing 1, 42, 0.
+Let header be read Header from bytes at 0.
+Give header.length as i32 when header.mode is equal to Mode.active; otherwise 0.
