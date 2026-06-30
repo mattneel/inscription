@@ -1,0 +1,16 @@
+Enum Mode backed by u8 has left be 0; right be 1.
+
+To consume cells cells: owned buffer of i32, giving i32.
+Give length of cells.
+
+To match move all mode: Mode, giving i32.
+Let cells be owned buffer of 5 i32 filled with 1.
+Let result be 0.
+Match mode:
+Mode.left: result becomes consume cells move cells;
+Mode.right: result becomes consume cells move cells;
+otherwise: result becomes consume cells move cells.
+Give result.
+
+To main, giving i32.
+Give match move all Mode.left.

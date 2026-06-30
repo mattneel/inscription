@@ -1,0 +1,16 @@
+To consume index cells: owned buffer of i32 at i: i32, giving i32.
+Give cells at i.
+
+To checked branch move flag: i1, giving i32.
+Let cells be owned buffer of 4 i32 filled with 0.
+cells at 0 becomes 1.
+cells at 1 becomes 2.
+cells at 2 becomes 3.
+cells at 3 becomes 4.
+Let result be 0.
+When flag, result becomes consume index move cells at 2.
+Otherwise, result becomes consume index move cells at 2.
+Give result.
+
+To main, giving i32.
+Give checked branch move true.

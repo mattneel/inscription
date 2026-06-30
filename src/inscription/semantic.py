@@ -1632,6 +1632,7 @@ def _check_while(
     scoped = dict(bindings)
     for body_stmt in stmt.body:
         _check_body_stmt(body_stmt, scoped, functions, records, constants, scope_depth=scope_depth + 1)
+    _reject_loop_outer_moves(bindings, scoped, stmt.line)
 
 
 def _check_for(
@@ -1665,6 +1666,7 @@ def _check_for(
     scoped[stmt.name] = Binding(start_type, "index", stmt.line, writable=False, scope_depth=scope_depth + 1)
     for body_stmt in stmt.body:
         _check_body_stmt(body_stmt, scoped, functions, records, constants, scope_depth=scope_depth + 1)
+    _reject_loop_outer_moves(bindings, scoped, stmt.line)
 
 
 def _check_for_each(
@@ -1686,11 +1688,53 @@ def _check_for_each(
     scoped[stmt.name] = Binding("i32", "index", stmt.line, writable=False, scope_depth=scope_depth + 1)
     for body_stmt in stmt.body:
         _check_body_stmt(body_stmt, scoped, functions, records, constants, scope_depth=scope_depth + 1)
+    _reject_loop_outer_moves(bindings, scoped, stmt.line)
 
 
 def _check_index_shadow(name: str, line: int, bindings: dict[str, Binding]) -> None:
     if name in bindings:
         raise InscriptionError(f"binding {name} already exists", line)
+
+
+def _owned_buffer_bindings(bindings: dict[str, Binding]) -> dict[str, Binding]:
+    return {
+        name: binding
+        for name, binding in bindings.items()
+        if isinstance(binding.type_name, OwnedBufferType)
+    }
+
+
+def _reject_loop_outer_moves(
+    incoming: dict[str, Binding],
+    body_scope: dict[str, Binding],
+    line: int,
+) -> None:
+    for name, binding in _owned_buffer_bindings(incoming).items():
+        if binding.moved:
+            continue
+        outgoing = body_scope.get(name)
+        if outgoing is not None and outgoing.moved:
+            raise InscriptionError(
+                f"owned buffer {name} may not be moved from an outer scope inside a loop in v0.38",
+                line,
+            )
+
+
+def _merge_control_flow_owned_moves(
+    bindings: dict[str, Binding],
+    branch_scopes: tuple[dict[str, Binding], ...],
+    line: int,
+    *,
+    context: Literal["branches", "match arms"],
+) -> None:
+    for name, binding in _owned_buffer_bindings(bindings).items():
+        moved_states = tuple(branch_scope.get(name, binding).moved for branch_scope in branch_scopes)
+        if all(moved_states):
+            bindings[name] = replace(binding, moved=True)
+            continue
+        if any(moved_states):
+            raise InscriptionError(f"owned buffer {name} is moved in some {context} but not all", line)
+        bindings[name] = replace(binding, moved=False)
 
 
 def _check_if(
@@ -1718,6 +1762,7 @@ def _check_if(
     else_scope = dict(bindings)
     for body_stmt in stmt.else_body:
         _check_body_stmt(body_stmt, else_scope, functions, records, constants, scope_depth=scope_depth + 1)
+    _merge_control_flow_owned_moves(bindings, (then_scope, else_scope), stmt.line, context="branches")
 
 
 def _check_match_step(
@@ -1737,18 +1782,22 @@ def _check_match_step(
         raise InscriptionError("match block requires at least one pattern arm", stmt.line)
     _check_match_patterns(tuple(arm.pattern for arm in stmt.arms), scrutinee_type, env, functions, records, constants)
 
+    branch_scopes: list[dict[str, Binding]] = []
     for arm in stmt.arms:
         if not arm.body:
             raise InscriptionError("match arm must contain at least one step", arm.line)
         arm_scope = _bindings_with_match_payload(arm.pattern, scrutinee_type, bindings, constants)
         for body_stmt in arm.body:
             _check_body_stmt(body_stmt, arm_scope, functions, records, constants, scope_depth=scope_depth + 1)
+        branch_scopes.append(arm_scope)
 
     if not stmt.otherwise_body:
         raise InscriptionError("match arm must contain at least one step", stmt.line)
     otherwise_scope = dict(bindings)
     for body_stmt in stmt.otherwise_body:
         _check_body_stmt(body_stmt, otherwise_scope, functions, records, constants, scope_depth=scope_depth + 1)
+    branch_scopes.append(otherwise_scope)
+    _merge_control_flow_owned_moves(bindings, tuple(branch_scopes), stmt.line, context="match arms")
 
 
 def _lookup_phrase(name: str, line: int, functions: dict[str, Function]) -> Function:
@@ -1979,8 +2028,6 @@ def _require_owned_move_argument(
         raise InscriptionError(f"owned buffer {name} was moved and cannot be used", arg.line)
     if not isinstance(binding.type_name, OwnedBufferType):
         raise InscriptionError(f"move requires an owned buffer, got {format_type(binding.type_name)}", arg.line)
-    if binding.scope_depth < scope_depth:
-        raise InscriptionError(f"owned buffer {name} may be moved only in unconditional flow in v0.36", arg.line)
     if binding.type_name.element_type != expected.element_type:
         raise InscriptionError(
             f"argument {name} must have type {format_type(expected)}, got {format_type(binding.type_name)}",

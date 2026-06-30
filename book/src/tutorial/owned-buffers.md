@@ -56,3 +56,23 @@ Give total.
 To main, giving i32.
 Give sum and drop cells move (make cells 4).
 ```
+
+
+Branch and match steps are move-aware. This is valid because both branches move `cells`:
+
+```inscription,check
+To consume cells cells: owned buffer of i32, giving i32.
+Give length of cells.
+
+To branch move all flag: i1, giving i32.
+Let cells be owned buffer of 4 i32 filled with 1.
+Let result be 0.
+When flag, result becomes consume cells move cells.
+Otherwise, result becomes consume cells move cells.
+Give result.
+
+To main, giving i32.
+Give branch move all true.
+```
+
+A branch that moves `cells` on only some paths is rejected. Loops still cannot move outer-scope owned buffers, although loop-local buffers can be moved inside each iteration.

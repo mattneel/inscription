@@ -119,6 +119,27 @@ cells at 0 becomes 9.
 Give total plus cells at 0.
 ```
 
+## Move-aware branch and match control flow
+
+Non-loop control flow may consume an outer owned buffer when every path leaves the binding in the same ownership state. If all branches move it, the binding is moved after the control-flow construct and the parent scope skips cleanup. If no branch moves it, it remains live.
+
+```inscription,check
+To consume cells cells: owned buffer of i32, giving i32.
+Give length of cells.
+
+To branch move all flag: i1, giving i32.
+Let cells be owned buffer of 4 i32 filled with 1.
+Let result be 0.
+When flag, result becomes consume cells move cells.
+Otherwise, result becomes consume cells move cells.
+Give result.
+
+To main, giving i32.
+Give branch move all true.
+```
+
+Mixed branches are rejected because the caller would not know whether it still owns the buffer. Step-level `Match` uses the same all-arms rule. Loops stay conservative: moving an outer-scope owned buffer inside `While`, `For`, or `For each` is still rejected, but moving a loop-local owned buffer remains valid.
+
 ## Current restrictions
 
-Owned buffers cannot be copied, rebound, stored in records or unions, exposed through extern/export ABI, or moved from fixed buffers, arrays, or views. Direct temporary moves are allowed only as `move (owned-buffer-returning call)` actuals to consuming parameters. v0.36 and later also reject moving an outer-scope owned buffer from inside branches, loops, or match arms; move a binding declared in the same lexical block instead.
+Owned buffers cannot be copied, rebound, stored in records or unions, exposed through extern/export ABI, or moved from fixed buffers, arrays, or views. Direct temporary moves are allowed only as `move (owned-buffer-returning call)` actuals to consuming parameters. v0.38 allows all-path moves of outer-scope owned buffers through `When`/`Otherwise` and step-level `Match`. Mixed move/live branches are rejected. Loops still reject moving an outer-scope owned buffer; move a loop-local binding instead.

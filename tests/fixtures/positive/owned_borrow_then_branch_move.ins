@@ -1,0 +1,18 @@
+To sum view cells: view of i32, giving i32.
+Let total be 0.
+For each index i of cells: total becomes total plus cells at i.
+Give total.
+
+To consume cells cells: owned buffer of i32, giving i32.
+Give length of cells.
+
+To borrow then branch move flag: i1, giving i32.
+Let cells be owned buffer of 4 i32 filled with 3.
+Let total be sum view cells.
+Let consumed be 0.
+When flag, consumed becomes consume cells move cells.
+Otherwise, consumed becomes consume cells move cells.
+Give total plus consumed.
+
+To main, giving i32.
+Give borrow then branch move true.

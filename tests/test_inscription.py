@@ -4214,7 +4214,7 @@ Give result plus seen.
             "When flag, result becomes consume cells move cells.\n"
             "Otherwise, result becomes 0.\n"
             "Give result.\n",
-            "owned buffer cells may be moved only in unconditional flow in v0.36",
+            "owned buffer cells is moved in some branches but not all",
         )
         self.assertCompileError(
             "To make cells count: i32, giving owned buffer of i32.\n"
@@ -4398,6 +4398,131 @@ Give result plus seen.
                         "inscription",
                         "compile",
                         str(FIXTURES / "owned_temp_move_consume.ins"),
+                        "--emit",
+                        "static-library",
+                        "-o",
+                        str(archive),
+                    ],
+                    cwd=ROOT,
+                    env=env,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    check=False,
+                )
+                self.assertEqual(archive_proc.returncode, 0, archive_proc.stderr)
+                self.assertGreater(archive.stat().st_size, 0)
+
+    def test_v038_move_aware_control_flow(self):
+        branch = compile_source(self.fixture("owned_branch_move_all.ins"))
+        self.assertIn("func.func @branch_move_all", branch)
+        self.assertIn("func.call @consume_cells", branch)
+        branch_body = branch.split("func.func @branch_move_all", 1)[1].split("func.func @main", 1)[0]
+        self.assertNotIn("memref.dealloc", branch_body)
+
+        match = compile_source(self.fixture("owned_match_move_all.ins"))
+        self.assertIn("func.func @match_move_all", match)
+        self.assertIn("func.call @consume_cells", match)
+
+        nested = compile_source(self.fixture("owned_nested_branch_move_all.ins"))
+        self.assertIn("func.func @nested_branch_move", nested)
+        self.assertIn("scf.if", nested)
+
+        borrow = compile_source(self.fixture("owned_borrow_then_branch_move.ins"))
+        self.assertIn("func.call @sum_view", borrow)
+        self.assertIn("func.call @consume_cells", borrow)
+
+        loop_local = compile_source(self.fixture("owned_loop_local_move_still.ins"))
+        self.assertIn("func.func @loop_local_move_still", loop_local)
+        self.assertIn("func.call @consume_cells", loop_local)
+
+        self.assertCompileError(
+            "To consume cells cells: owned buffer of i32, giving i32.\n"
+            "Give length of cells.\n\n"
+            "To bad flag: i1, giving i32.\n"
+            "Let cells be owned buffer of 4 i32 filled with 1.\n"
+            "Let result be 0.\n"
+            "When flag, result becomes consume cells move cells.\n"
+            "Otherwise, result becomes consume cells move cells.\n"
+            "Give result plus length of cells.\n",
+            "owned buffer cells was moved and cannot be used",
+        )
+        self.assertCompileError(
+            "To consume cells cells: owned buffer of i32, giving i32.\n"
+            "Give length of cells.\n\n"
+            "To bad, giving i32.\n"
+            "Let cells be owned buffer of 4 i32 filled with 1.\n"
+            "Let total be 0.\n"
+            "For i from 0 up to 3: total becomes total plus consume cells move cells.\n"
+            "Give total.\n",
+            "owned buffer cells may not be moved from an outer scope inside a loop in v0.38",
+        )
+
+    def test_v038_move_aware_control_flow_artifacts_and_runtime_checks(self):
+        try:
+            resolve_toolchain()
+        except ToolchainError:
+            return
+
+        env = {**os.environ, "PYTHONPATH": str(SRC)}
+        checked = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "inscription",
+                "run",
+                str(FIXTURES / "checked_owned_branch_move.ins"),
+                "--runtime-checks",
+            ],
+            cwd=ROOT,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(checked.returncode, 3, checked.stderr)
+        self.assertEqual(checked.stdout, "")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            llvm_ir = tmp_path / "owned_branch_move_all.ll"
+            llvm_proc = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "inscription",
+                    "compile",
+                    str(FIXTURES / "owned_branch_move_all.ins"),
+                    "--emit",
+                    "llvm-ir",
+                    "--verify",
+                    "-o",
+                    str(llvm_ir),
+                ],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(llvm_proc.returncode, 0, llvm_proc.stderr)
+            self.assertIn("define i32 @main", llvm_ir.read_text())
+
+            try:
+                resolve_toolchain(require_static_library=True)
+            except ToolchainError:
+                pass
+            else:
+                archive = tmp_path / "libowned_branch_move_all.a"
+                archive_proc = subprocess.run(
+                    [
+                        sys.executable,
+                        "-m",
+                        "inscription",
+                        "compile",
+                        str(FIXTURES / "owned_branch_move_all.ins"),
                         "--emit",
                         "static-library",
                         "-o",
@@ -5727,15 +5852,23 @@ Give result plus seen.
             ),
             "move outer owned buffer inside branch invalid": (
                 "To consume cells cells: owned buffer of i32, giving i32.\nGive length of cells.\n\nTo bad flag: i1, giving i32.\nLet cells be owned buffer of 4 i32 filled with 1.\nLet result be 0.\nWhen flag, result becomes consume cells move cells.\nOtherwise, result becomes 0.\nGive result.\n",
-                "owned buffer cells may be moved only in unconditional flow in v0.36",
+                "owned buffer cells is moved in some branches but not all",
             ),
             "move outer owned buffer inside loop invalid": (
                 "To consume cells cells: owned buffer of i32, giving i32.\nGive length of cells.\n\nTo bad, giving i32.\nLet cells be owned buffer of 4 i32 filled with 1.\nLet total be 0.\nFor i from 0 up to 3: total becomes total plus consume cells move cells.\nGive total.\n",
-                "owned buffer cells may be moved only in unconditional flow in v0.36",
+                "owned buffer cells may not be moved from an outer scope inside a loop in v0.38",
             ),
             "move outer owned buffer inside match arm invalid": (
                 "Enum Mode backed by u8 has active be 0.\n\nTo consume cells cells: owned buffer of i32, giving i32.\nGive length of cells.\n\nTo bad mode: Mode, giving i32.\nLet cells be owned buffer of 4 i32 filled with 1.\nLet result be 0.\nMatch mode:\nMode.active: result becomes consume cells move cells;\notherwise: result becomes 0.\nGive result.\n",
-                "owned buffer cells may be moved only in unconditional flow in v0.36",
+                "owned buffer cells is moved in some match arms but not all",
+            ),
+            "owned buffer store after all path branch move invalid": (
+                "To consume cells cells: owned buffer of i32, giving i32.\nGive length of cells.\n\nTo bad flag: i1, giving i32.\nLet cells be owned buffer of 4 i32 filled with 1.\nLet result be 0.\nWhen flag, result becomes consume cells move cells.\nOtherwise, result becomes consume cells move cells.\ncells at 0 becomes 7.\nGive result.\n",
+                "owned buffer cells was moved and cannot be used",
+            ),
+            "partial nested branch move invalid": (
+                "To consume cells cells: owned buffer of i32, giving i32.\nGive length of cells.\n\nTo bad left: i1 and right: i1, giving i32.\nLet cells be owned buffer of 4 i32 filled with 1.\nLet result be 0.\nWhen left: When right: result becomes consume cells move cells; Otherwise: result becomes 0.\nOtherwise, result becomes consume cells move cells.\nGive result.\n",
+                "owned buffer cells is moved in some branches but not all",
             ),
             "move direct owned return call invalid": (
                 "To make cells count: i32, giving owned buffer of i32.\nLet cells be owned buffer of count i32 filled with 1.\nGive cells.\n\nTo consume cells cells: owned buffer of i32, giving i32.\nGive length of cells.\n\nTo bad, giving i32.\nGive consume cells move make cells 4.\n",
