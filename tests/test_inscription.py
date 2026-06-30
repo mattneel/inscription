@@ -4,6 +4,7 @@ import difflib
 import importlib.util
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -2137,7 +2138,7 @@ class CompilerTests(unittest.TestCase):
         )
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertIn("\x1b[", proc.stdout)
-        self.assertIn("gives", proc.stdout)
+        self.assertIn("giving", proc.stdout)
         self.assertEqual(proc.stderr, "")
 
     @unittest.skipUnless(importlib.util.find_spec("pygments"), "Pygments is not installed")
@@ -2168,7 +2169,7 @@ class CompilerTests(unittest.TestCase):
             self.assertEqual(proc.stdout, "")
             html = output.read_text()
         self.assertIn("<html", html.lower())
-        self.assertIn("gives", html)
+        self.assertIn("giving", html)
         self.assertIn("highlight", html)
 
     @unittest.skipUnless(importlib.util.find_spec("pygments"), "Pygments is not installed")
@@ -5471,6 +5472,104 @@ class FormatterTests(unittest.TestCase):
                 original_mlir = compile_source(source, source_path=source_path, module_root=GOLDENS)
                 formatted_mlir = compile_source(formatted, source_path=source_path, module_root=GOLDENS)
                 self.assertEqual(formatted_mlir, original_mlir)
+
+class BookDocumentationTests(unittest.TestCase):
+    def _load_module(self, name: str, path: Path):
+        spec = importlib.util.spec_from_file_location(name, path)
+        self.assertIsNotNone(spec)
+        module = importlib.util.module_from_spec(spec)
+        assert spec is not None and spec.loader is not None
+        sys.modules[name] = module
+        spec.loader.exec_module(module)
+        return module
+
+    def test_book_files_exist_and_summary_links_are_valid(self):
+        book = ROOT / "book"
+        src = book / "src"
+        required = [
+            book / "book.toml",
+            src / "SUMMARY.md",
+            src / "introduction.md",
+            src / "getting-started.md",
+            src / "prose-punctuation-syntax.md",
+            book / "theme" / "inscription.css",
+            book / "tools" / "inscription_mdbook_preprocessor.py",
+            book / "tools" / "check_book_examples.py",
+            ROOT / ".github" / "workflows" / "book.yml",
+            ROOT / "docs" / "github-pages.md",
+        ]
+        for path in required:
+            with self.subTest(path=path.relative_to(ROOT)):
+                self.assertTrue(path.exists())
+
+        summary = (src / "SUMMARY.md").read_text()
+        linked = set()
+        for target in re.findall(r"\[[^\]]+\]\(([^)]+\.md)\)", summary):
+            path = (src / target).resolve()
+            linked.add(path)
+            self.assertTrue(path.exists(), target)
+        chapters = {path.resolve() for path in src.rglob("*.md") if path.name != "SUMMARY.md"}
+        self.assertEqual(chapters - linked, set())
+
+    def test_mdbook_preprocessor_transforms_only_inscription_fences(self):
+        preprocessor = self._load_module(
+            "inscription_mdbook_preprocessor",
+            ROOT / "book" / "tools" / "inscription_mdbook_preprocessor.py",
+        )
+        markdown = "```inscription,check\nTo main, giving i32.\nGive 7.\n```\n\n```python\nprint(7)\n```\n"
+        transformed = preprocessor.transform_markdown(markdown, highlighter=lambda code: f"<pre>{code}</pre>")
+        self.assertIn("<pre>To main, giving i32.\nGive 7.</pre>", transformed)
+        self.assertIn("```python\nprint(7)\n```", transformed)
+
+    def test_mdbook_preprocessor_json_payload(self):
+        preprocessor = self._load_module(
+            "inscription_mdbook_preprocessor_json",
+            ROOT / "book" / "tools" / "inscription_mdbook_preprocessor.py",
+        )
+        book = {
+            "sections": [
+                {
+                    "Chapter": {
+                        "name": "Example",
+                        "content": "```inscription\nTo main, giving i32.\nGive 7.\n```\n",
+                        "sub_items": [],
+                    }
+                }
+            ]
+        }
+        transformed = preprocessor.transform_book(book, highlighter=lambda code: f"<pre>{code}</pre>")
+        self.assertIn("<pre>To main, giving i32.\nGive 7.</pre>", transformed["sections"][0]["Chapter"]["content"])
+
+    def test_mdbook_preprocessor_dependency_error_is_deterministic(self):
+        preprocessor = self._load_module(
+            "inscription_mdbook_preprocessor_error",
+            ROOT / "book" / "tools" / "inscription_mdbook_preprocessor.py",
+        )
+        def missing(_code: str):
+            raise preprocessor.PreprocessorError("Inscription mdBook preprocessor requires Pygments; install docs dependencies")
+        with self.assertRaisesRegex(preprocessor.PreprocessorError, "requires Pygments"):
+            preprocessor.transform_markdown("```inscription\nTo main, giving i32.\nGive 7.\n```\n", highlighter=missing)
+
+    def test_book_example_checker_smoke(self):
+        checker = self._load_module("check_book_examples", ROOT / "book" / "tools" / "check_book_examples.py")
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_root = Path(tmp)
+            book_src = tmp_root / "book" / "src"
+            book_src.mkdir(parents=True)
+            (book_src / "example.md").write_text(
+                "```inscription,check\nTo main, giving i32.\nGive 7.\n```\n"
+            )
+            formatted, checked, _verify_mlir = checker.check_examples(tmp_root)
+            self.assertEqual((formatted, checked), (1, 1))
+
+    def test_book_workflow_mentions_pages_and_build_steps(self):
+        workflow = (ROOT / ".github" / "workflows" / "book.yml").read_text()
+        self.assertIn("mdbook build book", workflow)
+        self.assertIn("python book/tools/check_book_examples.py", workflow)
+        self.assertIn("actions/upload-pages-artifact@v4", workflow)
+        self.assertIn("actions/deploy-pages@v4", workflow)
+        self.assertIn("pages: write", workflow)
+        self.assertNotIn("\t", workflow)
 
 
 if __name__ == "__main__":

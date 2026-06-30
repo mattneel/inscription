@@ -1,0 +1,33 @@
+# Protocol Parser
+
+This example combines byte arrays, layout records, enums, unions, and match expressions.
+
+```inscription,check
+Type Byte be u8.
+
+Enum Mode backed by Byte has idle be 0; active be 1; failed be 2.
+
+Packed layout record Header has mode: Mode; length: u16; flags: Byte.
+
+Union ParseResult has value value: Header; error code: Byte and offset: i32.
+
+To parse header bytes: view of Byte, giving ParseResult.
+Require length of bytes is greater than or equal to size of Header.
+Let header be read Header from bytes at 0.
+Give ParseResult.value with value be header.
+
+To code for mode mode: Mode, giving i32.
+Give match mode:
+Mode.idle gives 0;
+Mode.active gives 7;
+Mode.failed gives 255;
+otherwise gives 1.
+
+To main, giving i32.
+Let bytes be array of bytes "\x01\x09\x00\x03".
+Let result be parse header bytes.
+Give match result:
+ParseResult.value with value as header gives code for mode header.mode;
+ParseResult.error with code as code and offset as offset gives (code as i32) plus offset;
+otherwise gives 0.
+```

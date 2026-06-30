@@ -1,0 +1,48 @@
+/* Minimal Inscription mdBook highlighting wrapper. Pygments token classes come
+   from src/inscription/highlighting.py so the book and CLI share one lexer. */
+.inscription-code {
+  margin: 1em 0;
+}
+
+.inscription-code .highlight,
+.inscription-code .highlight pre {
+  margin: 0;
+  background: var(--quote-bg);
+}
+
+.inscription-code pre {
+  border-radius: 6px;
+  overflow-x: auto;
+  padding: 0.85em 1em;
+}
+
+.inscription-code .k,
+.inscription-code .kd,
+.inscription-code .kn,
+.inscription-code .kt {
+  color: #ffb454;
+  font-weight: 600;
+}
+
+.inscription-code .nc {
+  color: #59c2ff;
+}
+
+.inscription-code .nv {
+  color: #aad94c;
+}
+
+.inscription-code .mi,
+.inscription-code .mf {
+  color: #d2a6ff;
+}
+
+.inscription-code .s,
+.inscription-code .s2 {
+  color: #c2d94c;
+}
+
+.inscription-code .ow,
+.inscription-code .o {
+  color: #f07178;
+}

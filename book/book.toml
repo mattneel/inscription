@@ -1,0 +1,13 @@
+[book]
+title = "The Inscription Book"
+authors = ["Inscription contributors"]
+language = "en"
+src = "src"
+
+[output.html]
+default-theme = "ayu"
+preferred-dark-theme = "ayu"
+additional-css = ["theme/inscription.css"]
+
+[preprocessor.inscription-highlight]
+command = "python tools/inscription_mdbook_preprocessor.py"
