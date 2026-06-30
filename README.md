@@ -11,12 +11,12 @@ The full language guide now lives in **[The Inscription Book](book/src/title-pag
 
 ## Status
 
-This repository currently implements **Inscription v0.34: The Inscription Book**. v0.34 is a documentation and tooling sprint: it adds the mdBook documentation site, example checker, book syntax-highlighting preprocessor, and GitHub Pages workflow. It does not change language syntax, compiler semantics, MLIR lowering, runtime behavior, or artifact kinds.
+This repository currently implements **Inscription v0.34: explicit `then` parent-continuation clauses**. v0.34 keeps the v0.33 compiler semantics and lowering while adding `; then ...` as a punctuation marker that resumes a parent clause list after nested `For`, `While`, or `Match` control. The mdBook documentation site remains the primary language guide.
 
 The current language includes:
 
 - scalar integer, float, and boolean types
-- deterministic prose-punctuation syntax and canonical formatter
+- deterministic prose-punctuation syntax, `then` parent continuations, and canonical formatter
 - modules and imports
 - constants, checks, runtime `Require`, and optional `--runtime-checks`
 - phrases, extern declarations, and scalar exported phrases
@@ -87,14 +87,25 @@ Serve the book during editing:
 mdbook serve book --open
 ```
 
+
+Nested punctuation control is greedy by default. Use `then` to resume the parent clause list after a nested controller:
+
+```inscription
+To nested for then, giving i32.
+Let total be 0.
+Let rows be 0.
+For i from 0 up to 3: For j from 0 up to 3: total becomes total plus 1; then rows becomes rows plus 1.
+Give total plus rows.
+```
+
 ## Documentation map
 
 - [`book/src/SUMMARY.md`](book/src/SUMMARY.md): table of contents for The Inscription Book
 - [`book/tools/check_book_examples.py`](book/tools/check_book_examples.py): deterministic book example checker
 - [`book/tools/inscription_mdbook_preprocessor.py`](book/tools/inscription_mdbook_preprocessor.py): mdBook preprocessor that reuses Inscription's own highlighter
 - [`docs/github-pages.md`](docs/github-pages.md): GitHub Pages setup notes
-- [`docs/inscription-v0.33-spec.md`](docs/inscription-v0.33-spec.md): latest language/tooling sprint spec before the book
-- [`grammar/inscription-v0.33.ebnf`](grammar/inscription-v0.33.ebnf): current grammar mirror
+- [`docs/inscription-v0.34-spec.md`](docs/inscription-v0.34-spec.md): current language sprint spec
+- [`grammar/inscription-v0.34.ebnf`](grammar/inscription-v0.34.ebnf): current grammar mirror
 
 ## Testing
 

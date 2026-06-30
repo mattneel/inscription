@@ -40,4 +40,17 @@ Let modes be array of 3 Mode containing Mode.idle, Mode.active, Mode.active.
 Give count active modes.
 ```
 
+Nested controllers are greedy: a nested `For`, `While`, or `Match` owns following semicolon clauses until the sentence ends. Use `then` to resume the parent clause list after one nested controller:
+
+```inscription,check
+To nested for then, giving i32.
+Let total be 0.
+Let rows be 0.
+For i from 0 up to 3: For j from 0 up to 3: total becomes total plus 1; then rows becomes rows plus 1.
+Give total plus rows.
+
+To main, giving i32.
+Give nested for then.
+```
+
 The canonical formatter stabilizes this layout. Prefer `inscription format` over hand-aligning source.

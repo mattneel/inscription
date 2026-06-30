@@ -217,7 +217,7 @@ def scan_module_header(source: str) -> tuple[str | None, tuple[ImportDecl, ...]]
                 raise InscriptionError(f"module {imported.module} is already imported", imported.line)
             seen.add(imported.module)
         return module_name, imports
-    raise InscriptionError("source must use v0.33 punctuation syntax")
+    raise InscriptionError("source must use v0.34 punctuation syntax")
 
 
 def validate_module_name(name: str, line: int = 0) -> str:

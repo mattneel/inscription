@@ -10,3 +10,13 @@ PYTHONPATH=src python -m inscription format source.ins --check
 ```
 
 `--check` exits 0 when the file is already formatted and exits 2 with a deterministic diagnostic when it would change. The formatter does not sort imports or declarations, simplify expressions, infer missing punctuation, or run semantic lowering.
+
+The formatter preserves `then` parent-continuation clauses in nested punctuation control flow:
+
+```inscription,format
+To nested for then, giving i32.
+Let total be 0.
+Let rows be 0.
+For i from 0 up to 3: For j from 0 up to 3: total becomes total plus 1; then rows becomes rows plus 1.
+Give total plus rows.
+```

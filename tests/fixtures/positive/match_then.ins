@@ -1,0 +1,11 @@
+Enum Mode backed by u8 has idle be 0; active be 1.
+
+To match then mode: Mode, giving i32.
+Let result be 0.
+Let seen be 0.
+When true: Match mode: Mode.active: result becomes 7; otherwise: result becomes 3; then seen becomes seen plus 1.
+Otherwise: result becomes 0.
+Give result plus seen.
+
+To main, giving i32.
+Give match then Mode.active.

@@ -61,7 +61,7 @@ def format_file(path: Path) -> str:
 
 
 def format_source(source: str) -> str:
-    """Return deterministic canonical v0.32/v0.33 punctuation source.
+    """Return deterministic canonical v0.32-v0.34 punctuation source.
 
     The formatter validates the punctuation sentence structure by running the
     source through the parser's punctuation normalizer, then pretty-prints the
@@ -198,7 +198,15 @@ def _format_control_with_nested_match(text: str) -> str | None:
     body = text[separator + 1 :].strip()
     if not body.startswith("Match "):
         return None
+    if _contains_then_marker(body):
+        return None
     return f"{head}:\n{_format_match_step_sentence(body)}"
+
+
+
+def _contains_then_marker(text: str) -> bool:
+    parts = _split_semicolons(text)
+    return any(part.strip() == "then" or part.strip().startswith("then ") for part in parts[1:])
 
 
 def _format_simple_sentence(text: str) -> str:

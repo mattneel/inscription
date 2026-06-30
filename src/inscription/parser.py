@@ -447,7 +447,7 @@ def _reject_legacy_surface(source: str) -> None:
         if re.fullmatch(r"(?:if|while|for|match)\b.*:", text):
             raise InscriptionError("legacy block syntax is not supported", number)
         if re.fullmatch(r"(?:module|import|type|constant|check|enum|union|extern|export)\b.*", text):
-            raise InscriptionError("legacy syntax is not supported; use v0.33 punctuation sentences", number)
+            raise InscriptionError("legacy syntax is not supported; use v0.34 punctuation sentences", number)
 
 
 def _split_punctuation_sentences(source: str) -> list[PunctuationSentence]:
@@ -747,13 +747,23 @@ def _split_guarded_value_clauses(expr: str) -> list[str] | None:
 
 
 def _translate_step_sentence(text: str, line: int, indent: int) -> list[str]:
+    if _starts_then_marker(text):
+        raise InscriptionError("then may only resume a parent clause after nested control", line)
     if text.startswith("Let "):
+        if _contains_then_marker(text):
+            raise InscriptionError("then may only resume a parent clause after nested control", line)
         return _translate_match_expression_line("let " + text[len("Let ") :].strip(), indent)
     if text.startswith("Require "):
+        if _contains_then_marker(text):
+            raise InscriptionError("then may only resume a parent clause after nested control", line)
         return _translate_match_expression_line("require " + text[len("Require ") :].strip(), indent)
     if text.startswith("Check "):
+        if _contains_then_marker(text):
+            raise InscriptionError("then may only resume a parent clause after nested control", line)
         return _translate_match_expression_line("check " + text[len("Check ") :].strip(), indent)
     if text.startswith("Write "):
+        if _contains_then_marker(text):
+            raise InscriptionError("then may only resume a parent clause after nested control", line)
         return [" " * indent + "write " + text[len("Write ") :].strip()]
     if text.startswith("While "):
         return _translate_loop_sentence("while", text[len("While ") :].strip(), line, indent)
@@ -761,6 +771,8 @@ def _translate_step_sentence(text: str, line: int, indent: int) -> list[str]:
         return _translate_loop_sentence("for", text[len("For ") :].strip(), line, indent)
     if text.startswith("Match "):
         return _translate_match_step_sentence(text, line, indent)
+    if _contains_then_marker(text):
+        raise InscriptionError("then may only resume a parent clause after nested control", line)
     if ";" in text:
         raise InscriptionError("semicolon is only valid inside a colon-introduced clause list", line)
     return _translate_match_expression_line(text, indent)
@@ -833,13 +845,15 @@ def _find_top_level_char(text: str, target: str) -> int:
 
 
 def _translate_clause_body(body: str, line: int, indent: int) -> list[str]:
-    clauses = _split_step_clauses(body)
+    clauses = _split_step_clauses(body, line)
     if not clauses:
         raise InscriptionError("clause list must contain at least one step", line)
     lines: list[str] = []
     index = 0
     while index < len(clauses):
         clause = clauses[index]
+        if _starts_then_marker(clause):
+            raise InscriptionError("then may only resume a parent clause after nested control", line)
         if clause.startswith("When "):
             if index + 1 >= len(clauses) or not clauses[index + 1].startswith("Otherwise"):
                 raise InscriptionError("When requires an immediately following Otherwise", line)
@@ -851,23 +865,82 @@ def _translate_clause_body(body: str, line: int, indent: int) -> list[str]:
     return lines
 
 
-def _split_step_clauses(body: str) -> list[str]:
+def _is_nested_control_clause(text: str) -> bool:
+    return text.startswith(("While ", "For ", "Match "))
+
+
+def _starts_then_marker(text: str) -> bool:
+    return text == "then" or text.startswith("then ")
+
+
+def _contains_then_marker(text: str) -> bool:
+    parts = _split_top_level(text, ";")
+    return any(_starts_then_marker(part.strip()) for part in parts[1:])
+
+
+def _strip_then_marker(text: str, line: int) -> str:
+    if text == "then":
+        raise InscriptionError("then must be followed by a parent clause", line)
+    if not text.startswith("then "):
+        return text
+    rest = text[len("then ") :].strip()
+    if not rest:
+        raise InscriptionError("then must be followed by a parent clause", line)
+    return rest
+
+
+def _split_step_clauses(body: str, line: int) -> list[str]:
     clauses: list[str] = []
     rest = body.strip()
     while rest:
-        if rest.startswith(("While ", "For ", "Match ")):
-            clauses.append(rest)
-            break
+        if _starts_then_marker(rest):
+            raise InscriptionError("then may only resume a parent clause after nested control", line)
+        if _is_nested_control_clause(rest):
+            control_clause, continuation = _split_nested_control_continuation(rest, line)
+            clauses.append(control_clause)
+            if continuation is None:
+                break
+            rest = continuation.strip()
+            continue
         parts = _split_top_level(rest, ";")
         if len(parts) <= 1:
             clauses.append(rest)
             break
-        clauses.append(parts[0])
+        first = parts[0].strip()
+        if first:
+            clauses.append(first)
         semicolon = _find_top_level_char(rest, ";")
         if semicolon == -1:
             break
         rest = rest[semicolon + 1 :].strip()
+        if _starts_then_marker(rest):
+            raise InscriptionError("then may only resume a parent clause after nested control", line)
     return [clause for clause in clauses if clause]
+
+
+def _nested_control_start_count(text: str) -> int:
+    return len(re.findall(r"(?:^|:\s+)(?:While|For|Match)\b", text))
+
+
+def _split_nested_control_continuation(text: str, line: int) -> tuple[str, str | None]:
+    parts = _split_top_level(text, ";")
+    if len(parts) <= 1:
+        return text.strip(), None
+    depth = max(1, _nested_control_start_count(parts[0]))
+    for index, raw_part in enumerate(parts[1:], start=1):
+        part = raw_part.strip()
+        if _starts_then_marker(part):
+            resumed = _strip_then_marker(part, line)
+            depth -= 1
+            if depth == 0:
+                control = "; ".join(piece.strip() for piece in parts[:index] if piece.strip()).strip()
+                continuation_parts = [resumed, *(piece.strip() for piece in parts[index + 1 :] if piece.strip())]
+                continuation = "; ".join(piece for piece in continuation_parts if piece).strip()
+                return control, continuation
+            depth += _nested_control_start_count(resumed)
+            continue
+        depth += _nested_control_start_count(part)
+    return text.strip(), None
 
 
 def _translate_match_expression_line(text: str, indent: int) -> list[str]:

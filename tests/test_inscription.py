@@ -2220,6 +2220,7 @@ class CompilerTests(unittest.TestCase):
                 "union HighlightToken:\n  eof\n  operator symbol: u8 and precedence: u8\n\nhighlight token gives i32:\n  match HighlightToken.operator with symbol be 1 and precedence be 2:\n    HighlightToken.operator with symbol as op and precedence as prec gives (op as i32) plus (prec as i32)\n    otherwise gives 0\n",
                 "highlight bytes gives i32:\n  let text be array of bytes \"A\\n\"\n  match text at 0:\n    byte \"A\" gives length of bytes \"A\\n\"\n    otherwise gives 0\n",
                 "highlight owned n: i32 gives i32:\n  let cells be owned buffer of n i32 filled with 1\n  length of cells\n",
+                "To highlight then, giving i32.\nFor i from 0 up to 1: For j from 0 up to 1: i becomes i; then i becomes i.\nGive 0.\n",
             ]
         )
         html = highlight_source(source, output_format="html")
@@ -2867,6 +2868,18 @@ Give choose mode mode.
                 "semicolon is only valid inside a colon-introduced clause list",
             ),
             (
+                "To main, giving i32.\nthen Give 0.\n",
+                "then may only resume a parent clause after nested control",
+            ),
+            (
+                "To main, giving i32.\nLet x be 1; then x becomes 2.\nGive x.\n",
+                "then may only resume a parent clause after nested control",
+            ),
+            (
+                "To main, giving i32.\nFor i from 0 up to 3: x becomes x plus 1; then x becomes x plus 2.\nGive 0.\n",
+                "then may only resume a parent clause after nested control",
+            ),
+            (
                 "main gives i32:\n  0\n",
                 "legacy phrase syntax is not supported; use `To main, giving i32.`",
             ),
@@ -2884,6 +2897,61 @@ Give choose mode mode.
                 with self.assertRaises(InscriptionError) as ctx:
                     _compile_source(bad_source)
                 self.assertIn(message, str(ctx.exception))
+
+    def test_v034_then_parent_continuation_normalizes_nested_control(self):
+        with_then = normalize_punctuation_source(
+            """To nested loop parent continuation, giving i32.
+Let total be 0.
+Let counter be 0.
+For i from 0 up to 3: For j from 0 up to 3: total becomes total plus 1; then counter becomes counter plus 1.
+Give total plus counter.
+"""
+        )
+        self.assertIn(
+            "  for i from 0 up to 3:\n"
+            "    for j from 0 up to 3:\n"
+            "      total becomes total plus 1\n"
+            "    counter becomes counter plus 1\n",
+            with_then,
+        )
+
+        without_then = normalize_punctuation_source(
+            """To nested loop greedy body, giving i32.
+Let total be 0.
+Let counter be 0.
+For i from 0 up to 3: For j from 0 up to 3: total becomes total plus 1; counter becomes counter plus 1.
+Give total plus counter.
+"""
+        )
+        self.assertIn(
+            "  for i from 0 up to 3:\n"
+            "    for j from 0 up to 3:\n"
+            "      total becomes total plus 1\n"
+            "      counter becomes counter plus 1\n",
+            without_then,
+        )
+
+        match_then = normalize_punctuation_source(
+            """Enum Mode backed by u8 has idle be 0; active be 1.
+
+To match then mode: Mode, giving i32.
+Let result be 0.
+Let seen be 0.
+When true: Match mode: Mode.active: result becomes 7; otherwise: result becomes 3; then seen becomes seen plus 1.
+Otherwise: result becomes 0.
+Give result plus seen.
+"""
+        )
+        self.assertIn(
+            "  if true:\n"
+            "    match mode:\n"
+            "      Mode.active:\n"
+            "        result becomes 7\n"
+            "      otherwise:\n"
+            "        result becomes 3\n"
+            "    seen becomes seen plus 1\n",
+            match_then,
+        )
 
     def test_v024_match_expressions_and_blocks(self):
         enum_match = compile_source(self.fixture("match_enum_expression.ins"))

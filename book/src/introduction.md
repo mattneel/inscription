@@ -12,7 +12,7 @@ To main, giving i32.
 Give square of 8.
 ```
 
-Since v0.32, Inscription uses prose-punctuation syntax. Periods close declarations and body sentences. Colons introduce clause lists. Semicolons separate sibling clauses. Indentation is only formatting and has no semantic meaning.
+Since v0.32, Inscription uses prose-punctuation syntax. Periods close declarations and body sentences. Colons introduce clause lists. Semicolons separate sibling clauses, and `then` resumes a parent clause list after nested control. Indentation is only formatting and has no semantic meaning.
 
 The compiler pipeline is deliberately conventional:
 
