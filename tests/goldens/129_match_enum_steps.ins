@@ -3,7 +3,8 @@ Enum Mode backed by u8 has idle be 0; active be 1; failed be 2.
 To count active modes modes: view of Mode, giving i32.
 Let active be 0.
 Let failed be 0.
-For each index i of modes: Match modes at i:
+For each index i of modes:
+Match modes at i:
 Mode.active: active becomes active plus 1;
 Mode.failed: failed becomes failed plus 1;
 otherwise: active becomes active.

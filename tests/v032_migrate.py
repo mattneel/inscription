@@ -1,3 +1,9 @@
+"""Internal one-off v0.32 migration helper for historical test snippets.
+
+This module is not a user-facing compatibility layer or formatter. The
+supported canonical formatter is `inscription format`.
+"""
+
 from __future__ import annotations
 
 import re

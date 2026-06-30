@@ -6,6 +6,7 @@ from pathlib import Path
 
 from .compiler import compile_file, load_program
 from .diagnostics import InscriptionError
+from .formatter import format_source
 from .interface import emit_c_header, emit_interface_json, load_interface_context
 from .mlir import emit_mlir
 from .runner import (
@@ -93,6 +94,12 @@ def main(argv: list[str] | None = None) -> int:
         help="directory for saved source MLIR, optimized MLIR when enabled, lowered MLIR, and LLVM IR intermediates",
     )
     _add_optimization_args(run_p)
+
+    format_p = sub.add_parser("format", help="format an Inscription source file")
+    format_p.add_argument("source", type=Path)
+    format_p.add_argument("-o", "--output", type=Path)
+    format_p.add_argument("--check", action="store_true", help="exit 0 only when the source is already formatted")
+    format_p.add_argument("--in-place", action="store_true", help="overwrite the source file with formatted source")
 
     highlight_p = sub.add_parser("highlight", help="syntax-highlight an Inscription source file")
     highlight_p.add_argument("source", type=Path)
@@ -193,6 +200,26 @@ def main(argv: list[str] | None = None) -> int:
                 opt_level=_resolve_opt_level(args),
             )
             return result.exit_status
+        if args.command == "format":
+            if args.in_place and args.output is not None:
+                raise InscriptionError("--in-place cannot be used with -o")
+            if args.check and args.in_place:
+                raise InscriptionError("--check cannot be used with --in-place")
+            if args.check and args.output is not None:
+                raise InscriptionError("--check cannot be used with -o")
+            original = args.source.read_text()
+            formatted = format_source(original)
+            if args.check:
+                if formatted != original:
+                    raise InscriptionError(f"formatting check failed: {args.source} is not formatted")
+                return 0
+            if args.in_place:
+                args.source.write_text(formatted)
+            elif args.output is not None:
+                args.output.write_text(formatted)
+            else:
+                sys.stdout.write(formatted)
+            return 0
         if args.command == "highlight":
             from .highlighting import HighlightError, highlight_source
 

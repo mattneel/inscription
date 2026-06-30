@@ -447,7 +447,7 @@ def _reject_legacy_surface(source: str) -> None:
         if re.fullmatch(r"(?:if|while|for|match)\b.*:", text):
             raise InscriptionError("legacy block syntax is not supported", number)
         if re.fullmatch(r"(?:module|import|type|constant|check|enum|union|extern|export)\b.*", text):
-            raise InscriptionError("legacy syntax is not supported; use v0.32 punctuation sentences", number)
+            raise InscriptionError("legacy syntax is not supported; use v0.33 punctuation sentences", number)
 
 
 def _split_punctuation_sentences(source: str) -> list[PunctuationSentence]:

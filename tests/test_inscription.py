@@ -16,6 +16,8 @@ sys.path.insert(0, str(SRC))
 
 from inscription.compiler import compile_file as _compile_file, compile_source as _compile_source
 from inscription.diagnostics import InscriptionError
+from inscription.formatter import format_source
+from inscription.parser import normalize_punctuation_source
 from inscription.runner import LOWERING_PASSES, OPTIMIZATION_PRESETS, ToolchainError, resolve_toolchain, run_file as _run_file, run_source as _run_source, verify_mlir
 from tests.v032_migrate import maybe_convert_path, maybe_convert_source
 
@@ -5376,6 +5378,99 @@ Give choose mode mode.
         for name, (source, contains) in cases.items():
             with self.subTest(name=name):
                 self.assertCompileError(source, contains)
+
+
+class FormatterTests(unittest.TestCase):
+    def cli(self, *args: str, cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [sys.executable, "-m", "inscription", *args],
+            cwd=cwd or ROOT,
+            env={**os.environ, "PYTHONPATH": str(SRC)},
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+
+    def test_format_stdout_output_check_in_place_and_option_errors(self):
+        messy = "\n\nTo main, giving i32.\n\nGive   1 plus 2.\n"
+        expected = "To main, giving i32.\nGive 1 plus 2.\n"
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            source = tmp_path / "messy.ins"
+            source.write_text(messy)
+
+            stdout = self.cli("format", str(source))
+            self.assertEqual(stdout.returncode, 0, stdout.stderr)
+            self.assertEqual(stdout.stdout, expected)
+            self.assertEqual(source.read_text(), messy)
+
+            output = tmp_path / "formatted.ins"
+            to_file = self.cli("format", str(source), "-o", str(output))
+            self.assertEqual(to_file.returncode, 0, to_file.stderr)
+            self.assertEqual(to_file.stdout, "")
+            self.assertEqual(output.read_text(), expected)
+
+            check_ok = self.cli("format", str(output), "--check")
+            self.assertEqual(check_ok.returncode, 0, check_ok.stderr)
+            self.assertEqual(check_ok.stdout, "")
+
+            check_fail = self.cli("format", str(source), "--check")
+            self.assertEqual(check_fail.returncode, 2)
+            self.assertIn(f"formatting check failed: {source} is not formatted", check_fail.stderr)
+            self.assertEqual(source.read_text(), messy)
+
+            in_place = self.cli("format", str(source), "--in-place")
+            self.assertEqual(in_place.returncode, 0, in_place.stderr)
+            self.assertEqual(source.read_text(), expected)
+
+            source.write_text(messy)
+            conflict_output = self.cli("format", str(source), "--in-place", "-o", str(output))
+            self.assertEqual(conflict_output.returncode, 2)
+            self.assertIn("--in-place cannot be used with -o", conflict_output.stderr)
+
+            conflict_check_in_place = self.cli("format", str(source), "--check", "--in-place")
+            self.assertEqual(conflict_check_in_place.returncode, 2)
+            self.assertIn("--check cannot be used with --in-place", conflict_check_in_place.stderr)
+
+            conflict_check_output = self.cli("format", str(source), "--check", "-o", str(output))
+            self.assertEqual(conflict_check_output.returncode, 2)
+            self.assertIn("--check cannot be used with -o", conflict_check_output.stderr)
+
+    def test_format_reports_syntax_errors(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "invalid.ins"
+            source.write_text("To main, giving i32.\nGive 0\n")
+            proc = self.cli("format", str(source))
+            self.assertEqual(proc.returncode, 2)
+            self.assertIn("missing period at end of sentence", proc.stderr)
+
+    def test_positive_and_golden_fixtures_are_formatter_clean_and_idempotent(self):
+        paths = sorted(FIXTURES.rglob("*.ins")) + sorted(GOLDENS.rglob("*.ins")) + sorted((ROOT / "tests" / "goldens_checked").rglob("*.ins"))
+        self.assertGreater(len(paths), 0)
+        for source_path in paths:
+            with self.subTest(source=source_path.relative_to(ROOT)):
+                source = source_path.read_text()
+                formatted = format_source(source)
+                self.assertEqual(formatted, source)
+                self.assertEqual(format_source(formatted), formatted)
+                normalize_punctuation_source(formatted)
+
+    def test_formatted_source_preserves_representative_source_mlir(self):
+        representative = [
+            GOLDENS / "04_main_calls_max.ins",
+            GOLDENS / "129_match_enum_steps.ins",
+            GOLDENS / "141_union_module.ins",
+            GOLDENS / "183_owned_buffer_match_scope.ins",
+            GOLDENS / "190_owned_buffer_return_basic.ins",
+        ]
+        for source_path in representative:
+            with self.subTest(source=source_path.name):
+                source = source_path.read_text()
+                formatted = format_source(source)
+                original_mlir = compile_source(source, source_path=source_path, module_root=GOLDENS)
+                formatted_mlir = compile_source(formatted, source_path=source_path, module_root=GOLDENS)
+                self.assertEqual(formatted_mlir, original_mlir)
 
 
 if __name__ == "__main__":
