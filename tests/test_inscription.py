@@ -941,6 +941,284 @@ class CompilerTests(unittest.TestCase):
             run = subprocess.run([str(host_executable)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False)
             self.assertEqual(run.returncode, 42, run.stderr)
 
+
+    def test_v019_interface_json_and_c_header(self):
+        env = {**os.environ, "PYTHONPATH": str(SRC)}
+
+        export_json = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "inscription",
+                "compile",
+                str(FIXTURES / "export_scalar_gives.ins"),
+                "--emit",
+                "interface-json",
+            ],
+            cwd=ROOT,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(export_json.returncode, 0, export_json.stderr)
+        payload = json.loads(export_json.stdout)
+        self.assertEqual(payload["format"], "inscription-interface-v1")
+        self.assertEqual(payload["source"], "export_scalar_gives.ins")
+        root_module = payload["modules"][0]
+        self.assertIsNone(root_module["name"])
+        export = root_module["exports"][0]
+        self.assertEqual(export["phrase"], "add _ and _")
+        self.assertEqual(export["symbol"], "ins_add")
+        self.assertEqual(export["parameters"], [{"name": "left", "type": "i32"}, {"name": "right", "type": "i32"}])
+        self.assertEqual(export["return"], "i32")
+
+        extern_json = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "inscription",
+                "compile",
+                str(FIXTURES / "export_calls_extern.ins"),
+                "--emit",
+                "interface-json",
+            ],
+            cwd=ROOT,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(extern_json.returncode, 0, extern_json.stderr)
+        extern_payload = json.loads(extern_json.stdout)
+        extern_symbols = {entry["symbol"] for module in extern_payload["modules"] for entry in module["externs"]}
+        export_symbols = {entry["symbol"] for module in extern_payload["modules"] for entry in module["exports"]}
+        self.assertIn("llvm.ctpop.i32", extern_symbols)
+        self.assertIn("ins_popcount", export_symbols)
+
+        layout_json = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "inscription",
+                "compile",
+                str(FIXTURES / "layout_introspection.ins"),
+                "--emit",
+                "interface-json",
+            ],
+            cwd=ROOT,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(layout_json.returncode, 0, layout_json.stderr)
+        layout_payload = json.loads(layout_json.stdout)
+        header = layout_payload["modules"][0]["layout_records"][0]
+        self.assertEqual(header["name"], "Header")
+        self.assertEqual(header["kind"], "layout-record")
+        self.assertEqual(header["size"], 6)
+        self.assertEqual(header["alignment"], 2)
+        self.assertEqual([field["offset"] for field in header["fields"]], [0, 2, 4])
+        self.assertEqual(header["padding_offsets"], [1, 5])
+
+        module_json = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "inscription",
+                "compile",
+                str(FIXTURES / "export_module_phrase" / "main.ins"),
+                "--emit",
+                "interface-json",
+            ],
+            cwd=ROOT,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(module_json.returncode, 0, module_json.stderr)
+        module_payload = json.loads(module_json.stdout)
+        math_module = next(module for module in module_payload["modules"] if module["name"] == "Math")
+        self.assertEqual(math_module["path"], "Math.ins")
+        self.assertEqual(math_module["exports"][0]["symbol"], "ins_square")
+
+        header_proc = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "inscription",
+                "compile",
+                str(FIXTURES / "export_scalar_gives.ins"),
+                "--emit",
+                "c-header",
+            ],
+            cwd=ROOT,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(header_proc.returncode, 0, header_proc.stderr)
+        self.assertIn("#pragma once", header_proc.stdout)
+        self.assertIn("#include <stdint.h>", header_proc.stdout)
+        self.assertIn('extern "C" {', header_proc.stdout)
+        self.assertIn("int32_t ins_add(int32_t arg0, int32_t arg1);", header_proc.stdout)
+
+        does_header = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "inscription",
+                "compile",
+                str(FIXTURES / "export_scalar_does.ins"),
+                "--emit",
+                "c-header",
+            ],
+            cwd=ROOT,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(does_header.returncode, 0, does_header.stderr)
+        self.assertIn("void ins_require_nonnegative(int32_t arg0);", does_header.stdout)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            answer = tmp_path / "answer.ins"
+            answer.write_text("export answer gives i32 as ins_answer:\n  42\n")
+            answer_header = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "inscription",
+                    "compile",
+                    str(answer),
+                    "--emit",
+                    "c-header",
+                ],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(answer_header.returncode, 0, answer_header.stderr)
+            self.assertIn("int32_t ins_answer(void);", answer_header.stdout)
+
+            module_header_path = tmp_path / "export_module_phrase.h"
+            module_header = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "inscription",
+                    "compile",
+                    str(FIXTURES / "export_module_phrase" / "main.ins"),
+                    "--emit",
+                    "c-header",
+                    "-o",
+                    str(module_header_path),
+                ],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(module_header.returncode, 0, module_header.stderr)
+            self.assertEqual(module_header.stdout, "")
+            self.assertIn("int32_t ins_square(int32_t arg0);", module_header_path.read_text())
+
+            try:
+                resolve_toolchain(require_object=True)
+            except ToolchainError:
+                return
+            object_path = tmp_path / "export_scalar_gives.o"
+            object_proc = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "inscription",
+                    "compile",
+                    str(FIXTURES / "export_scalar_gives.ins"),
+                    "--emit",
+                    "object",
+                    "-o",
+                    str(object_path),
+                ],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(object_proc.returncode, 0, object_proc.stderr)
+            self.assertTrue(object_path.exists())
+            self.assertGreater(object_path.stat().st_size, 0)
+
+    def test_v019_c_header_diagnostics(self):
+        env = {**os.environ, "PYTHONPATH": str(SRC)}
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+
+            narrow = tmp_path / "narrow.ins"
+            narrow.write_text("export byte value gives u8 as ins_byte:\n  7\n")
+            narrow_proc = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "inscription",
+                    "compile",
+                    str(narrow),
+                    "--emit",
+                    "c-header",
+                ],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(narrow_proc.returncode, 2)
+            self.assertIn(
+                "C header emission supports exported scalar types i32, u32, i64, and u64 in v0.19; ins_byte uses u8",
+                narrow_proc.stderr,
+            )
+
+            dotted = tmp_path / "dotted.ins"
+            dotted.write_text("export add left: i32 and right: i32 gives i32 as runtime.add:\n  left plus right\n")
+            dotted_proc = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "inscription",
+                    "compile",
+                    str(dotted),
+                    "--emit",
+                    "c-header",
+                ],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(dotted_proc.returncode, 2)
+            self.assertIn("C header emission requires exported symbol runtime.add to be a C identifier", dotted_proc.stderr)
+
     @unittest.skipUnless(importlib.util.find_spec("pygments"), "Pygments is not installed")
     def test_cli_highlight_outputs_terminal_ansi(self):
         proc = subprocess.run(

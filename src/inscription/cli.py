@@ -6,6 +6,7 @@ from pathlib import Path
 
 from .compiler import compile_file, load_program
 from .diagnostics import InscriptionError
+from .interface import emit_c_header, emit_interface_json, load_interface_context
 from .mlir import emit_mlir
 from .runner import (
     EMIT_MODES,
@@ -56,7 +57,11 @@ def main(argv: list[str] | None = None) -> int:
     compile_p = sub.add_parser("compile", help="emit compiler artifacts for an Inscription source file")
     compile_p.add_argument("source", type=Path)
     compile_p.add_argument("-o", "--output", type=Path)
-    compile_p.add_argument("--emit", default="mlir", help="artifact to emit: mlir, lowered-mlir, llvm-ir, object, or executable")
+    compile_p.add_argument(
+        "--emit",
+        default="mlir",
+        help="artifact to emit: mlir, lowered-mlir, llvm-ir, object, executable, interface-json, or c-header",
+    )
     compile_p.add_argument(
         "--save-temps",
         type=Path,
@@ -107,6 +112,24 @@ def main(argv: list[str] | None = None) -> int:
                 if not path.exists():
                     raise InscriptionError(f"link object {path} does not exist")
             opt_level = _resolve_opt_level(args)
+            if args.emit in {"interface-json", "c-header"}:
+                context = load_interface_context(args.source, module_root=args.module_root)
+                if args.verify:
+                    mlir = emit_mlir(context.compilation.program, runtime_checks=args.runtime_checks)
+                    build_artifacts(
+                        mlir,
+                        emit="mlir",
+                        verify=True,
+                        save_temps=args.save_temps,
+                        stem=args.source.stem,
+                        opt_level=opt_level,
+                    )
+                output = emit_interface_json(context) if args.emit == "interface-json" else emit_c_header(context)
+                if args.output:
+                    args.output.write_text(output)
+                else:
+                    sys.stdout.write(output)
+                return 0
             if args.emit == "executable":
                 source_path = args.source.resolve()
                 program = load_program(source_path.read_text(), source_path=source_path, module_root=args.module_root)

@@ -92,8 +92,18 @@ def compile_file(source_path: Path, *, module_root: Path | None = None, runtime_
 @dataclass(frozen=True)
 class LoadedModule:
     name: str
+    path: Path
     program: Program
     exported_templates: tuple[PhraseTemplate, ...]
+
+
+@dataclass(frozen=True)
+class LoadedCompilation:
+    program: Program
+    root_program: Program
+    root_path: Path | None
+    module_root: Path | None
+    modules: tuple[LoadedModule, ...]
 
 
 class ModuleResolver:
@@ -103,6 +113,9 @@ class ModuleResolver:
         self.order: list[str] = []
 
     def load_entry(self, source: str, *, source_path: Path | None = None) -> Program:
+        return self.load_entry_compilation(source, source_path=source_path).program
+
+    def load_entry_compilation(self, source: str, *, source_path: Path | None = None) -> LoadedCompilation:
         module_name, imports = scan_module_header(source)
         if imports and self.module_root is None:
             raise InscriptionError("imports require a source path or --module-root", imports[0].line)
@@ -112,7 +125,13 @@ class ModuleResolver:
         if entry.module_name != module_name:
             raise AssertionError("module scan and parser disagree")  # pragma: no cover
         modules = [self.cache[name] for name in self.order]
-        return combine_programs(modules, entry)
+        return LoadedCompilation(
+            combine_programs(modules, entry),
+            entry,
+            source_path.resolve() if source_path is not None else None,
+            self.module_root,
+            tuple(modules),
+        )
 
     def load_module(self, name: str, *, stack: tuple[str, ...]) -> LoadedModule:
         if name in self.cache:
@@ -140,10 +159,20 @@ class ModuleResolver:
             raise InscriptionError(f"module declaration {parsed.module_name} does not match import {name}")
         program = qualify_imported_program(parsed, name)
         exported_templates = tuple(prefix_template_for_import(template, name) for template in parser.local_phrases)
-        loaded = LoadedModule(name, program, exported_templates)
+        loaded = LoadedModule(name, path, program, exported_templates)
         self.cache[name] = loaded
         self.order.append(name)
         return loaded
+
+
+def load_compilation(
+    source: str,
+    *,
+    source_path: Path | None = None,
+    module_root: Path | None = None,
+) -> LoadedCompilation:
+    resolver = ModuleResolver(module_root or (source_path.parent if source_path is not None else None))
+    return resolver.load_entry_compilation(source, source_path=source_path)
 
 
 def _source_has_imports(source: str) -> bool:

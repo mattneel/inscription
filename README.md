@@ -6,17 +6,19 @@ The language is readable, but it is **not** natural-language interpretation: eve
 
 ## Status
 
-This repository currently implements **Inscription v0.18**:
+This repository currently implements **Inscription v0.19**:
 
 - source-visible scalar types: `i1`, signed integers `i8`/`i16`/`i32`/`i64`, and unsigned integers `u8`/`u16`/`u32`/`u64`
 - phrase-shaped function definitions and phrase-shaped calls
 - scalar-only extern phrase declarations such as `extern population count of x: i32 gives i32 as llvm.ctpop.i32`
 - scalar-only exported phrase definitions such as `export add x: i32 and y: i32 gives i32 as ins_add:`
-- deterministic artifact emission with `compile --emit mlir|lowered-mlir|llvm-ir|object`
+- deterministic artifact emission with `compile --emit mlir|lowered-mlir|llvm-ir|object|executable|interface-json|c-header`
 - saved compiler intermediates with `compile/run --save-temps DIR`
 - deterministic optimization presets with `--opt-level none|basic|aggressive` and `-O0`/`-O1`/`-O2`
 - native executable emission with `compile --emit executable -o program`
 - explicit additional object linking for executables with repeated `--link-object PATH`
+- deterministic interface manifests with `compile --emit interface-json`
+- conservative C header generation for exported scalar phrases with `compile --emit c-header`
 - value blocks with `expression when condition` and `otherwise expression`
 - implicit returns: the block value is the phrase result
 - local scalar bindings with `let name be expression` and `let name: type be expression`
@@ -58,11 +60,11 @@ This repository currently implements **Inscription v0.18**:
 - deterministic parsing and semantic checks
 - exact MLIR golden conformance tests in [`tests/goldens`](tests/goldens)
 - MLIR emission using `func`, `arith`, `scf.if`, `scf.for`, `scf.while`, flattened scalar SSA and flattened scalar function results for records, local `memref.alloca`/`memref.load`/`memref.store` for buffers, private `func.func` declarations for scalar extern phrases, public stable-symbol definitions for exported phrases, and `cf.assert` when runtime assertions are emitted
-- tooling output for frontend source MLIR, optimized source MLIR, lowered MLIR, LLVM IR, optional single-object output through LLVM 22 `llc`, and native executable output through LLVM 22 `clang`
+- tooling output for frontend source MLIR, optimized source MLIR, lowered MLIR, LLVM IR, optional single-object output through LLVM 22 `llc`, native executable output through LLVM 22 `clang`, deterministic interface JSON, and conservative C headers
 - LLVM 22 lowering and execution through `mlir-opt`, `mlir-translate`, and `lli`
-- no source-level I/O, heap allocation, pointers, dynamic-size buffers, buffer/view return values, buffer/view aliasing beyond conservative same-root rejection, slices, LLVM/C ABI structs, C ABI annotations, arbitrary pass pipelines, LLVM `opt`, LTO, linker flags beyond explicit `--link-object`, extern/exported buffer/view/record parameters, extern/exported record returns, executable packaging beyond one output file, static/shared libraries, C headers, floats, strings, statement-level `return`, `break`, `continue`, macros, import aliases, wildcard imports, generics, global storage, exceptions, result/error values, source strings, source-level runtime assertion messages, overloading, type coercions, or natural-language inference
+- no source-level I/O, heap allocation, pointers, dynamic-size buffers, buffer/view return values, buffer/view aliasing beyond conservative same-root rejection, slices, C ABI structs, C ABI annotations, arbitrary pass pipelines, LLVM `opt`, LTO, linker flags beyond explicit `--link-object`, extern/exported buffer/view/record parameters, extern/exported record returns, executable packaging beyond one output file, static/shared libraries, record/layout C structs, header installation, floats, strings, statement-level `return`, `break`, `continue`, macros, import aliases, wildcard imports, generics, global storage, exceptions, result/error values, source strings, source-level runtime assertion messages, overloading, type coercions, or natural-language inference
 
-See [`docs/inscription-v0.18-spec.md`](docs/inscription-v0.18-spec.md) and [`grammar/inscription-v0.18.ebnf`](grammar/inscription-v0.18.ebnf) for the exact current language and tooling contract. The immutable previous contracts remain in [`docs/`](docs) and [`grammar/`](grammar), including the v0.17 optimization-preset contract.
+See [`docs/inscription-v0.19-spec.md`](docs/inscription-v0.19-spec.md) and [`grammar/inscription-v0.19.ebnf`](grammar/inscription-v0.19.ebnf) for the exact current language and tooling contract. The immutable previous contracts remain in [`docs/`](docs) and [`grammar/`](grammar), including the v0.18 native executable emission contract.
 
 ## Requirements
 
@@ -171,7 +173,7 @@ echo $?
 ## CLI
 
 ```sh
-python -m inscription compile SOURCE [-o OUTPUT] [--emit mlir|lowered-mlir|llvm-ir|object|executable] [--link-object PATH ...] [--opt-level none|basic|aggressive] [-O0|-O1|-O2] [--save-temps DIR] [--verify] [--module-root ROOT] [--runtime-checks]
+python -m inscription compile SOURCE [-o OUTPUT] [--emit mlir|lowered-mlir|llvm-ir|object|executable|interface-json|c-header] [--link-object PATH ...] [--opt-level none|basic|aggressive] [-O0|-O1|-O2] [--save-temps DIR] [--verify] [--module-root ROOT] [--runtime-checks]
 python -m inscription highlight SOURCE [-o OUTPUT] [--format terminal|html] [--style STYLE] [--full]
 python -m inscription run SOURCE [--module-root ROOT] [--runtime-checks] [--save-temps DIR] [--opt-level none|basic|aggressive] [-O0|-O1|-O2]
 python -m inscription check-tools [--show-pipeline] [--require-object] [--require-executable]
@@ -179,7 +181,7 @@ python -m inscription check-tools [--show-pipeline] [--require-object] [--requir
 
 Commands return `2` for compiler, diagnostic, toolchain, or filesystem errors. Imports resolve relative to the root source file directory by default; pass `--module-root ROOT` to resolve module paths from another directory.
 
-`compile --emit mlir` emits the frontend source MLIR and is the default exact-golden artifact. `--emit mlir` remains raw frontend output even with `-O1` or `-O2`. `--emit lowered-mlir` emits MLIR after the configured lowering pipeline. `--emit llvm-ir` emits LLVM IR from `mlir-translate`. `--emit object -o file.o` emits a single native object with LLVM 22 `llc`; it does not link or resolve extern symbols. `--emit executable -o program` emits an object and links it with LLVM 22 `clang`; it requires a root no-hole integer-scalar `main` and does not run the executable. Repeated `--link-object PATH` arguments pass explicit additional objects to clang after the generated object. `--opt-level none|basic|aggressive` chooses deterministic MLIR optimization passes before lowering; `-O0`, `-O1`, and `-O2` are aliases for `none`, `basic`, and `aggressive`. Optimization affects lowered MLIR, LLVM IR, object emission, executable emission, and `run`, but not source MLIR output. `--save-temps DIR` writes deterministic `<stem>.mlir`, `<stem>.lowered.mlir`, `<stem>.ll`, and, for object/executable emission, `<stem>.o` intermediates; with `basic` or `aggressive` it also writes `<stem>.optimized.mlir`. `run --save-temps DIR` saves the stages used before execution through `lli`, which remains the default run backend.
+`compile --emit mlir` emits the frontend source MLIR and is the default exact-golden artifact. `--emit mlir` remains raw frontend output even with `-O1` or `-O2`. `--emit lowered-mlir` emits MLIR after the configured lowering pipeline. `--emit llvm-ir` emits LLVM IR from `mlir-translate`. `--emit object -o file.o` emits a single native object with LLVM 22 `llc`; it does not link or resolve extern symbols. `--emit executable -o program` emits an object and links it with LLVM 22 `clang`; it requires a root no-hole integer-scalar `main` and does not run the executable. `--emit interface-json` emits deterministic host-integration metadata for loaded modules, constants, records, layout records, exported phrases, and extern phrases. `--emit c-header` emits a deterministic C header for exported scalar phrases only; v0.19 C headers support `i32`, `u32`, `i64`, and `u64`, reject dotted/non-C exported symbols, and do not include extern declarations. Repeated `--link-object PATH` arguments pass explicit additional objects to clang after the generated object. `--opt-level none|basic|aggressive` chooses deterministic MLIR optimization passes before lowering; `-O0`, `-O1`, and `-O2` are aliases for `none`, `basic`, and `aggressive`. Optimization affects lowered MLIR, LLVM IR, object emission, executable emission, and `run`, but not source MLIR, interface JSON, or C header output. `--save-temps DIR` writes deterministic `<stem>.mlir`, `<stem>.lowered.mlir`, `<stem>.ll`, and, for object/executable emission, `<stem>.o` intermediates; with `basic` or `aggressive` it also writes `<stem>.optimized.mlir`. Interface JSON and C header modes do not create temps unless `--verify` requests the MLIR verification pipeline. `run --save-temps DIR` saves the stages used before execution through `lli`, which remains the default run backend.
 
 `highlight` uses Pygments with a built-in Inscription lexer. The default output is ANSI-colored terminal text. Use `--format html --full -o file.html` to emit a complete HTML document.
 
@@ -469,7 +471,7 @@ left is greater than right
 left is greater than or equal to right
 ```
 
-Important v0.18 rules:
+Important v0.19 rules:
 
 - `--opt-level none` is the default and preserves v0.16/v0.17 compile/run behavior
 - `-O0`, `-O1`, and `-O2` are aliases for `none`, `basic`, and `aggressive`; conflicting optimization flags are rejected
@@ -482,8 +484,11 @@ Important v0.18 rules:
 - executable emission requires a root no-hole `main` returning an integer scalar
 - repeated `--link-object PATH` passes explicit additional objects to clang for extern definitions
 - unresolved externs may compile to object but fail executable linking with `executable link failed`
+- `compile --emit interface-json` requires no `main` and emits deterministic metadata without timestamps, absolute paths, usernames, hostnames, or git hashes
+- interface JSON includes extern declarations; C headers describe only exported functions provided by the Inscription compilation unit
+- `compile --emit c-header` supports exported ABI types `i32`, `u32`, `i64`, and `u64` in v0.19 and uses generated C parameter names `arg0`, `arg1`, ...
 - `compile/run --save-temps DIR` saves produced compiler intermediates under deterministic filenames, including `<stem>.optimized.mlir` for non-`none` optimization
-- v0.18 does not expose arbitrary pass pipelines, LLVM `opt`, LTO, linker flags beyond `--link-object`, target triples, optimization remarks, inlining, symbol DCE by default, native runtime libraries, or executable packaging beyond one output file
+- v0.19 does not expose arbitrary pass pipelines, LLVM `opt`, LTO, linker flags beyond `--link-object`, target triples, optimization remarks, inlining, symbol DCE by default, native runtime libraries, executable packaging beyond one output file, C ABI structs, buffer/view C ABI, record/layout C structs, or header installation
 - function names are generated from the leading literal words in a phrase definition
 - extern phrase declarations have no body and emit external `func.func private` declarations
 - exported phrase definitions have bodies and emit public definitions with the symbol named after `as`
@@ -566,7 +571,7 @@ Run the full test suite:
 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python -m unittest discover -s tests -v
 ```
 
-The suite includes exact source-MLIR golden conformance files under [`tests/goldens`](tests/goldens). Each `*.ins` source must compile byte-for-byte to its sibling `*.mlir`. v0.16/v0.17/v0.18 artifact tests also exercise lowered MLIR, LLVM IR, object emission when `llc` is available, executable emission when `clang` is available, saved intermediates, optimization presets, and optimized/native executable runs without making lowered or optimized tool output byte-for-byte golden-stable.
+The suite includes exact source-MLIR golden conformance files under [`tests/goldens`](tests/goldens). Each `*.ins` source must compile byte-for-byte to its sibling `*.mlir`. v0.16/v0.17/v0.18/v0.19 artifact tests also exercise lowered MLIR, LLVM IR, object emission when `llc` is available, executable emission when `clang` is available, saved intermediates, optimization presets, and optimized/native executable runs without making lowered or optimized tool output byte-for-byte golden-stable.
 
 With LLVM/MLIR 22 available, verify the toolchain and fixture exit codes:
 
@@ -657,7 +662,8 @@ docs/inscription-v0.14-spec.md v0.14 language and toolchain specification
 docs/inscription-v0.15-spec.md v0.15 language and toolchain specification
 docs/inscription-v0.16-spec.md v0.16 language and toolchain specification
 docs/inscription-v0.17-spec.md v0.17 language and toolchain specification
-docs/inscription-v0.18-spec.md current v0.18 language and toolchain specification
+docs/inscription-v0.18-spec.md v0.18 native executable emission specification
+docs/inscription-v0.19-spec.md current v0.19 interface metadata specification
 grammar/inscription-v0.ebnf   original v0 grammar
 grammar/inscription-v0.1.ebnf v0.1 grammar
 grammar/inscription-v0.2.ebnf v0.2 grammar
@@ -676,7 +682,8 @@ grammar/inscription-v0.14.ebnf v0.14 grammar
 grammar/inscription-v0.15.ebnf v0.15 grammar
 grammar/inscription-v0.16.ebnf v0.16 grammar
 grammar/inscription-v0.17.ebnf v0.17 grammar
-grammar/inscription-v0.18.ebnf current v0.18 grammar
+grammar/inscription-v0.18.ebnf v0.18 grammar
+grammar/inscription-v0.19.ebnf current v0.19 grammar mirror
 tests/goldens/                exact MLIR conformance goldens
 tests/                        unit tests and executable fixtures
 ```

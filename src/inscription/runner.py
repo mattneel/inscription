@@ -23,7 +23,8 @@ LOWERING_PASSES = [
     "--reconcile-unrealized-casts",
 ]
 
-EMIT_MODES = {"mlir", "lowered-mlir", "llvm-ir", "object", "executable"}
+PIPELINE_EMIT_MODES = {"mlir", "lowered-mlir", "llvm-ir", "object", "executable"}
+EMIT_MODES = {*PIPELINE_EMIT_MODES, "interface-json", "c-header"}
 OPTIMIZATION_PRESETS = {
     "none": (),
     "basic": (
@@ -250,6 +251,8 @@ def build_artifacts(
 ) -> ArtifactResult:
     if emit not in EMIT_MODES:
         raise InscriptionError(f"invalid emit mode {emit}")
+    if emit not in PIPELINE_EMIT_MODES:
+        raise InscriptionError(f"emit mode {emit} is handled outside the MLIR artifact pipeline")
     if emit == "executable" and executable_output is None:
         raise InscriptionError("executable emission requires -o OUTPUT")
     if opt_level not in OPTIMIZATION_PRESETS:
@@ -320,6 +323,8 @@ def selected_artifact(result: ArtifactResult, emit: str) -> str | bytes:
         return result.object_bytes
     if emit == "executable":
         raise InscriptionError("executable emission writes directly to -o OUTPUT")
+    if emit in {"interface-json", "c-header"}:
+        raise InscriptionError(f"emit mode {emit} is handled outside the MLIR artifact pipeline")
     raise InscriptionError(f"invalid emit mode {emit}")
 
 
