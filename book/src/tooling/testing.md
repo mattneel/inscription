@@ -44,3 +44,8 @@ PYTHONPATH=src python -m inscription package test path/to/package --filter check
 ```
 
 Package test display names include the test file path, such as `tests/checksum.ins::root::checksum works`, so tests from different files remain distinct.
+
+
+## Build script test steps
+
+A package `build.ins` can record test workflow steps with `Build.tests named "tests".`. Use `Build.tests including dependencies named "all-tests".` when the build should run dependency package tests too. These steps dispatch to `inscription package test` and keep the build script sandboxed.

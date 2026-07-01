@@ -4,7 +4,8 @@ import argparse
 import sys
 from pathlib import Path
 
-from .buildscript import list_build_steps, run_build_script
+from .buildscript import build_step_display, list_build_steps, run_build_script
+from .package import PackageTestSummary
 from .compiler import compile_file, load_program
 from .diagnostics import InscriptionError
 from .formatter import format_file
@@ -383,7 +384,7 @@ def main(argv: list[str] | None = None) -> int:
             if args.list:
                 steps = list_build_steps(root)
                 for step in steps:
-                    print(f"build step {step.name}: {step.emit}")
+                    print(f"build step {step.name}: {build_step_display(step)}")
                 return 0
             results = run_build_script(
                 root,
@@ -393,9 +394,28 @@ def main(argv: list[str] | None = None) -> int:
                 save_temps=args.save_temps,
                 verify=args.verify,
             )
+            exit_status = 0
             for result in results:
-                print(f"built {result.step.name}: {_display_relative(result.output_path, root)}")
-            return 0
+                if isinstance(result.test_summary, PackageTestSummary) and result.test_summary.failed:
+                    print(f"build step {result.step.name} ... FAILED")
+                    for test_result in result.test_summary.results:
+                        status = "ok" if test_result.passed else "FAILED"
+                        print(f"test {test_result.display_name} ... {status}")
+                    print()
+                    print(
+                        f"test result: FAILED. {result.test_summary.passed} passed; "
+                        f"{result.test_summary.failed} failed."
+                    )
+                    exit_status = 1
+                    break
+                print(f"build step {result.step.name} ... ok")
+                if isinstance(result.test_summary, str):
+                    print(result.test_summary)
+                elif isinstance(result.test_summary, PackageTestSummary):
+                    print(f"test result: ok. {result.test_summary.passed} passed; 0 failed.")
+                elif result.output_path is not None:
+                    print(f"built {result.step.name}: {_display_relative(result.output_path, root)}")
+            return exit_status
         if args.command == "format":
             if args.in_place and args.output is not None:
                 raise InscriptionError("--in-place cannot be used with -o")

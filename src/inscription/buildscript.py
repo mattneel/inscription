@@ -5,7 +5,15 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .diagnostics import InscriptionError
-from .package import PackageBuildResult, build_package_artifact, load_package_context
+from .package import (
+    PackageBuildResult,
+    PackageContext,
+    PackageTestSummary,
+    build_package_artifact,
+    check_package,
+    load_package_context,
+    run_package_tests,
+)
 from .parser import (
     SourceComment,
     _split_punctuation_sentences_no_comments,
@@ -15,6 +23,9 @@ from .parser import (
 BUILD_SCRIPT_NAME = "build.ins"
 _BUILD_STEP_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_-]*")
 _BUILD_CALLS: dict[str, str] = {
+    "Build.check package named": "package-check",
+    "Build.tests including dependencies named": "package-tests-with-dependencies",
+    "Build.tests named": "package-tests",
     "Build.static library named": "static-library",
     "Build.executable named": "executable",
     "Build.c header named": "c-header",
@@ -33,6 +44,12 @@ _OUTPUT_SUFFIXES: dict[str, tuple[str, str]] = {
     "object": ("", ".o"),
     "mlir": ("", ".mlir"),
     "lowered-mlir": ("", ".lowered.mlir"),
+}
+_ARTIFACT_EMITS = frozenset(_OUTPUT_SUFFIXES)
+_STEP_DISPLAY: dict[str, str] = {
+    "package-check": "check package",
+    "package-tests": "tests",
+    "package-tests-with-dependencies": "tests including dependencies",
 }
 
 
@@ -53,8 +70,16 @@ class BuildScript:
 @dataclass(frozen=True)
 class BuildExecutionResult:
     step: BuildStep
-    output_path: Path
-    package_result: PackageBuildResult
+    output_path: Path | None = None
+    package_result: PackageBuildResult | None = None
+    package_context: PackageContext | None = None
+    test_summary: PackageTestSummary | str | None = None
+
+    @property
+    def exit_status(self) -> int:
+        if isinstance(self.test_summary, PackageTestSummary):
+            return self.test_summary.exit_status
+        return 0
 
 
 def load_build_script(package_root: Path) -> BuildScript:
@@ -179,10 +204,17 @@ def _parse_build_call(text: str, line: int) -> BuildStep | None:
         _validate_step_name(name, line)
         return BuildStep(name, emit, line)
     if text.startswith("Build.") and " named " in text:
-        raise InscriptionError("unknown Build artifact request in v0.50", line)
+        raise InscriptionError(f"unknown Build API phrase `{_build_phrase_signature(text)}`", line)
     if text.startswith("Build."):
         raise InscriptionError("malformed Build artifact request", line)
     return None
+
+
+def _build_phrase_signature(text: str) -> str:
+    before_literal = text.split('"', 1)[0].strip()
+    if before_literal.endswith(" named"):
+        return before_literal + " _"
+    return before_literal
 
 
 def _parse_build_string(token: str, line: int) -> str:
@@ -228,8 +260,14 @@ def _validate_step_name(name: str, line: int) -> None:
 
 
 def output_path_for_step(package_root: Path, step: BuildStep) -> Path:
+    if step.emit not in _ARTIFACT_EMITS:
+        raise InscriptionError(f"build step {step.name} does not produce an artifact")
     prefix, suffix = _OUTPUT_SUFFIXES[step.emit]
     return package_root / "build" / f"{prefix}{step.name}{suffix}"
+
+
+def build_step_display(step: BuildStep) -> str:
+    return _STEP_DISPLAY.get(step.emit, step.emit)
 
 
 def list_build_steps(package_root: Path) -> tuple[BuildStep, ...]:
@@ -260,9 +298,25 @@ def run_build_script(
             raise InscriptionError(f"build step {step_name} is not defined")
     results: list[BuildExecutionResult] = []
     for step in selected:
+        step_save_temps = save_temps / step.name if save_temps is not None else None
+        if step.emit == "package-check":
+            context = check_package(root, verify=verify)
+            results.append(BuildExecutionResult(step, package_context=context))
+            continue
+        if step.emit in {"package-tests", "package-tests-with-dependencies"}:
+            summary = run_package_tests(
+                root,
+                include_dependencies=step.emit == "package-tests-with-dependencies",
+                runtime_checks=runtime_checks,
+                opt_level=opt_level,
+                save_temps=step_save_temps,
+            )
+            results.append(BuildExecutionResult(step, test_summary=summary))
+            if isinstance(summary, PackageTestSummary) and summary.failed:
+                break
+            continue
         output = output_path_for_step(root, step)
         output.parent.mkdir(parents=True, exist_ok=True)
-        step_save_temps = save_temps / step.name if save_temps is not None else None
         result = build_package_artifact(
             root,
             emit=step.emit,

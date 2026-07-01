@@ -8319,6 +8319,160 @@ Give result plus seen.
             self.assertTrue((package / "build" / "interface.json").exists())
             self.assertTrue((package / "build" / "app").exists())
 
+    def test_v051_build_script_validation_steps_parser_and_diagnostics(self):
+        source = (
+            "Import Build.\n\n"
+            "To build package package: Build.Package.\n"
+            "Build.check package named \"check\".\n"
+            "Build.tests named \"tests\".\n"
+            "Build.tests including dependencies named \"all-tests\".\n"
+            "Build.static library named \"library\".\n"
+        )
+        script = parse_build_script(source)
+        self.assertEqual([(step.name, step.emit) for step in script.steps], [
+            ("check", "package-check"),
+            ("tests", "package-tests"),
+            ("all-tests", "package-tests-with-dependencies"),
+            ("library", "static-library"),
+        ])
+        formatted = format_source(source)
+        self.assertEqual(format_source(formatted), formatted)
+
+        cases = {
+            "duplicate validation name": (
+                "Import Build.\n\nTo build package package: Build.Package.\n"
+                "Build.check package named \"ci\".\nBuild.tests named \"ci\".\n",
+                "build step ci is already defined",
+            ),
+            "bad test name": (
+                "Import Build.\n\nTo build package package: Build.Package.\nBuild.tests named \"../tests\".\n",
+                "build step name must not contain path separators",
+            ),
+            "unknown build phrase": (
+                "Import Build.\n\nTo build package package: Build.Package.\nBuild.run tests named \"tests\".\n",
+                "unknown Build API phrase `Build.run tests named _`",
+            ),
+        }
+        for name, (case_source, contains) in cases.items():
+            with self.subTest(name=name):
+                with self.assertRaises(InscriptionError) as ctx:
+                    parse_build_script(case_source)
+                self.assertIn(contains, str(ctx.exception))
+
+    def test_v051_build_check_and_test_steps(self):
+        env = {**os.environ, "PYTHONPATH": str(SRC)}
+        fixture = ROOT / "tests" / "fixtures" / "packages" / "build_script_validation_package"
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            package = tmp_path / "build_script_validation_package"
+            shutil.copytree(fixture, package)
+
+            list_proc = subprocess.run(
+                [sys.executable, "-m", "inscription", "build", str(package), "--list"],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(list_proc.returncode, 0, list_proc.stderr)
+            self.assertIn("build step check: check package\n", list_proc.stdout)
+            self.assertIn("build step tests: tests\n", list_proc.stdout)
+            self.assertIn("build step library: static-library\n", list_proc.stdout)
+
+            check_proc = subprocess.run(
+                [sys.executable, "-m", "inscription", "build", str(package), "check"],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(check_proc.returncode, 0, check_proc.stderr)
+            self.assertIn("build step check ... ok", check_proc.stdout)
+
+            temps = tmp_path / "temps"
+            tests_proc = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "inscription",
+                    "build",
+                    str(package),
+                    "tests",
+                    "--save-temps",
+                    str(temps),
+                ],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(tests_proc.returncode, 0, tests_proc.stderr)
+            self.assertIn("build step tests ... ok", tests_proc.stdout)
+            self.assertIn("test result: ok. 1 passed; 0 failed.", tests_proc.stdout)
+            self.assertTrue(any((temps / "tests").glob("*.ll")))
+
+    def test_v051_build_tests_with_dependencies_and_failures(self):
+        env = {**os.environ, "PYTHONPATH": str(SRC)}
+        fixtures = ROOT / "tests" / "fixtures" / "packages"
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            shutil.copytree(fixtures / "checksums_package", tmp_path / "checksums_package")
+            app = tmp_path / "app_with_dependency"
+            shutil.copytree(fixtures / "app_with_dependency", app)
+
+            all_tests_proc = subprocess.run(
+                [sys.executable, "-m", "inscription", "build", str(app), "all-tests"],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(all_tests_proc.returncode, 0, all_tests_proc.stderr)
+            self.assertIn("build step all-tests ... ok", all_tests_proc.stdout)
+            self.assertIn("test result: ok. 3 passed; 0 failed.", all_tests_proc.stdout)
+
+            failing = tmp_path / "failing_package"
+            shutil.copytree(fixtures / "failing_package", failing)
+            failing_proc = subprocess.run(
+                [sys.executable, "-m", "inscription", "build", str(failing)],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(failing_proc.returncode, 1)
+            self.assertIn("build step tests ... FAILED", failing_proc.stdout)
+            self.assertIn("test result: FAILED. 0 passed; 1 failed.", failing_proc.stdout)
+            self.assertFalse((failing / "build" / "liblibrary.a").exists())
+
+            no_tests = tmp_path / "no_tests_package"
+            shutil.copytree(fixtures / "no_tests_package", no_tests)
+            (no_tests / "build.ins").write_text(
+                "Import Build.\n\nTo build package package: Build.Package.\nBuild.tests named \"tests\".\n"
+            )
+            no_tests_proc = subprocess.run(
+                [sys.executable, "-m", "inscription", "build", str(no_tests), "tests"],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(no_tests_proc.returncode, 0, no_tests_proc.stderr)
+            self.assertIn("build step tests ... ok", no_tests_proc.stdout)
+            self.assertIn("no tests found", no_tests_proc.stdout)
+
 
 class FormatterTests(unittest.TestCase):
     def cli(self, *args: str, cwd: Path | None = None) -> subprocess.CompletedProcess[str]:

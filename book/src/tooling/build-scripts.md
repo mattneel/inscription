@@ -1,6 +1,6 @@
 # Build Scripts
 
-Inscription v0.50 adds an optional package build script named `build.ins`.
+Inscription v0.50 added an optional package build script named `build.ins`; v0.51 adds package check and test steps to that script surface.
 
 `package.ins` stays declarative package metadata, similar to `build.zig.zon`. `build.ins` is interpreted build logic, similar to a deliberately narrow first version of `build.zig`.
 
@@ -10,6 +10,8 @@ A minimal script imports the built-in `Build` module and defines the required bu
 Import Build.
 
 To build package package: Build.Package.
+Build.check package named "check".
+Build.tests named "tests".
 Build.static library named "library".
 Build.c header named "header".
 Build.interface json named "interface".
@@ -22,6 +24,8 @@ Import Build.
 
 To build package package: Build.Package.
 Build.executable named "app".
+Build.check package named "check".
+Build.tests named "tests".
 Build.static library named "library".
 Build.c header named "header".
 ```
@@ -32,13 +36,16 @@ The required build phrase is a does phrase:
 To build package package: Build.Package.
 ```
 
-The `Build.Package` value is opaque in v0.50. It is passed by the build driver, but scripts cannot inspect package fields yet.
+The `Build.Package` value is opaque in v0.51. It is passed by the build driver, but scripts cannot inspect package fields yet.
 
 ## Build API
 
-The v0.50 Build API records named standard artifacts:
+The v0.51 Build API records named validation/test steps and standard artifacts:
 
 ```inscription,no-check
+Build.check package named "check".
+Build.tests named "tests".
+Build.tests including dependencies named "all-tests".
 Build.static library named "library".
 Build.executable named "app".
 Build.c header named "header".
@@ -49,9 +56,9 @@ Build.mlir named "source".
 Build.lowered mlir named "lowered".
 ```
 
-Artifact names are metadata string literals, not normal source strings. They must be simple names: ASCII letters, digits, `_`, and `-`, starting with a letter or `_`. They cannot contain path separators.
+Step names are metadata string literals, not normal source strings. They must be simple names: ASCII letters, digits, `_`, and `-`, starting with a letter or `_`. They cannot contain path separators.
 
-The script records steps during interpretation. The driver then calls the existing package build pipeline for each step.
+The script records steps during interpretation. The driver then calls the existing package check, package test, or package build pipeline for each step. `Build.tests` runs root package tests; `Build.tests including dependencies` also runs dependency package tests.
 
 ## Commands
 
@@ -61,7 +68,7 @@ List steps:
 PYTHONPATH=src python -m inscription build path/to/package --list
 ```
 
-Build one step:
+Run one step:
 
 ```sh
 PYTHONPATH=src python -m inscription build path/to/package library
@@ -73,7 +80,7 @@ Build every recorded step:
 PYTHONPATH=src python -m inscription build path/to/package
 ```
 
-Outputs go under `build/`:
+Artifact outputs go under `build/`:
 
 - static library: `build/lib<name>.a`
 - executable: `build/<name>`
@@ -84,8 +91,8 @@ Outputs go under `build/`:
 - MLIR: `build/<name>.mlir`
 - lowered MLIR: `build/<name>.lowered.mlir`
 
-`--runtime-checks`, `--opt-level`, `-O0`, `-O1`, `-O2`, `--verify`, and `--save-temps DIR` are forwarded to package artifact emission. Save temps are grouped by step name, for example `temps/library/Package.mlir`.
+`--runtime-checks`, `--opt-level`, `-O0`, `-O1`, `-O2`, `--verify`, and `--save-temps DIR` are forwarded where applicable. Test save temps are grouped by step name, for example `temps/tests/...`; artifact save temps use the same step grouping, for example `temps/library/Package.mlir`. Check steps run package validation and only require MLIR tools when `--verify` is supplied.
 
 ## Boundaries
 
-v0.50 build scripts are intentionally narrow. They cannot import package source modules, call externs, spawn processes, read arbitrary files, use the network, generate source, choose custom output paths, or define general build graphs. `package.ins` remains parse-only, and dependency resolution is unchanged.
+v0.51 build scripts are intentionally narrow. They cannot import package source modules, call externs, spawn processes, read arbitrary files, use the network, generate source, choose custom output paths, or define general build graphs. `package.ins` remains parse-only, and dependency resolution is unchanged.

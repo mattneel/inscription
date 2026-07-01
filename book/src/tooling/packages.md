@@ -1,6 +1,6 @@
 # Packages
 
-Inscription v0.45 added a declarative package manifest named `package.ins`; v0.46 added package-aware artifact builds; v0.47 added local path dependencies; v0.50 adds optional `build.ins` scripts. The manifest is metadata, not executable build logic: think `build.zig.zon`, not `build.zig`. `build.ins` is the intentionally narrow interpreted build surface for named standard artifacts.
+Inscription v0.45 added a declarative package manifest named `package.ins`; v0.46 added package-aware artifact builds; v0.47 added local path dependencies; v0.50 added optional `build.ins` scripts and v0.51 adds check/test steps to them. The manifest is metadata, not executable build logic: think `build.zig.zon`, not `build.zig`. `build.ins` is the intentionally narrow interpreted build surface for named package workflow and artifact steps.
 
 A package root contains `package.ins`, a source directory, and optionally a test directory:
 
@@ -101,12 +101,14 @@ A package may also contain an optional `build.ins` script:
 Import Build.
 
 To build package package: Build.Package.
+Build.check package named "check".
+Build.tests named "tests".
 Build.static library named "library".
 Build.c header named "header".
 Build.interface json named "interface".
 ```
 
-Use `inscription build path/to/package --list` to list the script's named artifact steps, `inscription build path/to/package library` to build one step, or `inscription build path/to/package` to build them all. v0.50 build scripts call only the built-in `Build` artifact API and write outputs under `build/`; they cannot run shell commands, access arbitrary files, import package source modules, or customize output paths.
+Use `inscription build path/to/package --list` to list the script's named steps, `inscription build path/to/package check` or `... tests` to run validation steps, `inscription build path/to/package library` to build one artifact step, or `inscription build path/to/package` to run them all in source order. v0.51 build scripts call only the built-in `Build` API for package check/test/build requests; they cannot run shell commands, access arbitrary files, import package source modules, or customize output paths.
 
 ## Package builds
 
@@ -126,4 +128,4 @@ Library-like emits (`mlir`, `lowered-mlir`, `llvm-ir`, `object`, `static-library
 
 Package interface JSON includes a top-level `package` object with manifest metadata and direct dependency metadata. Package C headers include exported scalar phrases from the root package root/exposed modules and preserve exported phrase documentation comments; dependency exports are intentionally omitted from the root package header. Build the dependency package separately when you need its header. `--save-temps DIR` writes deterministic package intermediates such as `ProtocolTools.mlir`, `ProtocolTools.lowered.mlir`, `ProtocolTools.ll`, and `ProtocolTools.o`.
 
-Remote dependencies, registries, lockfiles, version solving, target triples, build profiles, custom output paths, arbitrary filesystem/process/network access, and general build graph scripting remain future work. See [Build Scripts](build-scripts.md) for the v0.50 `build.ins` MVP.
+Remote dependencies, registries, lockfiles, version solving, target triples, build profiles, custom output paths, arbitrary filesystem/process/network access, and general build graph scripting remain future work. See [Build Scripts](build-scripts.md) for the v0.51 `build.ins` surface.
