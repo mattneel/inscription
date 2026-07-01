@@ -9,6 +9,7 @@ from .parser import (
     _split_match_step_arms,
     _split_punctuation_sentences,
     _split_semicolons,
+    collect_source_comments,
     normalize_punctuation_source,
 )
 
@@ -70,18 +71,34 @@ def format_source(source: str) -> str:
     """
 
     normalize_punctuation_source(source)
-    sentences = _split_punctuation_sentences(source)
-    formatted_sentences = [_format_sentence(sentence.text) for sentence in sentences]
+    comment_info = collect_source_comments(source)
+    sentences = _split_punctuation_sentences(comment_info.source)
+    formatted_sentences = [(sentence, _format_sentence(sentence.text)) for sentence in sentences]
+    standalone_comments = [comment for comment in comment_info.comments if not comment.trailing]
+    trailing_comments: dict[int, list[str]] = {}
+    for comment in comment_info.comments:
+        if comment.trailing and comment.kind == "ordinary":
+            trailing_comments.setdefault(comment.line, []).append(_format_comment(comment.kind, comment.text))
     out: list[str] = []
     in_phrase = False
     previous_was_import = False
-    for sentence in formatted_sentences:
+    comment_index = 0
+    for source_sentence, sentence in formatted_sentences:
+        while comment_index < len(standalone_comments) and standalone_comments[comment_index].line < source_sentence.line:
+            _append_comment(out, standalone_comments[comment_index])
+            comment_index += 1
+        formatted_lines = sentence.splitlines()
+        if source_sentence.line in trailing_comments and formatted_lines:
+            formatted_lines[-1] = f"{formatted_lines[-1]} {' '.join(trailing_comments[source_sentence.line])}"
+            sentence = "\n".join(formatted_lines)
         first_line = sentence.splitlines()[0]
         top_level = _is_top_level_first_line(first_line)
         phrase_boundary = _is_phrase_boundary_first_line(first_line)
         if top_level and (not in_phrase or phrase_boundary):
             if out:
-                if first_line.startswith("Import ") and previous_was_import:
+                if out[-1].startswith("///") or (out[-1].startswith("//") and not out[-1].startswith("//!")):
+                    pass
+                elif first_line.startswith("Import ") and previous_was_import:
                     pass
                 else:
                     _ensure_blank_line(out)
@@ -94,6 +111,9 @@ def format_source(source: str) -> str:
             in_phrase = True
         elif phrase_boundary and not first_line.startswith("To "):
             in_phrase = False
+    while comment_index < len(standalone_comments):
+        _append_comment(out, standalone_comments[comment_index])
+        comment_index += 1
     while out and out[-1] == "":
         out.pop()
     return "\n".join(out) + "\n"
@@ -102,6 +122,17 @@ def format_source(source: str) -> str:
 def _ensure_blank_line(lines: list[str]) -> None:
     if lines and lines[-1] != "":
         lines.append("")
+
+
+def _append_comment(lines: list[str], comment) -> None:
+    if comment.kind == "doc" and lines and lines[-1] != "" and not lines[-1].startswith("///"):
+        _ensure_blank_line(lines)
+    lines.append(_format_comment(comment.kind, comment.text))
+
+
+def _format_comment(kind: str, text: str) -> str:
+    marker = {"ordinary": "//", "doc": "///", "module": "//!"}[kind]
+    return marker if not text else f"{marker} {text}"
 
 
 def _is_top_level_first_line(line: str) -> bool:

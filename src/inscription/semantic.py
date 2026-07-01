@@ -565,9 +565,9 @@ def record_table(program: Program) -> dict[str, RecordDecl]:
                     f"layout record fields must be integer types, got {format_type(field_type)}", field.line
                 )
             resolved_fields.append(type(field)(field.name, field_type, field.line))
-        resolved_record = RecordDecl(record.name, tuple(resolved_fields), record.line, record.layout_kind)
+        resolved_record = RecordDecl(record.name, tuple(resolved_fields), record.line, record.layout_kind, documentation=record.documentation)
         layout_info = compute_layout_info(resolved_record) if record.layout_kind != "value" else None
-        records[record.name] = RecordDecl(record.name, tuple(resolved_fields), record.line, record.layout_kind, layout_info)
+        records[record.name] = RecordDecl(record.name, tuple(resolved_fields), record.line, record.layout_kind, layout_info, record.documentation)
     return records
 
 
@@ -696,7 +696,7 @@ def resolve_function_table(
             if fn.return_type is None
             else resolve_value_type(fn.return_type, fn.line, records, constants, functions, {})
         )
-        resolved[name] = Function(fn.name, params, return_type, fn.body, fn.line, fn.display_name, fn.extern_symbol, fn.implementation)
+        resolved[name] = Function(fn.name, params, return_type, fn.body, fn.line, fn.display_name, fn.extern_symbol, fn.implementation, fn.documentation)
     return resolved
 
 

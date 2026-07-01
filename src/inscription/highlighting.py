@@ -16,7 +16,7 @@ def _missing_pygments() -> HighlightError:
 def _make_lexer():
     try:
         from pygments.lexer import RegexLexer, bygroups
-        from pygments.token import Error, Keyword, Name, Number, Operator, Punctuation, String, Text
+        from pygments.token import Comment, Error, Keyword, Name, Number, Operator, Punctuation, String, Text
     except ModuleNotFoundError as exc:
         if exc.name == "pygments":
             raise _missing_pygments() from exc
@@ -30,6 +30,8 @@ def _make_lexer():
         tokens = {
             "root": [
                 (r"\s+", Text.Whitespace),
+                (r"///.*?$|//!.*?$", Comment.Special),
+                (r"//.*?$", Comment.Single),
                 (r"([a-z][a-z0-9_]*)(:)(\s*)(i1|i8|i16|i32|i64|u8|u16|u32|u64|f32|f64)\b", bygroups(
                     Name.Variable,
                     Punctuation,

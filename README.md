@@ -11,19 +11,19 @@ The full language guide now lives in **[The Inscription Book](book/src/title-pag
 
 ## Status
 
-This repository currently implements **Inscription v0.42: owned buffer literal and copy initialization**. v0.42 adds `owned buffer ... containing ...`, mutable owned byte-string buffers with `owned buffer of bytes "..."`, and explicit `owned buffer copied from source` initialization on top of pattern alternatives, integer ranges, match guards, exhaustive matches, and move-aware owned-buffer control flow. The mdBook documentation site remains the primary language guide.
+This repository currently implements **Inscription v0.43: comments and documentation comments**. v0.43 adds ordinary `//` line comments, declaration documentation comments with `///`, module/file documentation comments with `//!`, interface JSON documentation metadata, and exported C header comments on top of owned buffer literal/copy initialization, pattern alternatives, integer ranges, match guards, exhaustive matches, and move-aware owned-buffer control flow. The mdBook documentation site remains the primary language guide.
 
 The current language includes:
 
 - scalar integer, float, and boolean types
-- deterministic prose-punctuation syntax, `then` parent continuations, and canonical formatter
+- deterministic prose-punctuation syntax, `then` parent continuations, canonical formatter, ordinary comments, and documentation comments
 - modules and imports
 - constants, checks, runtime `Require`, and optional `--runtime-checks`
 - phrases, extern declarations, and scalar exported phrases
 - records, layout records, nominal enums, tagged unions, exhaustive matches, wildcard `anything` patterns, match guards, pattern alternatives, integer ranges, and ignored union payload fields
 - buffers, arrays, borrowed views, byte literals, and byte-string storage initialization
 - owned dynamic buffers with lexical cleanup, owned-buffer returns, explicit consuming `move` calls, owned temporary moves, move-aware branch/match control flow, owned literal initialization, and explicit owned-buffer copies from storage
-- MLIR, LLVM IR, object, executable, static-library, interface JSON, and C header emission
+- MLIR, LLVM IR, object, executable, static-library, interface JSON with documentation metadata, and C header emission with exported phrase docs
 
 See the book for the tutorial, language guide, tooling guide, examples, and reference links.
 
@@ -148,6 +148,17 @@ Give copy at 0 plus cells at 0 plus length of bytes.
 
 `owned buffer copied from source` is an explicit element-wise copy from a buffer, array, view, or owned buffer. It does not consume the source; `move` remains the only ownership-transfer syntax. Zero-length owned buffers are still unsupported, and byte strings are byte storage rather than heap strings.
 
+Source comments are line-oriented. `//` comments are ignored by semantics, `///` documents the next top-level declaration, and `//!` documents the module or root unit. Documentation comments appear in interface JSON, and exported phrase docs are emitted as C comments in generated headers.
+
+```inscription
+//! Protocol helpers.
+
+/// Exported answer.
+To answer, giving i32, exported as ins_answer.
+// Ordinary body comment.
+Give 42.
+```
+
 Enum, union, and boolean matches can be written without `otherwise` when every case is covered. Use `anything` as an explicit wildcard catch-all. Match arms may also use lowercase `when` guards; guarded arms are tested in source order and do not count toward exhaustiveness. Direct enum cases, booleans, integer literals, byte literals, and payload-free union variants can be combined with `or`, and integer scalar matches can use inclusive `through` ranges:
 
 ```inscription
@@ -181,8 +192,8 @@ anything gives 0.
 - [`book/tools/check_book_examples.py`](book/tools/check_book_examples.py): deterministic book example checker
 - [`book/tools/inscription_mdbook_preprocessor.py`](book/tools/inscription_mdbook_preprocessor.py): mdBook preprocessor that reuses Inscription's own highlighter
 - [`docs/github-pages.md`](docs/github-pages.md): GitHub Pages setup notes
-- [`docs/inscription-v0.42-spec.md`](docs/inscription-v0.42-spec.md): current language sprint spec
-- [`grammar/inscription-v0.42.ebnf`](grammar/inscription-v0.42.ebnf): current grammar mirror
+- [`docs/inscription-v0.43-spec.md`](docs/inscription-v0.43-spec.md): current language sprint spec
+- [`grammar/inscription-v0.43.ebnf`](grammar/inscription-v0.43.ebnf): current grammar mirror
 
 ## Testing
 

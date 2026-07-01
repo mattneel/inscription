@@ -273,7 +273,7 @@ def combine_programs(modules: list[LoadedModule], entry: Program) -> Program:
     constants.extend(entry.constants)
     checks.extend(entry.checks)
     functions.extend(entry.functions)
-    return Program(tuple(records), tuple(enums), tuple(unions), tuple(type_aliases), tuple(constants), tuple(checks), tuple(functions), entry.module_name, entry.imports)
+    return Program(tuple(records), tuple(enums), tuple(unions), tuple(type_aliases), tuple(constants), tuple(checks), tuple(functions), entry.module_name, entry.imports, entry.documentation)
 
 
 def qualify_imported_program(program: Program, module_name: str) -> Program:
@@ -290,7 +290,7 @@ def qualify_imported_program(program: Program, module_name: str) -> Program:
     constants = tuple(qualify_constant(constant, module_name, type_names, constant_names) for constant in program.constants)
     checks = tuple(qualify_stmt(check, module_name, type_names, constant_names) for check in program.checks)
     functions = tuple(qualify_function(function, module_name, type_names, constant_names) for function in program.functions)
-    return Program(records, enums, unions, type_aliases, constants, checks, functions, program.module_name, program.imports)
+    return Program(records, enums, unions, type_aliases, constants, checks, functions, program.module_name, program.imports, program.documentation)
 
 
 def qname(module_name: str, name: str) -> str:
@@ -307,6 +307,7 @@ def qualify_record_decl(record: RecordDecl, module_name: str, record_names: set[
         record.line,
         record.layout_kind,
         record.layout_info,
+        record.documentation,
     )
 
 
@@ -316,6 +317,7 @@ def qualify_enum_decl(enum: EnumDecl, module_name: str, type_names: set[str], co
         qualify_type(enum.underlying_type, module_name, type_names, constant_names),
         tuple(type(case)(case.name, qualify_expr(case.value, module_name, type_names, constant_names), case.line) for case in enum.cases),
         enum.line,
+        enum.documentation,
     )
 
 
@@ -338,6 +340,7 @@ def qualify_union_decl(union: UnionDecl, module_name: str, type_names: set[str],
             for variant in union.variants
         ),
         union.line,
+        union.documentation,
     )
 
 
@@ -346,6 +349,7 @@ def qualify_type_alias(alias: TypeAliasDecl, module_name: str, type_names: set[s
         qname(module_name, alias.name),
         qualify_type(alias.target, module_name, type_names, constant_names),
         alias.line,
+        alias.documentation,
     )
 
 
@@ -360,6 +364,7 @@ def qualify_constant(
         qualify_type(constant.type_name, module_name, record_names, constant_names),
         qualify_expr(constant.expr, module_name, record_names, constant_names),
         constant.line,
+        constant.documentation,
     )
 
 
@@ -378,6 +383,7 @@ def qualify_function(
         function.display_name,
         function.extern_symbol,
         function.implementation,
+        function.documentation,
     )
 
 

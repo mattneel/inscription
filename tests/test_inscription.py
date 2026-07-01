@@ -2173,6 +2173,20 @@ class CompilerTests(unittest.TestCase):
         self.assertIn("highlight", html)
 
     @unittest.skipUnless(importlib.util.find_spec("pygments"), "Pygments is not installed")
+    def test_highlight_comments_without_treating_string_slashes_as_comments(self):
+        from inscription.highlighting import highlight_source
+
+        html = highlight_source(
+            '//! Module docs.\n/// Export docs.\nTo main, giving i32.\nLet bytes be array of bytes "http://example".\n// ordinary\nGive length of bytes.\n',
+            output_format="html",
+            nowrap=True,
+        )
+        self.assertIn('<span class="cs">//! Module docs.</span>', html)
+        self.assertIn('<span class="cs">/// Export docs.</span>', html)
+        self.assertIn('<span class="c1">// ordinary</span>', html)
+        self.assertIn("&quot;http://example&quot;", html)
+
+    @unittest.skipUnless(importlib.util.find_spec("pygments"), "Pygments is not installed")
     def test_highlight_accepts_full_v0_token_surface(self):
         from inscription.highlighting import highlight_source
 
@@ -3418,7 +3432,7 @@ Give result plus seen.
         payload = json.loads(alias_json.stdout)
         self.assertEqual(
             payload["modules"][0]["type_aliases"][0],
-            {"name": "Count", "kind": "type-alias", "target": "i32"},
+            {"name": "Count", "kind": "type-alias", "documentation": None, "target": "i32"},
         )
 
         storage_json = subprocess.run(
@@ -3570,6 +3584,107 @@ Give result plus seen.
             self.assertEqual(exe_proc.returncode, 0, exe_proc.stderr)
             run = subprocess.run([str(executable)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False)
             self.assertEqual(run.returncode, 42, run.stderr)
+
+    def test_v043_doc_comments_surface_in_interface_json_and_c_header(self):
+        env = {**os.environ, "PYTHONPATH": str(SRC)}
+        interface_proc = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "inscription",
+                "compile",
+                str(FIXTURES / "doc_comments_interface.ins"),
+                "--emit",
+                "interface-json",
+            ],
+            cwd=ROOT,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(interface_proc.returncode, 0, interface_proc.stderr)
+        payload = json.loads(interface_proc.stdout)
+        root_module = payload["modules"][0]
+        self.assertEqual(root_module["documentation"], "Root module docs.")
+        self.assertEqual(root_module["type_aliases"][0]["documentation"], "A count type.")
+        self.assertEqual(root_module["exports"][0]["documentation"], "Adds counts.")
+
+        header_proc = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "inscription",
+                "compile",
+                str(FIXTURES / "doc_comments_interface.ins"),
+                "--emit",
+                "c-header",
+            ],
+            cwd=ROOT,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(header_proc.returncode, 0, header_proc.stderr)
+        self.assertIn(" * Adds counts.", header_proc.stdout)
+        self.assertIn("int32_t ins_add_counts(int32_t arg0, int32_t arg1);", header_proc.stdout)
+
+        module_proc = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "inscription",
+                "compile",
+                str(FIXTURES / "doc_comments_module" / "main.ins"),
+                "--emit",
+                "interface-json",
+            ],
+            cwd=ROOT,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(module_proc.returncode, 0, module_proc.stderr)
+        module_payload = json.loads(module_proc.stdout)
+        protocol = next(module for module in module_payload["modules"] if module["name"] == "Protocol")
+        self.assertEqual(protocol["documentation"], "Protocol helpers.")
+        self.assertEqual(protocol["enums"][0]["documentation"], "Packet mode.")
+        self.assertEqual(protocol["exports"][0]["documentation"], "Export a protocol answer.")
+
+    def test_v043_c_header_doc_escapes_comment_terminator(self):
+        env = {**os.environ, "PYTHONPATH": str(SRC)}
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "unsafe_doc.ins"
+            source.write_text(
+                "/// This has */ inside.\n"
+                "To answer, giving i32, exported as ins_answer.\n"
+                "Give 42.\n"
+            )
+            header_proc = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "inscription",
+                    "compile",
+                    str(source),
+                    "--emit",
+                    "c-header",
+                ],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+        self.assertEqual(header_proc.returncode, 0, header_proc.stderr)
+        self.assertIn("This has * / inside.", header_proc.stdout)
+        self.assertNotIn("This has */ inside.", header_proc.stdout)
 
     def test_v028_byte_literals_and_byte_sequences_lower_without_runtime_strings(self):
         byte_literal = compile_source(self.fixture("byte_literal.ins"))
@@ -6642,6 +6757,26 @@ Give result plus seen.
                 "To bad, giving i32.\nLet cells be owned buffer of 4 i32 filled with 1.\nLet x be move cells.\nGive x.\n",
                 "move may only be used as an argument to an owned buffer parameter",
             ),
+            "dangling documentation comment": (
+                "/// Docs with no declaration.\n",
+                "documentation comment must be followed by a declaration",
+            ),
+            "documentation comment before import": (
+                "/// Math import.\nImport Math.\n\nTo main, giving i32.\nGive 0.\n",
+                "documentation comments cannot attach to imports",
+            ),
+            "documentation comment in phrase body": (
+                "To main, giving i32.\n/// Return zero.\nGive 0.\n",
+                "documentation comments are only supported before top-level declarations",
+            ),
+            "module documentation after declaration": (
+                "To main, giving i32.\nGive 0.\n\n//! Too late.\n",
+                "module documentation comments must appear before the first declaration",
+            ),
+            "block comments unsupported": (
+                "/* no block comments */\nTo main, giving i32.\nGive 0.\n",
+                "block comments are not supported; use //",
+            ),
         }
         for name, (source, contains) in cases.items():
             with self.subTest(name=name):
@@ -6712,6 +6847,29 @@ class FormatterTests(unittest.TestCase):
             proc = self.cli("format", str(source))
             self.assertEqual(proc.returncode, 2)
             self.assertIn("missing period at end of sentence", proc.stderr)
+
+    def test_format_preserves_comments_and_doc_comments(self):
+        messy = (
+            "//! Module docs.\n\n"
+            "/// Adds counts.\n"
+            "To add counts left: i32 and right: i32, giving i32, exported as ins_add_counts.\n"
+            "Give   left plus right.\n\n"
+            "// Ordinary comment.\n"
+            "To main, giving i32.\n"
+            "Give add counts 20 and 22. // trailing\n"
+        )
+        expected = (
+            "//! Module docs.\n\n"
+            "/// Adds counts.\n"
+            "To add counts left: i32 and right: i32, giving i32, exported as ins_add_counts.\n"
+            "Give left plus right.\n"
+            "// Ordinary comment.\n"
+            "To main, giving i32.\n"
+            "Give add counts 20 and 22. // trailing\n"
+        )
+        formatted = format_source(messy)
+        self.assertEqual(formatted, expected)
+        self.assertEqual(format_source(formatted), formatted)
 
     def test_positive_and_golden_fixtures_are_formatter_clean_and_idempotent(self):
         paths = sorted(FIXTURES.rglob("*.ins")) + sorted(GOLDENS.rglob("*.ins")) + sorted((ROOT / "tests" / "goldens_checked").rglob("*.ins"))

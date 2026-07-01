@@ -41,6 +41,7 @@ class Program:
     functions: tuple["Function", ...]
     module_name: str | None = None
     imports: tuple[ImportDecl, ...] = ()
+    documentation: str | None = None
 
 
 @dataclass(frozen=True)
@@ -57,6 +58,7 @@ class RecordDecl:
     line: int
     layout_kind: RecordLayoutKind = "value"
     layout_info: "LayoutInfo | None" = None
+    documentation: str | None = None
 
 
 @dataclass(frozen=True)
@@ -80,6 +82,7 @@ class EnumDecl:
     underlying_type: "ValueType"
     cases: tuple[EnumCaseDecl, ...]
     line: int
+    documentation: str | None = None
 
 
 @dataclass(frozen=True)
@@ -87,6 +90,7 @@ class TypeAliasDecl:
     name: str
     target: "ValueType"
     line: int
+    documentation: str | None = None
 
 
 @dataclass(frozen=True)
@@ -108,6 +112,7 @@ class UnionDecl:
     name: str
     variants: tuple[UnionVariantDecl, ...]
     line: int
+    documentation: str | None = None
 
 
 @dataclass(frozen=True)
@@ -126,6 +131,7 @@ class Function:
     display_name: str
     extern_symbol: str | None = None
     implementation: FunctionImplementation = "normal"
+    documentation: str | None = None
 
 
 @dataclass(frozen=True)
@@ -221,6 +227,7 @@ class ConstantDecl:
     type_name: ValueType
     expr: "Expr"
     line: int
+    documentation: str | None = None
 
 
 @dataclass(frozen=True)

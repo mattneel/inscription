@@ -228,6 +228,19 @@ TOP_LEVEL_SENTENCE_PREFIXES = (
     "To ",
 )
 
+DOCUMENTABLE_SENTENCE_PREFIXES = (
+    "Module ",
+    "Type ",
+    "Constant ",
+    "Record ",
+    "Layout record ",
+    "Packed layout record ",
+    "Enum ",
+    "Union ",
+    "External ",
+    "To ",
+)
+
 LEGACY_TOP_LEVEL_RE = re.compile(
     rf"(?:module|import|type|constant|check|record|layout record|packed layout record|enum|union|extern|export)\b|.+\s+gives\s+.+:|.+\s+does:"
 )
@@ -239,18 +252,54 @@ class PunctuationSentence:
     line: int
 
 
+@dataclass(frozen=True)
+class SourceComment:
+    line: int
+    kind: str
+    text: str
+    trailing: bool = False
+
+
+@dataclass(frozen=True)
+class SourceCommentInfo:
+    source: str
+    comments: tuple[SourceComment, ...]
+    module_documentation: str | None
+    declaration_docs: dict[int, str]
+
+
+@dataclass(frozen=True)
+class NormalizedSource:
+    text: str
+    module_documentation: str | None
+    declaration_docs: dict[int, str]
+
+
 def normalize_punctuation_source(source: str) -> str:
-    _reject_legacy_surface(source)
+    return normalize_punctuation_source_with_docs(source).text
+
+
+def normalize_punctuation_source_with_docs(source: str) -> NormalizedSource:
+    comments = collect_source_comments(source)
+    return _normalize_punctuation_source_from_comments(comments)
+
+
+def _normalize_punctuation_source_from_comments(comments: SourceCommentInfo) -> NormalizedSource:
+    source = comments.source
+    _reject_legacy_surface_no_comments(source)
     if _uses_line_oriented_punctuation(source):
-        return _normalize_line_punctuation_source(source)
-    sentences = _split_punctuation_sentences(source)
+        text, docs = _normalize_line_punctuation_source(source, comments.declaration_docs)
+        return NormalizedSource(text, comments.module_documentation, docs)
+    sentences = _split_punctuation_sentences_no_comments(source)
     aliases = _import_aliases(sentences)
     output: list[str] = []
+    docs_by_line: dict[int, str] = {}
     index = 0
     while index < len(sentences):
         sentence = sentences[index]
         text = _apply_import_aliases(sentence.text, aliases)
         if text.startswith("Module "):
+            _attach_doc_for_output_line(docs_by_line, comments.declaration_docs, sentence.line, len(output) + 1)
             output.append(f"module {text[len('Module '):].strip()}")
             index += 1
             continue
@@ -259,22 +308,27 @@ def normalize_punctuation_source(source: str) -> str:
             index += 1
             continue
         if text.startswith("Record ") or text.startswith("Layout record ") or text.startswith("Packed layout record "):
+            _attach_doc_for_output_line(docs_by_line, comments.declaration_docs, sentence.line, len(output) + 1)
             output.extend(_translate_record_sentence(text, sentence.line))
             index += 1
             continue
         if text.startswith("Enum "):
+            _attach_doc_for_output_line(docs_by_line, comments.declaration_docs, sentence.line, len(output) + 1)
             output.extend(_translate_enum_sentence(text, sentence.line))
             index += 1
             continue
         if text.startswith("Union "):
+            _attach_doc_for_output_line(docs_by_line, comments.declaration_docs, sentence.line, len(output) + 1)
             output.extend(_translate_union_sentence(text, sentence.line))
             index += 1
             continue
         if text.startswith("Type "):
+            _attach_doc_for_output_line(docs_by_line, comments.declaration_docs, sentence.line, len(output) + 1)
             output.append("type " + text[len("Type "):].strip())
             index += 1
             continue
         if text.startswith("Constant "):
+            _attach_doc_for_output_line(docs_by_line, comments.declaration_docs, sentence.line, len(output) + 1)
             output.extend(_translate_top_level_match_line("constant " + text[len("Constant "):].strip(), 0))
             index += 1
             continue
@@ -283,10 +337,12 @@ def normalize_punctuation_source(source: str) -> str:
             index += 1
             continue
         if text.startswith("External "):
+            _attach_doc_for_output_line(docs_by_line, comments.declaration_docs, sentence.line, len(output) + 1)
             output.append(_translate_external_sentence(text, sentence.line))
             index += 1
             continue
         if text.startswith("To "):
+            _attach_doc_for_output_line(docs_by_line, comments.declaration_docs, sentence.line, len(output) + 1)
             header = _translate_to_sentence(text, sentence.line)
             output.append(header)
             is_gives = " gives " in header
@@ -308,13 +364,152 @@ def normalize_punctuation_source(source: str) -> str:
             "expected top-level declaration sentence starting with Module, Import, Type, Constant, Check, Record, Layout record, Packed layout record, Enum, Union, External, or To",
             sentence.line,
         )
-    return "\n".join(output) + ("\n" if output else "")
+    return NormalizedSource("\n".join(output) + ("\n" if output else ""), comments.module_documentation, docs_by_line)
+
+
+def _attach_doc_for_output_line(
+    docs_by_line: dict[int, str],
+    declaration_docs: dict[int, str],
+    source_line: int,
+    output_line: int,
+) -> None:
+    documentation = declaration_docs.get(source_line)
+    if documentation is not None:
+        docs_by_line[output_line] = documentation
+
+
+def collect_source_comments(source: str) -> SourceCommentInfo:
+    stripped_lines: list[str] = []
+    comments: list[SourceComment] = []
+    doc_blocks: list[tuple[int, int, str]] = []
+    module_doc_lines: list[str] = []
+    module_doc_start: int | None = None
+    pending_doc_lines: list[str] = []
+    pending_doc_start: int | None = None
+    pending_doc_end: int | None = None
+    saw_non_comment_declaration = False
+
+    for number, raw in enumerate(source.splitlines(), start=1):
+        code, kind, text = _split_line_comment(raw, number)
+        stripped_lines.append(code)
+        if code.strip():
+            if pending_doc_lines:
+                doc_blocks.append((pending_doc_start or number, pending_doc_end or pending_doc_start or number, "\n".join(pending_doc_lines)))
+                pending_doc_lines = []
+                pending_doc_start = None
+                pending_doc_end = None
+            saw_non_comment_declaration = True
+        if kind is None:
+            if pending_doc_lines and not code.strip():
+                raise InscriptionError("documentation comment must be followed by a declaration", number)
+            continue
+        trailing = bool(code.strip())
+        comments.append(SourceComment(number, kind, text, trailing))
+        if kind == "ordinary":
+            if pending_doc_lines and not code.strip():
+                raise InscriptionError("documentation comment must be followed by a declaration", number)
+            continue
+        if trailing:
+            if kind == "module":
+                raise InscriptionError("module documentation comments must appear before the first declaration", number)
+            raise InscriptionError("documentation comments are only supported before top-level declarations", number)
+        if kind == "module":
+            if saw_non_comment_declaration:
+                raise InscriptionError("module documentation comments must appear before the first declaration", number)
+            if pending_doc_lines:
+                raise InscriptionError("documentation comment must be followed by a declaration", pending_doc_start)
+            if module_doc_start is None:
+                module_doc_start = number
+            module_doc_lines.append(text)
+            continue
+        if kind == "doc":
+            if pending_doc_start is None:
+                pending_doc_start = number
+            pending_doc_end = number
+            pending_doc_lines.append(text)
+            continue
+
+    if pending_doc_lines:
+        doc_blocks.append((pending_doc_start or 1, pending_doc_end or pending_doc_start or 1, "\n".join(pending_doc_lines)))
+
+    stripped_source = "\n".join(stripped_lines) + ("\n" if source.endswith("\n") else "")
+    declaration_docs: dict[int, str] = {}
+    if doc_blocks:
+        sentences = _split_punctuation_sentences_no_comments(stripped_source)
+        declaration_docs = _attach_documentation_blocks(doc_blocks, sentences, stripped_lines)
+    module_documentation = "\n".join(module_doc_lines) if module_doc_lines else None
+    return SourceCommentInfo(stripped_source, tuple(comments), module_documentation, declaration_docs)
+
+
+def _split_line_comment(raw: str, line: int) -> tuple[str, str | None, str]:
+    in_string = False
+    escaped = False
+    index = 0
+    while index < len(raw):
+        char = raw[index]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            index += 1
+            continue
+        if char == '"':
+            in_string = True
+            index += 1
+            continue
+        if char == "/" and index + 1 < len(raw):
+            nxt = raw[index + 1]
+            if nxt == "*":
+                raise InscriptionError("block comments are not supported; use //", line)
+            if nxt == "/":
+                marker_len = 2
+                kind = "ordinary"
+                if index + 2 < len(raw) and raw[index + 2] == "/":
+                    marker_len = 3
+                    kind = "doc"
+                elif index + 2 < len(raw) and raw[index + 2] == "!":
+                    marker_len = 3
+                    kind = "module"
+                text = raw[index + marker_len :]
+                if text.startswith(" "):
+                    text = text[1:]
+                return raw[:index].rstrip(), kind, text.rstrip()
+        index += 1
+    return raw, None, ""
+
+
+def _attach_documentation_blocks(
+    doc_blocks: list[tuple[int, int, str]],
+    sentences: list[PunctuationSentence],
+    stripped_lines: list[str],
+) -> dict[int, str]:
+    declaration_docs: dict[int, str] = {}
+    for start, end, text in doc_blocks:
+        target = next((sentence for sentence in sentences if sentence.line > end), None)
+        if target is None:
+            raise InscriptionError("documentation comment must be followed by a declaration", start)
+        for line_no in range(end + 1, target.line):
+            if line_no - 1 < len(stripped_lines) and not stripped_lines[line_no - 1].strip():
+                raise InscriptionError("documentation comment must be followed by a declaration", line_no)
+        if not _is_top_level_sentence(target.text):
+            raise InscriptionError("documentation comments are only supported before top-level declarations", start)
+        if target.text.startswith("Import "):
+            raise InscriptionError("documentation comments cannot attach to imports", start)
+        if not target.text.startswith(DOCUMENTABLE_SENTENCE_PREFIXES):
+            raise InscriptionError("documentation comments are only supported before documentable top-level declarations", start)
+        declaration_docs[target.line] = text
+    return declaration_docs
 
 
 def scan_punctuation_module_header(source: str) -> tuple[str | None, tuple[ImportDecl, ...]] | None:
-    _reject_legacy_surface(source)
+    comments = collect_source_comments(source)
+    source = comments.source
+    _reject_legacy_surface_no_comments(source)
     try:
-        sentences = _split_punctuation_sentences(source)
+        sentences = _split_punctuation_sentences_no_comments(source)
     except InscriptionError:
         raise
     module_name: str | None = None
@@ -346,7 +541,9 @@ def _uses_line_oriented_punctuation(source: str) -> bool:
     return False
 
 
-def _normalize_line_punctuation_source(source: str) -> str:
+def _normalize_line_punctuation_source(source: str, declaration_docs: dict[int, str] | None = None) -> tuple[str, dict[int, str]]:
+    declaration_docs = declaration_docs or {}
+    docs_by_line: dict[int, str] = {}
     aliases: dict[str, str] = {}
     raw_lines = source.splitlines()
     for number, raw in enumerate(raw_lines, start=1):
@@ -369,33 +566,42 @@ def _normalize_line_punctuation_source(source: str) -> str:
         text = _apply_import_aliases(text, aliases)
         prefix = " " * indent
         if indent == 0 and text.startswith("Module "):
+            _attach_doc_for_output_line(docs_by_line, declaration_docs, number, len(lines) + 1)
             lines.append(f"module {text[len('Module '):].strip()}")
             continue
         if indent == 0 and text.startswith("Import "):
             lines.append(_translate_import_sentence(text))
             continue
         if indent == 0 and (text.startswith("Record ") or text.startswith("Layout record ") or text.startswith("Packed layout record ")):
+            _attach_doc_for_output_line(docs_by_line, declaration_docs, number, len(lines) + 1)
             lines.extend(_translate_record_sentence(text, number))
             continue
         if indent == 0 and text.startswith("Enum "):
+            _attach_doc_for_output_line(docs_by_line, declaration_docs, number, len(lines) + 1)
             lines.extend(_translate_enum_sentence(text, number))
             continue
         if indent == 0 and text.startswith("Union "):
+            _attach_doc_for_output_line(docs_by_line, declaration_docs, number, len(lines) + 1)
             lines.extend(_translate_union_sentence(text, number))
             continue
         if indent == 0 and text.startswith("Type "):
+            _attach_doc_for_output_line(docs_by_line, declaration_docs, number, len(lines) + 1)
             lines.append("type " + text[len("Type "):].strip())
             continue
         if indent == 0 and text.startswith("Constant "):
+            _attach_doc_for_output_line(docs_by_line, declaration_docs, number, len(lines) + 1)
             lines.extend(_translate_top_level_match_line("constant " + text[len("Constant "):].strip(), 0))
             continue
         if indent == 0 and text.startswith("Check "):
+            _attach_doc_for_output_line(docs_by_line, declaration_docs, number, len(lines) + 1)
             lines.extend(_translate_top_level_match_line("check " + text[len("Check "):].strip(), 0))
             continue
         if indent == 0 and text.startswith("External "):
+            _attach_doc_for_output_line(docs_by_line, declaration_docs, number, len(lines) + 1)
             lines.append(_translate_external_sentence(text, number))
             continue
         if indent == 0 and text.startswith("To "):
+            _attach_doc_for_output_line(docs_by_line, declaration_docs, number, len(lines) + 1)
             lines.append(_translate_to_sentence(text, number))
             continue
         if text.startswith("Give "):
@@ -438,9 +644,13 @@ def _normalize_line_punctuation_source(source: str) -> str:
             lines.append(prefix + "match " + text[len("Match ") :].strip())
             continue
         lines.extend(_translate_match_expression_line(prefix + text, 0))
-    return "\n".join(lines) + ("\n" if lines else "")
+    return "\n".join(lines) + ("\n" if lines else ""), docs_by_line
 
 def _reject_legacy_surface(source: str) -> None:
+    _reject_legacy_surface_no_comments(collect_source_comments(source).source)
+
+
+def _reject_legacy_surface_no_comments(source: str) -> None:
     for number, raw in enumerate(source.splitlines(), start=1):
         text = raw.strip()
         if not text:
@@ -456,9 +666,14 @@ def _reject_legacy_surface(source: str) -> None:
 
 
 def _split_punctuation_sentences(source: str) -> list[PunctuationSentence]:
+    return _split_punctuation_sentences_no_comments(collect_source_comments(source).source)
+
+
+def _split_punctuation_sentences_no_comments(source: str) -> list[PunctuationSentence]:
     sentences: list[PunctuationSentence] = []
     start = 0
     start_line = 1
+    current_sentence_line: int | None = None
     line = 1
     in_string = False
     escaped = False
@@ -474,8 +689,12 @@ def _split_punctuation_sentences(source: str) -> list[PunctuationSentence]:
                 in_string = False
             continue
         if char == '"':
+            if current_sentence_line is None:
+                current_sentence_line = line
             in_string = True
             continue
+        if current_sentence_line is None and not char.isspace():
+            current_sentence_line = line
         if char != ".":
             continue
         prev = source[index - 1] if index > 0 else ""
@@ -486,13 +705,14 @@ def _split_punctuation_sentences(source: str) -> list[PunctuationSentence]:
             continue
         text = source[start:index].strip()
         if text:
-            sentences.append(PunctuationSentence(_collapse_sentence_whitespace(text), start_line))
+            sentences.append(PunctuationSentence(_collapse_sentence_whitespace(text), current_sentence_line or start_line))
         start = index + 1
         start_line = line
+        current_sentence_line = None
     if in_string:
         raise InscriptionError("unterminated string literal", line)
     if source[start:].strip():
-        raise InscriptionError("missing period at end of sentence", start_line)
+        raise InscriptionError("missing period at end of sentence", current_sentence_line or start_line)
     return sentences
 
 
@@ -1132,8 +1352,10 @@ class Parser:
         external_phrases: tuple[PhraseTemplate, ...] = (),
         symbol_prefix: str | None = None,
     ):
-        source = normalize_punctuation_source(source)
-        self.lines = self._preprocess(source)
+        normalized = normalize_punctuation_source_with_docs(source)
+        self.lines = self._preprocess(normalized.text)
+        self.module_documentation = normalized.module_documentation
+        self.declaration_docs = normalized.declaration_docs
         self.symbol_prefix = symbol_prefix
         self.external_phrases = external_phrases
         self.local_phrases: tuple[PhraseTemplate, ...] = ()
@@ -1188,6 +1410,7 @@ class Parser:
         functions: list[Function] = []
         imports: list[ImportDecl] = []
         module_name: str | None = None
+        module_declaration_documentation: str | None = None
         index = 0
         while index < len(self.lines):
             line = self.lines[index]
@@ -1197,6 +1420,7 @@ class Parser:
                 if module_name is not None:
                     raise InscriptionError("program can declare only one module", line.number)
                 module_name = self._module_name(line.text[len("module ") :].strip(), line.number)
+                module_declaration_documentation = self._doc_for(line)
                 index += 1
                 continue
             if line.indent == 0 and line.text.startswith("import "):
@@ -1249,6 +1473,7 @@ class Parser:
                         template.display_name,
                         external_symbol,
                         "extern",
+                        self._doc_for(line),
                     )
                 )
                 index += 1
@@ -1266,6 +1491,7 @@ class Parser:
                         template.display_name,
                         external_symbol,
                         "export",
+                        self._doc_for(line),
                     )
                 )
                 continue
@@ -1283,6 +1509,7 @@ class Parser:
                     tuple(body),
                     line.number,
                     template.display_name,
+                    documentation=self._doc_for(line),
                 )
             )
         seen_imports: set[str] = set()
@@ -1290,7 +1517,21 @@ class Parser:
             if imported.module in seen_imports:
                 raise InscriptionError(f"module {imported.module} is already imported", imported.line)
             seen_imports.add(imported.module)
-        return Program(tuple(records), tuple(enums), tuple(unions), tuple(type_aliases), tuple(constants), tuple(checks), tuple(functions), module_name, tuple(imports))
+        return Program(
+            tuple(records),
+            tuple(enums),
+            tuple(unions),
+            tuple(type_aliases),
+            tuple(constants),
+            tuple(checks),
+            tuple(functions),
+            module_name,
+            tuple(imports),
+            self.module_documentation or module_declaration_documentation,
+        )
+
+    def _doc_for(self, line: Line) -> str | None:
+        return self.declaration_docs.get(line.number)
 
     def _looks_like_record_header(self, line: Line) -> bool:
         return (
@@ -1341,7 +1582,7 @@ class Parser:
         if not fields:
             prefix = "record" if layout_kind == "value" else "layout record"
             raise InscriptionError(f"{prefix} {name} must declare at least one field", line.number)
-        return RecordDecl(name, tuple(fields), line.number, layout_kind), field_index
+        return RecordDecl(name, tuple(fields), line.number, layout_kind, documentation=self._doc_for(line)), field_index
 
     def _parse_enum_decl(self, index: int) -> tuple[EnumDecl, int]:
         line = self.lines[index]
@@ -1369,7 +1610,7 @@ class Parser:
             case_index += 1
         if not cases:
             raise InscriptionError(f"enum {name} must declare at least one case", line.number)
-        return EnumDecl(name, underlying_type, tuple(cases), line.number), case_index
+        return EnumDecl(name, underlying_type, tuple(cases), line.number, self._doc_for(line)), case_index
 
     def _parse_union_decl(self, index: int) -> tuple[UnionDecl, int]:
         line = self.lines[index]
@@ -1422,7 +1663,7 @@ class Parser:
             raise InscriptionError("malformed union variant declaration", current.number)
         if not variants:
             raise InscriptionError(f"union {name} must declare at least one variant", line.number)
-        return UnionDecl(name, tuple(variants), line.number), variant_index
+        return UnionDecl(name, tuple(variants), line.number, self._doc_for(line)), variant_index
 
     def _parse_type_alias_decl(self, line: Line) -> TypeAliasDecl:
         match = re.fullmatch(rf"type ([A-Za-z][A-Za-z0-9_]*) be ({TYPE_PATTERN})", line.text)
@@ -1432,6 +1673,7 @@ class Parser:
             self._record_name(match.group(1), line.number),
             self._value_type(match.group(2), line.number),
             line.number,
+            self._doc_for(line),
         )
 
     def _parse_constant_decl(self, line: Line) -> ConstantDecl:
@@ -1440,7 +1682,7 @@ class Parser:
             raise InscriptionError("malformed constant declaration", line.number)
         raw_name = match.group(1)
         name = self._name(raw_name, line.number) if NAME_RE.fullmatch(raw_name) else raw_name
-        return ConstantDecl(name, self._return_type(match.group(2), line.number), self._parse_expression(match.group(3), line.number), line.number)
+        return ConstantDecl(name, self._return_type(match.group(2), line.number), self._parse_expression(match.group(3), line.number), line.number, self._doc_for(line))
 
     def _parse_constant_match_decl(self, index: int) -> tuple[ConstantDecl, int]:
         line = self.lines[index]
@@ -1450,7 +1692,7 @@ class Parser:
         raw_name = match.group(1)
         name = self._name(raw_name, line.number) if NAME_RE.fullmatch(raw_name) else raw_name
         expr, next_index = self._parse_match_expression(index, scrutinee_text=match.group(3))
-        return ConstantDecl(name, self._return_type(match.group(2), line.number), expr, line.number), next_index
+        return ConstantDecl(name, self._return_type(match.group(2), line.number), expr, line.number, self._doc_for(line)), next_index
 
     def _parse_check_stmt(self, line: Line) -> CheckStmt:
         if line.is_header:

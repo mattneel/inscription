@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .ast import EnumType, Function, Program, RecordDecl, TypeAliasDecl, TypeName, ValueType
+from .ast import ConstantDecl, EnumDecl, EnumType, Function, Program, RecordDecl, TypeAliasDecl, TypeName, UnionDecl, ValueType
 from .compiler import LoadedCompilation, load_compilation, module_path
 from .diagnostics import InscriptionError
 from .semantic import (
@@ -143,18 +143,19 @@ def _module_json(
     return {
         "name": name,
         "path": _relative_path(path, _root_dir(context)),
+        "documentation": program.documentation,
         "imports": [_import_json(import_decl.module, _root_dir(context)) for import_decl in program.imports],
         "type_aliases": [_type_alias_json(alias, name, context) for alias in program.type_aliases],
-        "constants": [_constant_json(const.name, name, context.constants[const.name], context) for const in program.constants],
-        "enums": [_enum_json(context.enums[enum.name], name) for enum in program.enums],
-        "unions": [_union_json(context.unions[union.name], name) for union in program.unions],
+        "constants": [_constant_json(const, name, context.constants[const.name], context) for const in program.constants],
+        "enums": [_enum_json(enum, context.enums[enum.name], name) for enum in program.enums],
+        "unions": [_union_json(union, context.unions[union.name], name) for union in program.unions],
         "records": [
-            _record_json(context.records[record.name], name)
+            _record_json(context.records[record.name], name, record.documentation)
             for record in program.records
             if context.records[record.name].layout_kind == "value"
         ],
         "layout_records": [
-            _record_json(context.records[record.name], name)
+            _record_json(context.records[record.name], name, record.documentation)
             for record in program.records
             if context.records[record.name].layout_kind != "value"
         ],
@@ -176,10 +177,11 @@ def _import_json(module_name: str, root_dir: Path | None) -> dict[str, Any]:
     return {"module": module_name, "path": _relative_path(path, root_dir), "alias": None}
 
 
-def _constant_json(name: str, module_name: str | None, value: ConstValue, context: InterfaceContext) -> dict[str, Any]:
+def _constant_json(decl: ConstantDecl, module_name: str | None, value: ConstValue, context: InterfaceContext) -> dict[str, Any]:
     payload: dict[str, Any] = {
-        "name": _display_name(name, module_name),
+        "name": _display_name(decl.name, module_name),
         "type": _format_interface_type(value.type_name, module_name),
+        "documentation": decl.documentation,
         "value": value.value,
     }
     if isinstance(value.type_name, EnumType):
@@ -203,20 +205,22 @@ def _type_alias_json(alias: TypeAliasDecl, module_name: str | None, context: Int
     return {
         "name": _display_name(alias.name, module_name),
         "kind": "type-alias",
+        "documentation": alias.documentation,
         "target": _format_interface_type(target, module_name),
     }
 
 
-def _enum_json(enum: EnumInfo, module_name: str | None) -> dict[str, Any]:
+def _enum_json(decl: EnumDecl, enum: EnumInfo, module_name: str | None) -> dict[str, Any]:
     return {
         "name": _display_name(enum.name, module_name),
         "kind": "enum",
+        "documentation": decl.documentation,
         "underlying_type": enum.underlying_type,
         "cases": [{"name": case_name, "value": enum.cases[case_name]} for case_name in enum.case_order],
     }
 
 
-def _union_json(union: UnionInfo, module_name: str | None) -> dict[str, Any]:
+def _union_json(decl: UnionDecl, union: UnionInfo, module_name: str | None) -> dict[str, Any]:
     variants = []
     for variant_name in union.variant_order:
         variant = union.variants[variant_name]
@@ -231,16 +235,18 @@ def _union_json(union: UnionInfo, module_name: str | None) -> dict[str, Any]:
     return {
         "name": _display_name(union.name, module_name),
         "kind": "union",
+        "documentation": decl.documentation,
         "tag_type": union.tag_type,
         "variants": variants,
     }
 
 
-def _record_json(record: RecordDecl, module_name: str | None) -> dict[str, Any]:
+def _record_json(record: RecordDecl, module_name: str | None, documentation: str | None) -> dict[str, Any]:
     if record.layout_kind == "value":
         return {
             "name": _display_name(record.name, module_name),
             "kind": "record",
+            "documentation": documentation,
             "fields": [
                 {"name": field.name, "type": _format_interface_type(field.type_name, module_name)}
                 for field in record.fields
@@ -252,6 +258,7 @@ def _record_json(record: RecordDecl, module_name: str | None) -> dict[str, Any]:
     return {
         "name": _display_name(record.name, module_name),
         "kind": kind,
+        "documentation": documentation,
         "size": record.layout_info.size,
         "alignment": record.layout_info.alignment,
         "fields": [
@@ -275,6 +282,7 @@ def _function_json(fn: Function, module_name: str | None) -> dict[str, Any]:
         "phrase": fn.display_name,
         "kind": "does" if fn.return_type is None else "gives",
         "symbol": fn.extern_symbol,
+        "documentation": fn.documentation,
         "parameters": [
             {"name": param.name, "type": _format_interface_type(param.type_name, module_name)} for param in fn.params
         ],
@@ -292,7 +300,18 @@ def _c_prototype(fn: Function) -> str:
         args = "void"
     else:
         args = ", ".join(f"{_c_type(param.type_name, symbol, fn.line)} arg{index}" for index, param in enumerate(fn.params))
-    return f"{return_type} {symbol}({args});"
+    prototype = f"{return_type} {symbol}({args});"
+    if fn.documentation is None:
+        return prototype
+    return "\n".join((*_c_documentation_comment(fn.documentation), prototype))
+
+
+def _c_documentation_comment(documentation: str) -> tuple[str, ...]:
+    lines = ["/*"]
+    for doc_line in documentation.splitlines() or [""]:
+        lines.append(f" * {doc_line.replace('*/', '* /')}")
+    lines.append(" */")
+    return tuple(lines)
 
 
 def _c_type(type_name: ValueType, symbol: str, line: int) -> str:
