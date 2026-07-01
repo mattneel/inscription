@@ -8683,6 +8683,147 @@ Give result plus seen.
             self.assertFalse((failing / "build" / "liblibrary.a").exists())
 
 
+    def test_v053_build_book_steps_parser_and_diagnostics(self):
+        source = (
+            "Import Build.\n\n"
+            "To build package package: Build.Package.\n"
+            "Build.book named \"book\".\n"
+            "Build.book checked named \"book-check\".\n"
+            "Build.group named \"docs\" with steps \"book\" and \"book-check\".\n"
+            "Build.default step is \"docs\".\n"
+        )
+        script = parse_build_script(source)
+        self.assertEqual(script.default_step, "docs")
+        self.assertEqual([(step.name, step.emit, step.dependencies) for step in script.steps], [
+            ("book", "book", ()),
+            ("book-check", "book-check", ()),
+            ("docs", "group", ("book", "book-check")),
+        ])
+        formatted = format_source(source)
+        self.assertEqual(format_source(formatted), formatted)
+
+        cases = {
+            "duplicate book name": (
+                "Import Build.\n\nTo build package package: Build.Package.\n"
+                "Build.book named \"docs\".\nBuild.static library named \"docs\".\n",
+                "build step docs is already defined",
+            ),
+            "bad book name": (
+                "Import Build.\n\nTo build package package: Build.Package.\nBuild.book named \"../docs\".\n",
+                "build step name must not contain path separators",
+            ),
+            "unknown docs phrase": (
+                "Import Build.\n\nTo build package package: Build.Package.\nBuild.docs named \"docs\".\n",
+                "unknown Build API phrase `Build.docs named _`",
+            ),
+        }
+        for name, (case_source, contains) in cases.items():
+            with self.subTest(name=name):
+                with self.assertRaises(InscriptionError) as ctx:
+                    parse_build_script(case_source)
+                self.assertIn(contains, str(ctx.exception))
+
+    def test_v053_build_book_steps_execution_and_diagnostics(self):
+        env = {**os.environ, "PYTHONPATH": str(SRC)}
+        fixture = ROOT / "tests" / "fixtures" / "packages" / "build_script_book_package"
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            package = tmp_path / "build_script_book_package"
+            shutil.copytree(fixture, package)
+
+            list_proc = subprocess.run(
+                [sys.executable, "-m", "inscription", "build", str(package), "--list"],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(list_proc.returncode, 0, list_proc.stderr)
+            self.assertIn("build step book: book\n", list_proc.stdout)
+            self.assertIn("build step book-check: book checked\n", list_proc.stdout)
+            self.assertIn("build step ci: group -> check, tests, book-check\n", list_proc.stdout)
+            self.assertIn("build default: ci\n", list_proc.stdout)
+
+            missing_book = tmp_path / "missing_book"
+            shutil.copytree(fixture, missing_book)
+            shutil.rmtree(missing_book / "book")
+            missing_book_proc = subprocess.run(
+                [sys.executable, "-m", "inscription", "build", str(missing_book), "book"],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(missing_book_proc.returncode, 2)
+            self.assertIn("book step book requires book/book.toml", missing_book_proc.stderr)
+
+            missing_checker = tmp_path / "missing_checker"
+            shutil.copytree(fixture, missing_checker)
+            (missing_checker / "book" / "tools" / "check_book_examples.py").unlink()
+            missing_checker_proc = subprocess.run(
+                [sys.executable, "-m", "inscription", "build", str(missing_checker), "book-check"],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(missing_checker_proc.returncode, 2)
+            self.assertIn(
+                "book check step book-check requires book/tools/check_book_examples.py",
+                missing_checker_proc.stderr,
+            )
+
+            if shutil.which("mdbook") is None:
+                self.skipTest("mdBook is not installed")
+
+            book_proc = subprocess.run(
+                [sys.executable, "-m", "inscription", "build", str(package), "book"],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(book_proc.returncode, 0, book_proc.stderr)
+            self.assertIn("build step book ... ok", book_proc.stdout)
+            self.assertTrue((package / "build" / "book" / "index.html").exists())
+
+            check_proc = subprocess.run(
+                [sys.executable, "-m", "inscription", "build", str(package), "book-check"],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(check_proc.returncode, 0, check_proc.stderr)
+            self.assertIn("build step book-check ... ok", check_proc.stdout)
+            self.assertTrue((package / "build" / "book-check" / "index.html").exists())
+
+            default_proc = subprocess.run(
+                [sys.executable, "-m", "inscription", "build", str(package)],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(default_proc.returncode, 0, default_proc.stderr)
+            self.assertIn("build step check ... ok", default_proc.stdout)
+            self.assertIn("build step tests ... ok", default_proc.stdout)
+            self.assertIn("build step book-check ... ok", default_proc.stdout)
+            self.assertIn("build step ci ... ok", default_proc.stdout)
+
+
 class FormatterTests(unittest.TestCase):
     def cli(self, *args: str, cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
         return subprocess.run(

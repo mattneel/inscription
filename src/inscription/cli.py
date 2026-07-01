@@ -170,13 +170,13 @@ def main(argv: list[str] | None = None) -> int:
     package_build_p.add_argument("--verify", action="store_true", help="verify emitted artifacts with the LLVM/MLIR 22 toolchain")
     _add_optimization_args(package_build_p)
 
-    build_p = sub.add_parser("build", help="interpret build.ins and build requested package artifacts")
+    build_p = sub.add_parser("build", help="interpret build.ins and run package workflow/artifact/documentation steps")
     build_p.add_argument("build_args", nargs="*", help="optional PACKAGE_ROOT and optional STEP name")
     build_p.add_argument("--runtime-checks", action="store_true", help="emit runtime assertions for dynamic storage bounds")
     build_p.add_argument(
         "--save-temps",
         type=Path,
-        help="directory for per-step source MLIR, optimized MLIR when enabled, lowered MLIR, LLVM IR, and object intermediates",
+        help="directory for per-step compiler/test intermediates; documentation steps write to build/<step>",
     )
     build_p.add_argument("--list", action="store_true", help="list build.ins steps without building")
     build_p.add_argument("--verify", action="store_true", help="verify emitted artifacts with the LLVM/MLIR 22 toolchain")

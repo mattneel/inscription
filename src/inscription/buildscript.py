@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import re
+import shutil
+import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -26,6 +29,8 @@ _BUILD_CALLS: dict[str, str] = {
     "Build.check package named": "package-check",
     "Build.tests including dependencies named": "package-tests-with-dependencies",
     "Build.tests named": "package-tests",
+    "Build.book checked named": "book-check",
+    "Build.book named": "book",
     "Build.static library named": "static-library",
     "Build.executable named": "executable",
     "Build.c header named": "c-header",
@@ -50,6 +55,8 @@ _STEP_DISPLAY: dict[str, str] = {
     "package-check": "check package",
     "package-tests": "tests",
     "package-tests-with-dependencies": "tests including dependencies",
+    "book": "book",
+    "book-check": "book checked",
 }
 
 
@@ -486,6 +493,11 @@ def _run_step(
             executed.add(step.name)
         results.append(BuildExecutionResult(step, test_summary=summary, failed=failed))
         return failed
+    if step.emit in {"book", "book-check"}:
+        output = build_book_step(root, step, checked=step.emit == "book-check")
+        executed.add(step.name)
+        results.append(BuildExecutionResult(step, output))
+        return False
 
     output = output_path_for_step(root, step)
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -505,3 +517,53 @@ def _run_step(
     executed.add(step.name)
     results.append(BuildExecutionResult(step, output, result))
     return False
+
+
+def build_book_step(package_root: Path, step: BuildStep, *, checked: bool) -> Path:
+    book_root = package_root / "book"
+    book_toml = book_root / "book.toml"
+    if not book_toml.exists():
+        raise InscriptionError(f"book step {step.name} requires book/book.toml", step.line)
+    if checked:
+        checker = book_root / "tools" / "check_book_examples.py"
+        if not checker.exists():
+            raise InscriptionError(
+                f"book check step {step.name} requires book/tools/check_book_examples.py",
+                step.line,
+            )
+        _run_book_checker(package_root, step, checker)
+    mdbook = shutil.which("mdbook")
+    if mdbook is None:
+        raise InscriptionError("book step requires mdbook, but mdbook was not found", step.line)
+    output = package_root / "build" / step.name
+    if output.exists():
+        if output.is_dir():
+            shutil.rmtree(output)
+        else:
+            output.unlink()
+    output.parent.mkdir(parents=True, exist_ok=True)
+    relative_output = Path("build") / step.name
+    completed = subprocess.run(
+        [mdbook, "build", "book", "--dest-dir", str(relative_output)],
+        cwd=package_root,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        check=False,
+    )
+    if completed.returncode != 0:
+        raise InscriptionError(f"book step {step.name} failed", step.line)
+    return output
+
+
+def _run_book_checker(package_root: Path, step: BuildStep, checker: Path) -> None:
+    completed = subprocess.run(
+        [sys.executable, str(Path("book") / "tools" / "check_book_examples.py")],
+        cwd=package_root,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        check=False,
+    )
+    if completed.returncode != 0:
+        raise InscriptionError(f"book check step {step.name} failed", step.line)

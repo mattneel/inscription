@@ -11,13 +11,13 @@ The full language guide now lives in **[The Inscription Book](book/src/title-pag
 
 ## Status
 
-This repository currently implements **Inscription v0.52: build step groups and default step**. v0.52 extends the narrow interpreted `build.ins` package build script with named step groups, deterministic group dependencies, and a default build step on top of package check/test/artifact requests. The existing v0.49 `comptime` scalar evaluation, v0.48 interpreter groundwork, v0.47 package path dependencies, package-aware static libraries, executables, LLVM IR, interface JSON, and C headers, first-class source tests, comments, documentation comments, owned buffer literal/copy initialization, pattern alternatives, integer ranges, match guards, exhaustive matches, and move-aware owned-buffer control flow remain available. The mdBook documentation site remains the primary language guide.
+This repository currently implements **Inscription v0.53: documentation build steps**. v0.53 extends the narrow interpreted `build.ins` package build script with sandboxed mdBook documentation steps on top of named groups, defaults, package check/test steps, and artifact requests. The existing v0.49 `comptime` scalar evaluation, v0.48 interpreter groundwork, v0.47 package path dependencies, package-aware static libraries, executables, LLVM IR, interface JSON, and C headers, first-class source tests, comments, documentation comments, owned buffer literal/copy initialization, pattern alternatives, integer ranges, match guards, exhaustive matches, and move-aware owned-buffer control flow remain available. The mdBook documentation site remains the primary language guide.
 
 The current language includes:
 
 - scalar integer, float, and boolean types
 - deterministic prose-punctuation syntax, `then` parent continuations, canonical formatter, ordinary comments, documentation comments, first-class tests, test-time `Expect` assertions, declarative package manifests, narrow interpreted build scripts, and pure-subset interpreter groundwork
-- modules, imports, package-aware module roots, local path dependencies, package build artifact routing, and `build.ins` named artifact/check/test/group steps
+- modules, imports, package-aware module roots, local path dependencies, package build artifact routing, and `build.ins` named artifact/check/test/group/book steps
 - constants, checks, `comptime` scalar/enum phrase-call evaluation, runtime `Require`, and optional `--runtime-checks`
 - phrases, extern declarations, and scalar exported phrases
 - records, layout records, nominal enums, tagged unions, exhaustive matches, wildcard `anything` patterns, match guards, pattern alternatives, integer ranges, and ignored union payload fields
@@ -219,7 +219,7 @@ Expect add 20 and 22 is equal to 42.
 
 Run them with `inscription test SOURCE`; use `--list` to list discovered tests and `--filter TEXT` to run matching test display names.
 
-Package manifests live in `package.ins`. They are declarative metadata, not executable build scripts: package metadata, source/test directory layout, a root module, exposed module validation, local path dependencies, and package-aware artifact builds stay parse-only. v0.52 extends optional `build.ins` interpreted build scripts with named groups and a default step on top of package check/test workflow steps and standard artifacts, while remote dependencies, registries, lockfiles, version solvers, arbitrary filesystem/process APIs, and custom build graph scripting remain out of scope.
+Package manifests live in `package.ins`. They are declarative metadata, not executable build scripts: package metadata, source/test directory layout, a root module, exposed module validation, local path dependencies, and package-aware artifact builds stay parse-only. v0.53 extends optional `build.ins` interpreted build scripts with mdBook documentation steps on top of named groups, defaults, package check/test workflow steps, and standard artifacts, while remote dependencies, registries, lockfiles, version solvers, arbitrary filesystem/process APIs, and custom build graph scripting remain out of scope.
 
 ```inscription
 //! Package manifest for ProtocolTools.
@@ -241,7 +241,7 @@ Depend on Checksums from path "../checksums".
 
 Run `inscription package check` to validate the manifest, source layout, and dependency graph. Run `inscription package test` to discover `.ins` test files under the manifest's test directory using the package source directory and direct dependency exposed modules for imports; add `--include-dependencies` to run dependency package tests. Run `inscription package build` to emit package artifacts; the default artifact is `build/lib<Package>.a`, and root package headers intentionally omit dependency exports.
 
-Optional build scripts live in `build.ins`. They are interpreted build logic, not declarative package metadata. v0.52 requires `Import Build.` and a does phrase named `build package` that takes an opaque `Build.Package` parameter. Build API calls record named package validation, test, artifact, and group steps; the driver then dispatches them through existing package check/test/build machinery with deterministic group dependencies.
+Optional build scripts live in `build.ins`. They are interpreted build logic, not declarative package metadata. v0.53 requires `Import Build.` and a does phrase named `build package` that takes an opaque `Build.Package` parameter. Build API calls record named package validation, test, artifact, documentation, and group steps; the driver then dispatches them through existing package check/test/build machinery with deterministic group dependencies.
 
 ```inscription
 Import Build.
@@ -253,11 +253,12 @@ Build.static library named "library".
 Build.c header named "header".
 Build.interface json named "interface".
 Build.executable named "app".
-Build.group named "ci" with steps "check" and "tests".
+Build.book checked named "book".
+Build.group named "ci" with steps "check" and "tests" and "book".
 Build.default step is "ci".
 ```
 
-Run `inscription build path/to/package --list` to list steps and the default, `inscription build path/to/package ci` to run a group, `inscription build path/to/package library` to build one artifact step, or `inscription build path/to/package` to run the declared default step. If no default is declared, a bare build preserves source-order ordinary step execution and skips groups unless requested. Step names are simple names, not paths; outputs go under `build/`. Build scripts cannot import package modules, call externs, spawn processes, read files, perform arbitrary I/O, or define custom output paths in v0.52.
+Run `inscription build path/to/package --list` to list steps and the default, `inscription build path/to/package ci` to run a group, `inscription build path/to/package library` to build one artifact step, or `inscription build path/to/package` to run the declared default step. If no default is declared, a bare build preserves source-order ordinary step execution and skips groups unless requested. Step names are simple names, not paths; outputs go under `build/`. Build scripts cannot import package modules, call externs, spawn arbitrary processes, read arbitrary files, perform arbitrary I/O, deploy docs, or define custom output paths in v0.53.
 
 
 ## Compile-time evaluation and interpreter groundwork
@@ -271,7 +272,7 @@ Give x times x.
 Constant sixteen: i32 be comptime square 4.
 ```
 
-`comptime` calls are evaluated by the internal deterministic interpreter and emit ordinary constants; no runtime call is lowered. v0.49 supports scalar and enum arguments/results, pure phrase calls, control flow, matches, guards, alternatives, ranges, casts, and arithmetic. It intentionally rejects storage, owned buffers, views, extern calls, unsupported result types, and step-limit exhaustion. `package.ins` remains declarative. `build.ins` uses the same interpreter groundwork for a restricted build-script surface with check/test/build/group steps, and `comptime` remains separate from macros or reflection.
+`comptime` calls are evaluated by the internal deterministic interpreter and emit ordinary constants; no runtime call is lowered. v0.49 supports scalar and enum arguments/results, pure phrase calls, control flow, matches, guards, alternatives, ranges, casts, and arithmetic. It intentionally rejects storage, owned buffers, views, extern calls, unsupported result types, and step-limit exhaustion. `package.ins` remains declarative. `build.ins` uses the same interpreter groundwork for a restricted build-script surface with check/test/build/group/book steps, and `comptime` remains separate from macros or reflection.
 
 v0.48 introduced `src/inscription/interpreter.py`, an internal deterministic interpreter for checked pure phrases over scalar, enum, record, layout-record-as-value, and union values. It supports selected expression and control-flow evaluation for compiler tests and static tooling, with deterministic diagnostics for unsupported features. It is not a stable user-facing runtime interpretation mode.
 
@@ -282,8 +283,8 @@ v0.48 introduced `src/inscription/interpreter.py`, an internal deterministic int
 - [`book/tools/check_book_examples.py`](book/tools/check_book_examples.py): deterministic book example checker
 - [`book/tools/inscription_mdbook_preprocessor.py`](book/tools/inscription_mdbook_preprocessor.py): mdBook preprocessor that reuses Inscription's own highlighter
 - [`docs/github-pages.md`](docs/github-pages.md): GitHub Pages setup notes
-- [`docs/inscription-v0.52-spec.md`](docs/inscription-v0.52-spec.md): current language sprint spec
-- [`grammar/inscription-v0.52.ebnf`](grammar/inscription-v0.52.ebnf): current grammar mirror
+- [`docs/inscription-v0.53-spec.md`](docs/inscription-v0.53-spec.md): current language sprint spec
+- [`grammar/inscription-v0.53.ebnf`](grammar/inscription-v0.53.ebnf): current grammar mirror
 
 ## Testing
 

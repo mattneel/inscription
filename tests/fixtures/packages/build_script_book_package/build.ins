@@ -1,0 +1,9 @@
+Import Build.
+
+To build package package: Build.Package.
+Build.check package named "check".
+Build.tests named "tests".
+Build.book named "book".
+Build.book checked named "book-check".
+Build.group named "ci" with steps "check" and "tests" and "book-check".
+Build.default step is "ci".

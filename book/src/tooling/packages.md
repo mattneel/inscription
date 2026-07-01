@@ -1,6 +1,6 @@
 # Packages
 
-Inscription v0.45 added a declarative package manifest named `package.ins`; v0.46 added package-aware artifact builds; v0.47 added local path dependencies; v0.50 added optional `build.ins` scripts, v0.51 added check/test steps, and v0.52 adds groups/default steps. The manifest is metadata, not executable build logic: think `build.zig.zon`, not `build.zig`. `build.ins` is the intentionally narrow interpreted build surface for named package workflow and artifact steps.
+Inscription v0.45 added a declarative package manifest named `package.ins`; v0.46 added package-aware artifact builds; v0.47 added local path dependencies; v0.50 added optional `build.ins` scripts, v0.51 added check/test steps, and v0.52 added groups/default steps; v0.53 adds mdBook documentation steps. The manifest is metadata, not executable build logic: think `build.zig.zon`, not `build.zig`. `build.ins` is the intentionally narrow interpreted build surface for named package workflow and artifact steps.
 
 A package root contains `package.ins`, a source directory, and optionally a test directory:
 
@@ -106,11 +106,12 @@ Build.tests named "tests".
 Build.static library named "library".
 Build.c header named "header".
 Build.interface json named "interface".
-Build.group named "ci" with steps "check" and "tests".
+Build.book checked named "book".
+Build.group named "ci" with steps "check" and "tests" and "book".
 Build.default step is "ci".
 ```
 
-Use `inscription build path/to/package --list` to list the script's named steps and default, `inscription build path/to/package ci` to run a group, `inscription build path/to/package library` to build one artifact step, or `inscription build path/to/package` to run the declared default step. v0.52 build scripts call only the built-in `Build` API for package check/test/build/group requests; they cannot run shell commands, access arbitrary files, import package source modules, or customize output paths.
+Use `inscription build path/to/package --list` to list the script's named steps and default, `inscription build path/to/package ci` to run a group, `inscription build path/to/package library` to build one artifact step, or `inscription build path/to/package` to run the declared default step. v0.53 build scripts call only the built-in `Build` API for package check/test/build/group/book requests; they cannot run shell commands, access arbitrary files, import package source modules, or customize output paths.
 
 ## Package builds
 
@@ -130,4 +131,4 @@ Library-like emits (`mlir`, `lowered-mlir`, `llvm-ir`, `object`, `static-library
 
 Package interface JSON includes a top-level `package` object with manifest metadata and direct dependency metadata. Package C headers include exported scalar phrases from the root package root/exposed modules and preserve exported phrase documentation comments; dependency exports are intentionally omitted from the root package header. Build the dependency package separately when you need its header. `--save-temps DIR` writes deterministic package intermediates such as `ProtocolTools.mlir`, `ProtocolTools.lowered.mlir`, `ProtocolTools.ll`, and `ProtocolTools.o`.
 
-Remote dependencies, registries, lockfiles, version solving, target triples, build profiles, custom output paths, arbitrary filesystem/process/network access, and general build graph scripting remain future work. See [Build Scripts](build-scripts.md) for the v0.52 `build.ins` surface.
+Remote dependencies, registries, lockfiles, version solving, target triples, build profiles, custom output paths, arbitrary filesystem/process/network access, and general build graph scripting remain future work. See [Build Scripts](build-scripts.md) for the v0.53 `build.ins` surface.
