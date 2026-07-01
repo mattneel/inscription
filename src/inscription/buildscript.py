@@ -14,6 +14,7 @@ from .package import (
     PackageTestSummary,
     build_package_artifact,
     check_package,
+    clean_package,
     format_package,
     load_package_context,
     run_package_tests,
@@ -28,6 +29,7 @@ BUILD_SCRIPT_NAME = "build.ins"
 _BUILD_STEP_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_-]*")
 _STANDARD_WORKFLOW_PHRASE = "Build.standard package workflow"
 _BUILD_CALLS: dict[str, str] = {
+    "Build.clean package named": "package-clean",
     "Build.format check named": "package-format-check",
     "Build.format package named": "package-format-in-place",
     "Build.check package named": "package-check",
@@ -45,6 +47,7 @@ _BUILD_CALLS: dict[str, str] = {
     "Build.lowered mlir named": "lowered-mlir",
 }
 _PACKAGE_DEFAULT_CALLS: dict[str, tuple[str, str]] = {
+    "Build.clean package": ("clean", "package-clean"),
     "Build.static library for package": ("library", "static-library"),
     "Build.executable for package": ("app", "executable"),
     "Build.c header for package": ("header", "c-header"),
@@ -68,6 +71,7 @@ _OUTPUT_SUFFIXES: dict[str, tuple[str, str]] = {
 }
 _ARTIFACT_EMITS = frozenset(_OUTPUT_SUFFIXES)
 _STEP_DISPLAY: dict[str, str] = {
+    "package-clean": "clean package",
     "package-format-check": "format check",
     "package-format-in-place": "format package",
     "package-check": "check package",
@@ -557,6 +561,11 @@ def _run_step(
             )
         except InscriptionError as exc:
             raise InscriptionError(f"build step {step.name} ... FAILED\n{exc}", step.line) from exc
+        executed.add(step.name)
+        results.append(BuildExecutionResult(step))
+        return False
+    if step.emit == "package-clean":
+        clean_package(root)
         executed.add(step.name)
         results.append(BuildExecutionResult(step))
         return False

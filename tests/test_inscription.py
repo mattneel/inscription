@@ -9505,6 +9505,138 @@ Give result plus seen.
             self.assertEqual(include_book_in_place.returncode, 2)
             self.assertIn("package format --include-book --in-place is not supported in v0.57", include_book_in_place.stderr)
 
+    def test_v058_package_clean_cli_and_dependency_behavior(self):
+        env = {**os.environ, "PYTHONPATH": str(SRC)}
+
+        def run_cli(*args: str | Path) -> subprocess.CompletedProcess[str]:
+            return subprocess.run(
+                [sys.executable, "-m", "inscription", *(str(arg) for arg in args)],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            package = tmp_path / "clean-hello"
+            new_proc = run_cli("package", "new", package, "--name", "CleanHello")
+            self.assertEqual(new_proc.returncode, 0, new_proc.stderr)
+
+            no_build = run_cli("package", "clean", package)
+            self.assertEqual(no_build.returncode, 0, no_build.stderr)
+            self.assertEqual(no_build.stdout, "package clean: nothing to clean\n")
+
+            build_dir = package / "build"
+            build_dir.mkdir()
+            (build_dir / "artifact.txt").write_text("artifact\n")
+            dry_run = run_cli("package", "clean", package, "--dry-run")
+            self.assertEqual(dry_run.returncode, 0, dry_run.stderr)
+            self.assertEqual(dry_run.stdout, "package clean: would remove build\n")
+            self.assertTrue(build_dir.exists())
+
+            clean = run_cli("package", "clean", package)
+            self.assertEqual(clean.returncode, 0, clean.stderr)
+            self.assertEqual(clean.stdout, "package clean: removed build\n")
+            self.assertFalse(build_dir.exists())
+
+            app = tmp_path / "app_with_dependency"
+            dependency = tmp_path / "checksums_package"
+            shutil.copytree(ROOT / "tests" / "fixtures" / "packages" / "app_with_dependency", app)
+            shutil.copytree(ROOT / "tests" / "fixtures" / "packages" / "checksums_package", dependency)
+            (app / "build").mkdir()
+            (dependency / "build").mkdir()
+            root_only = run_cli("package", "clean", app)
+            self.assertEqual(root_only.returncode, 0, root_only.stderr)
+            self.assertFalse((app / "build").exists())
+            self.assertTrue((dependency / "build").exists())
+
+            (app / "build").mkdir()
+            include_deps = run_cli("package", "clean", app, "--include-dependencies")
+            self.assertEqual(include_deps.returncode, 0, include_deps.stderr)
+            self.assertIn("package App: removed build\n", include_deps.stdout)
+            self.assertIn("package Checksums: removed build\n", include_deps.stdout)
+            self.assertFalse((app / "build").exists())
+            self.assertFalse((dependency / "build").exists())
+
+            symlink_package = tmp_path / "symlink"
+            symlink_proc = run_cli("package", "new", symlink_package, "--name", "SymlinkPkg")
+            self.assertEqual(symlink_proc.returncode, 0, symlink_proc.stderr)
+            try:
+                (symlink_package / "build").symlink_to(tmp_path, target_is_directory=True)
+            except OSError as exc:
+                self.skipTest(f"symlinks unavailable: {exc}")
+            symlink_clean = run_cli("package", "clean", symlink_package)
+            self.assertEqual(symlink_clean.returncode, 2)
+            self.assertIn("package clean refuses to remove symlink build", symlink_clean.stderr)
+            self.assertTrue((symlink_package / "build").is_symlink())
+
+    def test_v058_build_clean_steps_and_diagnostics(self):
+        env = {**os.environ, "PYTHONPATH": str(SRC)}
+
+        def run_cli(*args: str | Path) -> subprocess.CompletedProcess[str]:
+            return subprocess.run(
+                [sys.executable, "-m", "inscription", *(str(arg) for arg in args)],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+
+        source = (
+            "Import Build.\n\n"
+            "To build package package: Build.Package.\n"
+            "Build.clean package.\n"
+            "Build.clean package named \"clean\".\n"
+        )
+        with self.assertRaises(InscriptionError) as ctx:
+            parse_build_script(source)
+        self.assertIn("build step clean is already defined", str(ctx.exception))
+
+        parsed = parse_build_script(
+            "Import Build.\n\n"
+            "To build package package: Build.Package.\n"
+            "Build.clean package named \"wipe\".\n"
+            "Build.clean package.\n"
+            "Build.group named \"fresh\" with steps \"clean\" and \"wipe\".\n"
+        )
+        self.assertEqual([(step.name, step.emit, step.dependencies) for step in parsed.steps], [
+            ("wipe", "package-clean", ()),
+            ("clean", "package-clean", ()),
+            ("fresh", "group", ("clean", "wipe")),
+        ])
+
+        with tempfile.TemporaryDirectory() as tmp:
+            package = Path(tmp) / "build_script_clean_package"
+            shutil.copytree(ROOT / "tests" / "fixtures" / "packages" / "build_script_clean_package", package)
+
+            list_proc = run_cli("build", package, "--list")
+            self.assertEqual(list_proc.returncode, 0, list_proc.stderr)
+            self.assertIn("build step clean: clean package\n", list_proc.stdout)
+            self.assertIn("build step fresh: group -> clean, release\n", list_proc.stdout)
+            self.assertIn("build step release: group -> ci, library, header, interface\n", list_proc.stdout)
+
+            release_proc = run_cli("build", package, "release")
+            self.assertEqual(release_proc.returncode, 0, release_proc.stderr)
+            self.assertTrue((package / "build" / "libCleanPkg.a").exists())
+            self.assertTrue((package / "build" / "CleanPkg.h").exists())
+            self.assertTrue((package / "build" / "CleanPkg.json").exists())
+
+            clean_proc = run_cli("build", package, "clean")
+            self.assertEqual(clean_proc.returncode, 0, clean_proc.stderr)
+            self.assertIn("build step clean ... ok", clean_proc.stdout)
+            self.assertFalse((package / "build").exists())
+
+            fresh_proc = run_cli("build", package, "fresh")
+            self.assertEqual(fresh_proc.returncode, 0, fresh_proc.stderr)
+            self.assertIn("build step clean ... ok", fresh_proc.stdout)
+            self.assertIn("build step release ... ok", fresh_proc.stdout)
+            self.assertTrue((package / "build" / "libCleanPkg.a").exists())
+
 
 class FormatterTests(unittest.TestCase):
     def cli(self, *args: str, cwd: Path | None = None) -> subprocess.CompletedProcess[str]:

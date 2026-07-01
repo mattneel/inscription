@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import shutil
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -105,6 +106,15 @@ class PackageFormatResult:
     package_name: str
     files: tuple[Path, ...]
     changed: tuple[Path, ...]
+
+
+@dataclass(frozen=True)
+class PackageCleanResult:
+    package_name: str
+    root: Path
+    target: Path
+    removed: bool
+    dry_run: bool
 
 
 @dataclass(frozen=True)
@@ -1000,6 +1010,40 @@ def _check_package_book_examples(context: PackageContext) -> None:
     )
     if completed.returncode != 0:
         raise InscriptionError("package book example formatting check failed")
+
+
+def clean_package(
+    root: Path,
+    *,
+    include_dependencies: bool = False,
+    dry_run: bool = False,
+) -> tuple[PackageCleanResult, ...]:
+    graph = load_package_graph(root)
+    contexts = graph.packages if include_dependencies else (graph.root,)
+    results: list[PackageCleanResult] = []
+    for context in contexts:
+        target = context.root / "build"
+        removed = _clean_package_build_dir(context, target, dry_run=dry_run)
+        results.append(PackageCleanResult(context.manifest.package_name, context.root, target, removed, dry_run))
+    return tuple(results)
+
+
+def _clean_package_build_dir(context: PackageContext, target: Path, *, dry_run: bool) -> bool:
+    root = context.root.resolve()
+    if target.is_symlink():
+        raise InscriptionError("package clean refuses to remove symlink build")
+    if not target.exists():
+        return False
+    try:
+        target.resolve(strict=False).relative_to(root)
+    except ValueError:
+        raise InscriptionError("package clean target build is outside the package root")
+    if not target.is_dir():
+        raise InscriptionError("package clean expected build to be a directory")
+    if dry_run:
+        return True
+    shutil.rmtree(target)
+    return True
 
 
 def init_package(

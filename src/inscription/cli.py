@@ -13,6 +13,7 @@ from .interface import emit_c_header, emit_interface_json, load_interface_contex
 from .package import (
     build_package_artifact,
     check_package,
+    clean_package,
     format_package,
     init_package,
     list_package_tests,
@@ -170,6 +171,10 @@ def main(argv: list[str] | None = None) -> int:
     package_format_p.add_argument("--in-place", action="store_true", help="overwrite package files with canonical formatting")
     package_format_p.add_argument("--include-dependencies", action="store_true", help="also format/check local path dependencies")
     package_format_p.add_argument("--include-book", action="store_true", help="also run the package book example checker when present")
+    package_clean_p = package_sub.add_parser("clean", help="remove generated package build artifacts")
+    package_clean_p.add_argument("root", nargs="?", type=Path, default=Path("."), help="package root containing package.ins")
+    package_clean_p.add_argument("--include-dependencies", action="store_true", help="also clean local path dependency packages")
+    package_clean_p.add_argument("--dry-run", action="store_true", help="print what would be removed without deleting files")
     package_build_p = package_sub.add_parser("build", help="build package artifacts")
     package_build_p.add_argument("root", nargs="?", type=Path, default=Path("."), help="package root containing package.ins")
     package_build_p.add_argument(
@@ -420,6 +425,27 @@ def main(argv: list[str] | None = None) -> int:
                     print(f"package {result.package_name}: format ok")
                 else:
                     print(f"package {result.package_name}: formatted")
+                return 0
+            if args.package_command == "clean":
+                results = clean_package(
+                    args.root,
+                    include_dependencies=args.include_dependencies,
+                    dry_run=args.dry_run,
+                )
+                for result in results:
+                    action = "would remove" if result.dry_run else "removed"
+                    if not result.removed:
+                        action = "nothing to clean"
+                    if args.include_dependencies:
+                        if result.removed:
+                            print(f"package {result.package_name}: {action} build")
+                        else:
+                            print(f"package {result.package_name}: {action}")
+                    else:
+                        if result.removed:
+                            print(f"package clean: {action} build")
+                        else:
+                            print(f"package clean: {action}")
                 return 0
             if args.package_command == "build":
                 result = build_package_artifact(
