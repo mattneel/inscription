@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import re
+import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
@@ -96,6 +98,13 @@ class PackageBuildResult:
     output_path: Path | None = None
     text: str | None = None
     data: bytes | None = None
+
+
+@dataclass(frozen=True)
+class PackageFormatResult:
+    package_name: str
+    files: tuple[Path, ...]
+    changed: tuple[Path, ...]
 
 
 @dataclass(frozen=True)
@@ -883,6 +892,114 @@ def _test_contexts(graph: PackageGraph, *, include_dependencies: bool) -> tuple[
 
 def _package_test_prefix(path: Path, context: PackageContext) -> str:
     return f"{context.manifest.package_name}::{_relative_for_message(path.resolve(), context.root.resolve())}"
+
+
+def package_format_files(context: PackageContext) -> tuple[Path, ...]:
+    paths: list[Path] = []
+    seen: set[Path] = set()
+
+    def append(path: Path) -> None:
+        resolved = path.resolve()
+        if resolved in seen or not path.exists() or not path.is_file():
+            return
+        seen.add(resolved)
+        paths.append(path)
+
+    append(context.manifest_path)
+    append(context.root / "build.ins")
+    if context.sources_dir.is_dir():
+        for path in sorted(context.sources_dir.rglob("*.ins")):
+            if _is_package_format_path(path, context.root):
+                append(path)
+    tests_dir = context.tests_dir
+    if tests_dir is not None and tests_dir.is_dir():
+        for path in sorted(tests_dir.rglob("*.ins")):
+            if _is_package_format_path(path, context.root):
+                append(path)
+    return tuple(paths)
+
+
+def format_package(
+    root: Path,
+    *,
+    check: bool,
+    in_place: bool,
+    include_dependencies: bool = False,
+    include_book: bool = False,
+) -> PackageFormatResult:
+    if check and in_place:
+        raise InscriptionError("--check cannot be used with --in-place")
+    if not check and not in_place:
+        raise InscriptionError("package format requires --check or --in-place")
+    if include_book and in_place:
+        raise InscriptionError("package format --include-book --in-place is not supported in v0.57")
+
+    graph = load_package_graph(root)
+    contexts = graph.packages if include_dependencies else (graph.root,)
+    formatted_by_path: dict[Path, str] = {}
+    failures: list[str] = []
+    all_files: list[Path] = []
+    changed: list[Path] = []
+
+    from .formatter import format_file
+
+    for context in contexts:
+        for path in package_format_files(context):
+            all_files.append(path)
+            original = path.read_text()
+            try:
+                formatted = format_file(path)
+            except InscriptionError as exc:
+                raise InscriptionError(f"{_relative_for_message(path, context.root)}: {exc}") from exc
+            formatted_by_path[path] = formatted
+            if formatted != original:
+                changed.append(path)
+                failures.append(f"formatting check failed: {_relative_for_message(path, context.root)} is not formatted")
+        if include_book:
+            _check_package_book_examples(context)
+
+    if check and failures:
+        raise InscriptionError("\n".join(failures))
+    if in_place:
+        for path in changed:
+            path.write_text(formatted_by_path[path])
+    return PackageFormatResult(graph.root.manifest.package_name, tuple(all_files), tuple(changed))
+
+
+def _is_package_format_path(path: Path, root: Path) -> bool:
+    try:
+        relative = path.resolve().relative_to(root.resolve())
+    except ValueError:
+        return False
+    parts = relative.parts
+    if any(part.startswith(".") for part in parts):
+        return False
+    if "__pycache__" in parts or ".venv" in parts or ".git" in parts:
+        return False
+    if parts and parts[0] == "build":
+        return False
+    if len(parts) >= 2 and parts[0] == "book" and parts[1] == "book":
+        return False
+    return True
+
+
+def _check_package_book_examples(context: PackageContext) -> None:
+    book_toml = context.root / "book" / "book.toml"
+    if not book_toml.exists():
+        return
+    checker = context.root / "book" / "tools" / "check_book_examples.py"
+    if not checker.exists():
+        raise InscriptionError("package format --include-book requires book/tools/check_book_examples.py")
+    completed = subprocess.run(
+        [sys.executable, str(Path("book") / "tools" / "check_book_examples.py")],
+        cwd=context.root,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        check=False,
+    )
+    if completed.returncode != 0:
+        raise InscriptionError("package book example formatting check failed")
 
 
 def init_package(

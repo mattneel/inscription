@@ -10,7 +10,15 @@ from .compiler import compile_file, load_program
 from .diagnostics import InscriptionError
 from .formatter import format_file
 from .interface import emit_c_header, emit_interface_json, load_interface_context
-from .package import build_package_artifact, check_package, init_package, list_package_tests, new_package, run_package_tests
+from .package import (
+    build_package_artifact,
+    check_package,
+    format_package,
+    init_package,
+    list_package_tests,
+    new_package,
+    run_package_tests,
+)
 from .mlir import emit_mlir
 from .runner import (
     EMIT_MODES,
@@ -156,6 +164,12 @@ def main(argv: list[str] | None = None) -> int:
     package_test_p.add_argument("--list", action="store_true", help="list discovered package tests without running them")
     package_test_p.add_argument("--include-dependencies", action="store_true", help="also run tests from local path dependencies")
     _add_optimization_args(package_test_p)
+    package_format_p = package_sub.add_parser("format", help="check or rewrite package Inscription formatting")
+    package_format_p.add_argument("root", nargs="?", type=Path, default=Path("."), help="package root containing package.ins")
+    package_format_p.add_argument("--check", action="store_true", help="exit 0 only when package files are already formatted")
+    package_format_p.add_argument("--in-place", action="store_true", help="overwrite package files with canonical formatting")
+    package_format_p.add_argument("--include-dependencies", action="store_true", help="also format/check local path dependencies")
+    package_format_p.add_argument("--include-book", action="store_true", help="also run the package book example checker when present")
     package_build_p = package_sub.add_parser("build", help="build package artifacts")
     package_build_p.add_argument("root", nargs="?", type=Path, default=Path("."), help="package root containing package.ins")
     package_build_p.add_argument(
@@ -394,6 +408,19 @@ def main(argv: list[str] | None = None) -> int:
                 else:
                     print(f"test result: ok. {summary.passed} passed; 0 failed.")
                 return summary.exit_status
+            if args.package_command == "format":
+                result = format_package(
+                    args.root,
+                    check=args.check,
+                    in_place=args.in_place,
+                    include_dependencies=args.include_dependencies,
+                    include_book=args.include_book,
+                )
+                if args.check:
+                    print(f"package {result.package_name}: format ok")
+                else:
+                    print(f"package {result.package_name}: formatted")
+                return 0
             if args.package_command == "build":
                 result = build_package_artifact(
                     args.root,

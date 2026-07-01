@@ -31,4 +31,4 @@ v0.49 supports user-facing `comptime` arguments and results for `i1`, integer sc
 
 A `comptime` phrase must be pure enough for the interpreter. Scalar arithmetic, comparisons, casts, boolean and bitwise operators, matches, guards, alternatives, ranges, `When`/`Otherwise`, counted `For`, and bounded `While` are supported. Storage, owned buffers, views, layout read/write, extern calls, does phrases, test `Expect`, I/O, filesystem access, and package/build scripting are rejected.
 
-This is not a macro system. It cannot generate declarations, inspect packages, execute externs, or access the environment. `package.ins` remains declarative. v0.56 `build.ins` uses the interpreter groundwork through a separate restricted Build API, not through `comptime`.
+This is not a macro system. It cannot generate declarations, inspect packages, execute externs, or access the environment. `package.ins` remains declarative. v0.57 `build.ins` uses the interpreter groundwork through a separate restricted Build API, not through `comptime`.

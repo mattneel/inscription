@@ -1,6 +1,6 @@
 # Packages
 
-Inscription v0.45 added a declarative package manifest named `package.ins`; v0.46 added package-aware artifact builds; v0.47 added local path dependencies; v0.50 added optional `build.ins` scripts, v0.51 added check/test steps, and v0.52 added groups/default steps; v0.53 added mdBook documentation steps, v0.54 added package-aware build defaults, v0.55 added standard package workflows, and v0.56 adds package init/new skeleton generation. The manifest is metadata, not executable build logic: think `build.zig.zon`, not `build.zig`. `build.ins` is the intentionally narrow interpreted build surface for named package workflow and artifact steps.
+Inscription v0.45 added a declarative package manifest named `package.ins`; v0.46 added package-aware artifact builds; v0.47 added local path dependencies; v0.50 added optional `build.ins` scripts, v0.51 added check/test steps, and v0.52 added groups/default steps; v0.53 added mdBook documentation steps, v0.54 added package-aware build defaults, v0.55 added standard package workflows, v0.56 added package init/new skeleton generation, and v0.57 adds package-wide format checks. The manifest is metadata, not executable build logic: think `build.zig.zon`, not `build.zig`. `build.ins` is the intentionally narrow interpreted build surface for named package workflow and artifact steps.
 
 A package root contains `package.ins`, a source directory, and optionally a test directory:
 
@@ -11,7 +11,7 @@ src/ProtocolTools/Checksum.ins
 tests/checksum.ins
 ```
 
-Create a starter package with the v0.56 skeleton generator:
+Create a starter package with the skeleton generator:
 
 ```sh
 PYTHONPATH=src python -m inscription package new hello --name Hello
@@ -116,7 +116,7 @@ To build package package: Build.Package.
 Build.standard package workflow.
 ```
 
-Use `inscription build path/to/package --list` to list the script's expanded steps and default, `inscription build path/to/package release` to run the standard release group, `inscription build path/to/package library` to build one artifact step, or `inscription build path/to/package` to run the declared default step. v0.56 build scripts call only the built-in `Build` API for standard workflows, package check/test/build/group/book requests, and package-aware defaults; they cannot run shell commands, access arbitrary files, import package source modules, or customize output paths.
+Use `inscription build path/to/package --list` to list the script's expanded steps and default, `inscription build path/to/package release` to run the standard release group, `inscription build path/to/package library` to build one artifact step, or `inscription build path/to/package` to run the declared default step. v0.57 build scripts call only the built-in `Build` API for standard workflows, package format/check/test/build/group/book requests, and package-aware defaults; they cannot run shell commands, access arbitrary files, import package source modules, or customize output paths.
 
 ## Package builds
 
@@ -136,4 +136,4 @@ Library-like emits (`mlir`, `lowered-mlir`, `llvm-ir`, `object`, `static-library
 
 Package interface JSON includes a top-level `package` object with manifest metadata and direct dependency metadata. Package C headers include exported scalar phrases from the root package root/exposed modules and preserve exported phrase documentation comments; dependency exports are intentionally omitted from the root package header. Build the dependency package separately when you need its header. `--save-temps DIR` writes deterministic package intermediates such as `ProtocolTools.mlir`, `ProtocolTools.lowered.mlir`, `ProtocolTools.ll`, and `ProtocolTools.o`.
 
-Remote dependencies, registries, lockfiles, version solving, target triples, build profiles, custom output paths, arbitrary filesystem/process/network access, and general build graph scripting remain future work. See [Build Scripts](build-scripts.md) for the v0.56 package/build surface.
+Remote dependencies, registries, lockfiles, version solving, target triples, build profiles, custom output paths, arbitrary filesystem/process/network access, and general build graph scripting remain future work. See [Build Scripts](build-scripts.md) for the v0.57 package/build surface.

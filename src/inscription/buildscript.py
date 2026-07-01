@@ -14,6 +14,7 @@ from .package import (
     PackageTestSummary,
     build_package_artifact,
     check_package,
+    format_package,
     load_package_context,
     run_package_tests,
 )
@@ -27,6 +28,8 @@ BUILD_SCRIPT_NAME = "build.ins"
 _BUILD_STEP_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_-]*")
 _STANDARD_WORKFLOW_PHRASE = "Build.standard package workflow"
 _BUILD_CALLS: dict[str, str] = {
+    "Build.format check named": "package-format-check",
+    "Build.format package named": "package-format-in-place",
     "Build.check package named": "package-check",
     "Build.tests including dependencies named": "package-tests-with-dependencies",
     "Build.tests named": "package-tests",
@@ -65,6 +68,8 @@ _OUTPUT_SUFFIXES: dict[str, tuple[str, str]] = {
 }
 _ARTIFACT_EMITS = frozenset(_OUTPUT_SUFFIXES)
 _STEP_DISPLAY: dict[str, str] = {
+    "package-format-check": "format check",
+    "package-format-in-place": "format package",
     "package-check": "check package",
     "package-tests": "tests",
     "package-tests-with-dependencies": "tests including dependencies",
@@ -209,13 +214,14 @@ def _append_build_step(steps: list[BuildStep], seen: set[str], step: BuildStep, 
 
 def _standard_workflow_steps(line: int, *, package_root: Path | None) -> tuple[BuildStep, ...]:
     steps = [
+        BuildStep("format", "package-format-check", line),
         BuildStep("check", "package-check", line),
         BuildStep("tests", "package-tests", line),
         BuildStep("library", "static-library", line, package_default=True),
         BuildStep("header", "c-header", line, package_default=True),
         BuildStep("interface", "interface-json", line, package_default=True),
     ]
-    ci_dependencies = ["check", "tests"]
+    ci_dependencies = ["format", "check", "tests"]
     if _standard_workflow_has_book(package_root):
         steps.append(BuildStep("book-check", "book-check", line, package_default=True))
         ci_dependencies.append("book-check")
@@ -541,6 +547,18 @@ def _run_step(
         context = check_package(root, verify=verify)
         executed.add(step.name)
         results.append(BuildExecutionResult(step, package_context=context))
+        return False
+    if step.emit in {"package-format-check", "package-format-in-place"}:
+        try:
+            format_package(
+                root,
+                check=step.emit == "package-format-check",
+                in_place=step.emit == "package-format-in-place",
+            )
+        except InscriptionError as exc:
+            raise InscriptionError(f"build step {step.name} ... FAILED\n{exc}", step.line) from exc
+        executed.add(step.name)
+        results.append(BuildExecutionResult(step))
         return False
     if step.emit in {"package-tests", "package-tests-with-dependencies"}:
         summary = run_package_tests(

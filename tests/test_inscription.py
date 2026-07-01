@@ -9002,12 +9002,13 @@ Give result plus seen.
             no_book_script = parse_build_script(source, path=no_book_root / "build.ins")
             self.assertEqual(no_book_script.default_step, "ci")
             self.assertEqual([(step.name, step.emit, step.dependencies, step.package_default) for step in no_book_script.steps], [
+                ("format", "package-format-check", (), False),
                 ("check", "package-check", (), False),
                 ("tests", "package-tests", (), False),
                 ("library", "static-library", (), True),
                 ("header", "c-header", (), True),
                 ("interface", "interface-json", (), True),
-                ("ci", "group", ("check", "tests"), False),
+                ("ci", "group", ("format", "check", "tests"), False),
                 ("release", "group", ("ci", "library", "header", "interface"), False),
             ])
 
@@ -9016,13 +9017,14 @@ Give result plus seen.
             (book_root / "book" / "book.toml").write_text("[book]\ntitle = \"Fixture\"\n")
             book_script = parse_build_script(source, path=book_root / "build.ins")
             self.assertEqual([(step.name, step.emit, step.dependencies, step.package_default) for step in book_script.steps], [
+                ("format", "package-format-check", (), False),
                 ("check", "package-check", (), False),
                 ("tests", "package-tests", (), False),
                 ("library", "static-library", (), True),
                 ("header", "c-header", (), True),
                 ("interface", "interface-json", (), True),
                 ("book-check", "book-check", (), True),
-                ("ci", "group", ("check", "tests", "book-check"), False),
+                ("ci", "group", ("format", "check", "tests", "book-check"), False),
                 ("release", "group", ("ci", "library", "header", "interface"), False),
             ])
 
@@ -9085,8 +9087,9 @@ Give result plus seen.
                 check=False,
             )
             self.assertEqual(list_proc.returncode, 0, list_proc.stderr)
+            self.assertIn("build step format: format check\n", list_proc.stdout)
             self.assertIn("build step book-check: book checked\n", list_proc.stdout)
-            self.assertIn("build step ci: group -> check, tests, book-check\n", list_proc.stdout)
+            self.assertIn("build step ci: group -> format, check, tests, book-check\n", list_proc.stdout)
             self.assertIn("build step release: group -> ci, library, header, interface\n", list_proc.stdout)
             self.assertIn("build default: ci\n", list_proc.stdout)
 
@@ -9103,6 +9106,7 @@ Give result plus seen.
                 check=False,
             )
             self.assertEqual(default_proc.returncode, 0, default_proc.stderr)
+            self.assertIn("build step format ... ok", default_proc.stdout)
             self.assertIn("build step check ... ok", default_proc.stdout)
             self.assertIn("build step tests ... ok", default_proc.stdout)
             self.assertIn("build step book-check ... ok", default_proc.stdout)
@@ -9164,7 +9168,7 @@ Give result plus seen.
             )
             self.assertEqual(list_proc.returncode, 0, list_proc.stderr)
             self.assertNotIn("book-check", list_proc.stdout)
-            self.assertIn("build step ci: group -> check, tests\n", list_proc.stdout)
+            self.assertIn("build step ci: group -> format, check, tests\n", list_proc.stdout)
 
             default_proc = subprocess.run(
                 [sys.executable, "-m", "inscription", "build", str(package)],
@@ -9234,7 +9238,7 @@ Give result plus seen.
             self.assertIn("test result: ok. 1 passed; 0 failed.", test_proc.stdout)
             list_proc = run_cli("build", package, "--list")
             self.assertEqual(list_proc.returncode, 0, list_proc.stderr)
-            self.assertIn("build step ci: group -> check, tests\n", list_proc.stdout)
+            self.assertIn("build step ci: group -> format, check, tests\n", list_proc.stdout)
             build_proc = run_cli("build", package)
             self.assertEqual(build_proc.returncode, 0, build_proc.stderr)
 
@@ -9331,6 +9335,175 @@ Give result plus seen.
             exclusive_proc = run_cli("package", "new", tmp_path / "both", "--name", "Both", "--library", "--executable")
             self.assertEqual(exclusive_proc.returncode, 2)
             self.assertIn("--library cannot be used with --executable", exclusive_proc.stderr)
+
+    def test_v057_package_format_check_in_place_and_build_steps(self):
+        env = {**os.environ, "PYTHONPATH": str(SRC)}
+
+        def run_cli(*args: str | Path) -> subprocess.CompletedProcess[str]:
+            return subprocess.run(
+                [sys.executable, "-m", "inscription", *(str(arg) for arg in args)],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            package = tmp_path / "format-hello"
+            new_proc = run_cli("package", "new", package, "--name", "FormatHello")
+            self.assertEqual(new_proc.returncode, 0, new_proc.stderr)
+
+            check_ok = run_cli("package", "format", package, "--check")
+            self.assertEqual(check_ok.returncode, 0, check_ok.stderr)
+            self.assertEqual(check_ok.stdout, "package FormatHello: format ok\n")
+
+            no_mode = run_cli("package", "format", package)
+            self.assertEqual(no_mode.returncode, 2)
+            self.assertIn("package format requires --check or --in-place", no_mode.stderr)
+            conflict = run_cli("package", "format", package, "--check", "--in-place")
+            self.assertEqual(conflict.returncode, 2)
+            self.assertIn("--check cannot be used with --in-place", conflict.stderr)
+
+            source = package / "src" / "FormatHello.ins"
+            source.write_text(
+                "Module FormatHello.\n"
+                "/// Adds two numbers.\n"
+                "To add left: i32 and right: i32, giving i32, exported as ins_add.\n"
+                "Give   left plus right.\n"
+            )
+            check_fail = run_cli("package", "format", package, "--check")
+            self.assertEqual(check_fail.returncode, 2)
+            self.assertIn("formatting check failed: src/FormatHello.ins is not formatted", check_fail.stderr)
+
+            in_place = run_cli("package", "format", package, "--in-place")
+            self.assertEqual(in_place.returncode, 0, in_place.stderr)
+            check_fixed = run_cli("package", "format", package, "--check")
+            self.assertEqual(check_fixed.returncode, 0, check_fixed.stderr)
+
+            # Every package-owned .ins surface participates in package format checks.
+            messy_files = {
+                package / "package.ins": (
+                    "//! Package manifest for FormatHello.\n"
+                    "Package FormatHello.\n"
+                    'Version "0.1.0".\n'
+                    'Sources are in "src".\n'
+                    'Tests are in "tests".\n'
+                    "Root module is FormatHello.\n"
+                    "Expose module FormatHello.\n"
+                ),
+                package / "build.ins": (
+                    "Import Build.\n"
+                    "To build package package: Build.Package.\n"
+                    "Build.standard package workflow.\n"
+                ),
+                package / "tests" / "basic.ins": (
+                    "Import FormatHello.\n"
+                    "Test addition works.\n"
+                    "Expect FormatHello.add 20 and 22 is equal to 42.\n"
+                ),
+            }
+            for path, text in messy_files.items():
+                path.write_text(text)
+            multi_fail = run_cli("package", "format", package, "--check")
+            self.assertEqual(multi_fail.returncode, 2)
+            self.assertIn("formatting check failed: package.ins is not formatted", multi_fail.stderr)
+            self.assertIn("formatting check failed: build.ins is not formatted", multi_fail.stderr)
+            self.assertIn("formatting check failed: tests/basic.ins is not formatted", multi_fail.stderr)
+            fix_all = run_cli("package", "format", package, "--in-place")
+            self.assertEqual(fix_all.returncode, 0, fix_all.stderr)
+
+            package_build = package / "build.ins"
+            package_build.write_text(
+                "Import Build.\n\n"
+                "To build package package: Build.Package.\n"
+                'Build.format check named "format".\n'
+                'Build.format package named "format-in-place".\n'
+            )
+            format_step = run_cli("build", package, "format")
+            self.assertEqual(format_step.returncode, 0, format_step.stderr)
+            self.assertIn("build step format ... ok", format_step.stdout)
+
+            source.write_text(
+                "Module FormatHello.\n"
+                "/// Adds two numbers.\n"
+                "To add left: i32 and right: i32, giving i32, exported as ins_add.\n"
+                "Give   left plus right.\n"
+            )
+            format_in_place_step = run_cli("build", package, "format-in-place")
+            self.assertEqual(format_in_place_step.returncode, 0, format_in_place_step.stderr)
+            check_after_step = run_cli("package", "format", package, "--check")
+            self.assertEqual(check_after_step.returncode, 0, check_after_step.stderr)
+
+            package_build.write_text(
+                "Import Build.\n\n"
+                "To build package package: Build.Package.\n"
+                "Build.standard package workflow.\n"
+            )
+            list_proc = run_cli("build", package, "--list")
+            self.assertEqual(list_proc.returncode, 0, list_proc.stderr)
+            self.assertIn("build step format: format check\n", list_proc.stdout)
+            self.assertIn("build step ci: group -> format, check, tests\n", list_proc.stdout)
+
+            source.write_text(
+                "Module FormatHello.\n"
+                "/// Adds two numbers.\n"
+                "To add left: i32 and right: i32, giving i32, exported as ins_add.\n"
+                "Give   left plus right.\n"
+            )
+            default_fail = run_cli("build", package)
+            self.assertEqual(default_fail.returncode, 2)
+            self.assertIn("build step format ... FAILED", default_fail.stderr)
+            self.assertIn("formatting check failed: src/FormatHello.ins is not formatted", default_fail.stderr)
+
+    def test_v057_package_format_dependencies_and_book_check(self):
+        env = {**os.environ, "PYTHONPATH": str(SRC)}
+
+        def run_cli(*args: str | Path) -> subprocess.CompletedProcess[str]:
+            return subprocess.run(
+                [sys.executable, "-m", "inscription", *(str(arg) for arg in args)],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            app = tmp_path / "app_with_dependency"
+            dependency = tmp_path / "checksums_package"
+            shutil.copytree(ROOT / "tests" / "fixtures" / "packages" / "app_with_dependency", app)
+            shutil.copytree(ROOT / "tests" / "fixtures" / "packages" / "checksums_package", dependency)
+            dependency_source = dependency / "src" / "Checksums.ins"
+            dependency_source.write_text(
+                "Module Checksums.\n"
+                "/// Returns the checksum identity.\n"
+                "To checksum value value: i32, giving i32, exported as ins_checksum.\n"
+                "Give   value.\n"
+            )
+
+            root_only = run_cli("package", "format", app, "--check")
+            self.assertEqual(root_only.returncode, 0, root_only.stderr)
+            with_dependencies = run_cli("package", "format", app, "--check", "--include-dependencies")
+            self.assertEqual(with_dependencies.returncode, 2)
+            self.assertIn("formatting check failed: src/Checksums.ins is not formatted", with_dependencies.stderr)
+            fix_dependencies = run_cli("package", "format", app, "--in-place", "--include-dependencies")
+            self.assertEqual(fix_dependencies.returncode, 0, fix_dependencies.stderr)
+            fixed = run_cli("package", "format", app, "--check", "--include-dependencies")
+            self.assertEqual(fixed.returncode, 0, fixed.stderr)
+
+            docs = tmp_path / "docs"
+            docs_proc = run_cli("package", "new", docs, "--name", "DocsPkg", "--with-book")
+            self.assertEqual(docs_proc.returncode, 0, docs_proc.stderr)
+            include_book = run_cli("package", "format", docs, "--check", "--include-book")
+            self.assertEqual(include_book.returncode, 0, include_book.stderr)
+            include_book_in_place = run_cli("package", "format", docs, "--in-place", "--include-book")
+            self.assertEqual(include_book_in_place.returncode, 2)
+            self.assertIn("package format --include-book --in-place is not supported in v0.57", include_book_in_place.stderr)
 
 
 class FormatterTests(unittest.TestCase):

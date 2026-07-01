@@ -36,3 +36,16 @@ Root module is ProtocolTools.
 
 Expose module ProtocolTools.
 ```
+
+## Package formatting
+
+Packages can run the formatter over package-owned Inscription files discovered from `package.ins`:
+
+```sh
+PYTHONPATH=src python -m inscription package format path/to/package --check
+PYTHONPATH=src python -m inscription package format path/to/package --in-place
+PYTHONPATH=src python -m inscription package format path/to/package --check --include-dependencies
+PYTHONPATH=src python -m inscription package format path/to/package --check --include-book
+```
+
+The package formatter checks or rewrites `package.ins`, `build.ins` when present, all `.ins` files under the sources directory, and all `.ins` files under the tests directory. It is parse/format-only and does not require LLVM tools. Book inclusion is check-only in v0.57; fenced snippets are checked by the package's `book/tools/check_book_examples.py` when present.
