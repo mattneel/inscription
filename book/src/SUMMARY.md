@@ -43,6 +43,7 @@
 - [CLI](tooling/cli.md)
 - [Formatter](tooling/formatter.md)
 - [Testing](tooling/testing.md)
+- [Packages](tooling/packages.md)
 - [Artifacts](tooling/artifacts.md)
 - [Optimization](tooling/optimization.md)
 - [Interface JSON](tooling/interface-json.md)

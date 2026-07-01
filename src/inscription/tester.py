@@ -50,17 +50,29 @@ def test_slug(display_name: str) -> str:
     return slug or "test"
 
 
-def filtered_tests(program: Program, filter_text: str | None) -> list[tuple[TestDecl, str]]:
-    pairs = [(test, test_display_name(test, program)) for test in program.tests]
+def _prefix_display(display: str, display_prefix: str | None) -> str:
+    if display_prefix is None:
+        return display
+    return f"{display_prefix}::{display}"
+
+
+def filtered_tests(program: Program, filter_text: str | None, *, display_prefix: str | None = None) -> list[tuple[TestDecl, str]]:
+    pairs = [(test, _prefix_display(test_display_name(test, program), display_prefix)) for test in program.tests]
     if filter_text is None:
         return pairs
     return [(test, display) for test, display in pairs if filter_text in display]
 
 
-def list_tests(source_path: Path, *, module_root: Path | None = None, filter_text: str | None = None) -> tuple[str, ...]:
+def list_tests(
+    source_path: Path,
+    *,
+    module_root: Path | None = None,
+    filter_text: str | None = None,
+    display_prefix: str | None = None,
+) -> tuple[str, ...]:
     program = load_test_program(source_path, module_root=module_root)
     analyze(program)
-    return tuple(display for _test, display in filtered_tests(program, filter_text))
+    return tuple(display for _test, display in filtered_tests(program, filter_text, display_prefix=display_prefix))
 
 
 def run_tests(
@@ -72,11 +84,12 @@ def run_tests(
     save_temps: Path | None = None,
     filter_text: str | None = None,
     toolchain: Toolchain | None = None,
+    display_prefix: str | None = None,
 ) -> TestRunSummary | str:
     source_path = source_path.resolve()
     program = load_test_program(source_path, module_root=module_root)
     analyze(program)
-    all_tests = [(test, test_display_name(test, program)) for test in program.tests]
+    all_tests = [(test, _prefix_display(test_display_name(test, program), display_prefix)) for test in program.tests]
     if not all_tests:
         return "no tests found"
     selected = [(test, display) for test, display in all_tests if filter_text is None or filter_text in display]

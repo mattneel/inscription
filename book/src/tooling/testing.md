@@ -32,3 +32,15 @@ PYTHONPATH=src python -m inscription test SOURCE --save-temps /tmp/inscription-t
 ```
 
 Tests in imported modules are discovered when the root imports the module. Display names use `root::name` for an unmoduled root and `Module::name` for module tests.
+
+## Package tests
+
+When a package has a `package.ins` manifest, use `inscription package test` from the package root or pass the package path. The package runner discovers `.ins` files under the manifest's `Tests are in "...".` directory and uses the manifest `Sources are in "...".` directory as the module root.
+
+```sh
+PYTHONPATH=src python -m inscription package test path/to/package
+PYTHONPATH=src python -m inscription package test path/to/package --list
+PYTHONPATH=src python -m inscription package test path/to/package --filter checksum
+```
+
+Package test display names include the test file path, such as `tests/checksum.ins::root::checksum works`, so tests from different files remain distinct.

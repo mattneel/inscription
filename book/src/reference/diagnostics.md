@@ -10,5 +10,6 @@ Common categories:
 - Unsupported storage/value contexts, such as using an owned buffer as a scalar.
 - Extern/export ABI rejections for non-primitive scalar types.
 - LLVM/MLIR toolchain discovery errors.
+- Package manifest and package layout errors, such as missing `package.ins`, duplicate manifest declarations, invalid relative paths, missing source roots, or module-name mismatches.
 
 Negative tests in `tests/test_inscription.py` are the best executable catalog of exact diagnostic wording.

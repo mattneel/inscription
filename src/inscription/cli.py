@@ -6,8 +6,9 @@ from pathlib import Path
 
 from .compiler import compile_file, load_program
 from .diagnostics import InscriptionError
-from .formatter import format_source
+from .formatter import format_file
 from .interface import emit_c_header, emit_interface_json, load_interface_context
+from .package import check_package, list_package_tests, run_package_tests
 from .mlir import emit_mlir
 from .runner import (
     EMIT_MODES,
@@ -104,6 +105,19 @@ def main(argv: list[str] | None = None) -> int:
     test_p.add_argument("--filter", help="run only tests whose display name contains TEXT")
     test_p.add_argument("--list", action="store_true", help="list discovered tests without running them")
     _add_optimization_args(test_p)
+
+    package_p = sub.add_parser("package", help="work with package.ins manifests")
+    package_sub = package_p.add_subparsers(dest="package_command", required=True)
+    package_check_p = package_sub.add_parser("check", help="validate a package manifest and source layout")
+    package_check_p.add_argument("root", nargs="?", type=Path, default=Path("."), help="package root containing package.ins")
+    package_check_p.add_argument("--verify", action="store_true", help="also verify package source MLIR with LLVM/MLIR tools")
+    package_test_p = package_sub.add_parser("test", help="discover and run package tests")
+    package_test_p.add_argument("root", nargs="?", type=Path, default=Path("."), help="package root containing package.ins")
+    package_test_p.add_argument("--runtime-checks", action="store_true", help="emit runtime assertions for dynamic storage bounds")
+    package_test_p.add_argument("--save-temps", type=Path, help="directory for per-test source MLIR, lowered MLIR, and LLVM IR intermediates")
+    package_test_p.add_argument("--filter", help="run only tests whose display name contains TEXT")
+    package_test_p.add_argument("--list", action="store_true", help="list discovered package tests without running them")
+    _add_optimization_args(package_test_p)
 
     format_p = sub.add_parser("format", help="format an Inscription source file")
     format_p.add_argument("source", type=Path)
@@ -243,6 +257,39 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 print(f"test result: ok. {summary.passed} passed; 0 failed.")
             return summary.exit_status
+        if args.command == "package":
+            if args.package_command == "check":
+                context = check_package(args.root, verify=args.verify)
+                print(f"package {context.manifest.package_name}: ok")
+                return 0
+            if args.package_command == "test":
+                if args.list:
+                    tests = list_package_tests(args.root, filter_text=args.filter)
+                    if isinstance(tests, str):
+                        print(tests)
+                        return 0
+                    for display in tests:
+                        print(f"test {display}")
+                    return 0
+                summary = run_package_tests(
+                    args.root,
+                    filter_text=args.filter,
+                    runtime_checks=args.runtime_checks,
+                    opt_level=_resolve_opt_level(args),
+                    save_temps=args.save_temps,
+                )
+                if isinstance(summary, str):
+                    print(summary)
+                    return 0
+                for result in summary.results:
+                    status = "ok" if result.passed else "FAILED"
+                    print(f"test {result.display_name} ... {status}")
+                print()
+                if summary.failed:
+                    print(f"test result: FAILED. {summary.passed} passed; {summary.failed} failed.")
+                else:
+                    print(f"test result: ok. {summary.passed} passed; 0 failed.")
+                return summary.exit_status
         if args.command == "format":
             if args.in_place and args.output is not None:
                 raise InscriptionError("--in-place cannot be used with -o")
@@ -251,7 +298,7 @@ def main(argv: list[str] | None = None) -> int:
             if args.check and args.output is not None:
                 raise InscriptionError("--check cannot be used with -o")
             original = args.source.read_text()
-            formatted = format_source(original)
+            formatted = format_file(args.source)
             if args.check:
                 if formatted != original:
                     raise InscriptionError(f"formatting check failed: {args.source} is not formatted")

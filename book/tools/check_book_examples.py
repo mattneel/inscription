@@ -42,7 +42,7 @@ def _mode_from_attrs(attrs: str, comment_mode: str | None) -> str:
     if comment_mode:
         return comment_mode
     tokens = {token.strip().lower() for token in re.split(r"[\s,]+", attrs.strip()) if token.strip()}
-    for candidate in ("no-check", "check", "format"):
+    for candidate in ("no-check", "check", "format", "manifest"):
         if candidate in tokens:
             return candidate
     return "format"
@@ -110,10 +110,12 @@ def check_examples(root: Path = REPO_ROOT) -> tuple[int, int, bool]:
     for example in examples:
         if example.mode == "no-check":
             continue
-        if example.mode not in {"format", "check"}:
+        if example.mode not in {"format", "check", "manifest"}:
             raise BookExampleError(f"{example.path}:{example.line}: unknown Inscription example mode {example.mode!r}")
         _check_format(example)
         formatted += 1
+        if example.mode == "manifest":
+            continue
         if example.mode == "check":
             _check_compile(example, verify_mlir=verify_mlir)
             checked += 1

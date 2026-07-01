@@ -61,7 +61,12 @@ _KEYWORD_CASE_REPLACEMENTS: tuple[tuple[re.Pattern[str], str], ...] = tuple(
 
 
 def format_file(path: Path) -> str:
-    return format_source(path.read_text())
+    source = path.read_text()
+    if path.name == "package.ins":
+        from .package import format_manifest_source
+
+        return format_manifest_source(source)
+    return format_source(source)
 
 
 def format_source(source: str) -> str:
@@ -73,6 +78,10 @@ def format_source(source: str) -> str:
     tooling so imported modules or host toolchains are not required.
     """
 
+    from .package import is_manifest_source, format_manifest_source
+
+    if is_manifest_source(source):
+        return format_manifest_source(source)
     normalize_punctuation_source(source)
     comment_info = collect_source_comments(source)
     sentences = _split_punctuation_sentences(comment_info.source)

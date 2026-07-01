@@ -18,6 +18,7 @@ sys.path.insert(0, str(SRC))
 from inscription.compiler import compile_file as _compile_file, compile_source as _compile_source
 from inscription.diagnostics import InscriptionError
 from inscription.formatter import format_source
+from inscription.package import format_manifest_source, parse_manifest
 from inscription.parser import normalize_punctuation_source
 from inscription.runner import LOWERING_PASSES, OPTIMIZATION_PRESETS, ToolchainError, resolve_toolchain, run_file as _run_file, run_source as _run_source, verify_mlir
 from tests.v032_migrate import maybe_convert_path, maybe_convert_source
@@ -2241,6 +2242,7 @@ class CompilerTests(unittest.TestCase):
                 "To highlight range b: u8, giving i32.\nGive match b:\nbyte \"0\" through byte \"9\" or byte \"A\" gives 1;\nanything gives 0.\n",
                 "To highlight copied, giving i32.\nLet cells be owned buffer of 1 i32 containing 7.\nLet copy be owned buffer copied from cells.\nGive copy at 0.\n",
                 "Test highlight test.\nExpect true.\n",
+                "Package HighlightPackage.\nVersion \"0.1.0\".\nSources are in \"src\".\nTests are in \"tests\".\nRoot module is HighlightPackage.\nExpose module HighlightPackage.\n",
             ]
         )
         html = highlight_source(source, output_format="html")
@@ -6944,6 +6946,341 @@ Give result plus seen.
         self.assertIn("test root::buffer sum works ... ok", owned_proc.stdout)
         self.assertIn("test root::owned buffer move works ... ok", owned_proc.stdout)
 
+    def test_v045_package_manifest_parser_formatter_and_diagnostics(self):
+        manifest = parse_manifest(
+            "//! Package docs.\n\n"
+            "Package ProtocolTools.\n\n"
+            "Version \"0.1.0\".\n\n"
+            "Sources are in \"src\".\n"
+            "Tests are in \"tests\".\n\n"
+            "Root module is ProtocolTools.\n\n"
+            "Expose module ProtocolTools.\n"
+            "Expose module ProtocolTools.Protocol.\n"
+        )
+        self.assertEqual(manifest.package_name, "ProtocolTools")
+        self.assertEqual(manifest.version, "0.1.0")
+        self.assertEqual(manifest.sources, "src")
+        self.assertEqual(manifest.tests, "tests")
+        self.assertEqual(manifest.root_module, "ProtocolTools")
+        self.assertEqual(manifest.exposed_modules, ("ProtocolTools", "ProtocolTools.Protocol"))
+        self.assertEqual(manifest.documentation, "Package docs.")
+
+        messy = (
+            "//! Package docs.\n\n"
+            "Package ProtocolTools.\n\n"
+            "Root module is ProtocolTools.\n\n"
+            "Expose module ProtocolTools.Protocol.\n"
+            "Sources are in \"src\".\n"
+            "Version \"0.1.0\".\n"
+            "Tests are in \"tests\".\n"
+            "Expose module ProtocolTools.\n"
+        )
+        expected = (
+            "//! Package docs.\n\n"
+            "Package ProtocolTools.\n\n"
+            "Version \"0.1.0\".\n\n"
+            "Sources are in \"src\".\n"
+            "Tests are in \"tests\".\n\n"
+            "Root module is ProtocolTools.\n\n"
+            "Expose module ProtocolTools.Protocol.\n"
+            "Expose module ProtocolTools.\n"
+        )
+        self.assertEqual(format_manifest_source(messy), expected)
+        self.assertEqual(format_manifest_source(expected), expected)
+
+        cases = {
+            "missing package": ("Sources are in \"src\".\n", "package manifest must start with Package declaration"),
+            "empty package": ("Package.\n", "package declaration requires a package name"),
+            "duplicate sources": (
+                "Package P.\n\nSources are in \"src\".\nSources are in \"source\".\nRoot module is P.\n",
+                "package manifest declares sources more than once",
+            ),
+            "missing sources": ("Package P.\n\nRoot module is P.\n", "package manifest must declare a sources directory"),
+            "missing root": ("Package P.\n\nSources are in \"src\".\n", "package manifest must declare a root module"),
+            "bad version": (
+                "Package P.\n\nVersion \"dev\".\n\nSources are in \"src\".\nRoot module is P.\n",
+                "package version must use MAJOR.MINOR.PATCH format",
+            ),
+            "absolute path": (
+                "Package P.\n\nSources are in \"/tmp/src\".\nRoot module is P.\n",
+                "package paths must be relative",
+            ),
+            "parent path": (
+                "Package P.\n\nSources are in \"../src\".\nRoot module is P.\n",
+                "package paths may not contain `..`",
+            ),
+            "phrase declaration": (
+                "Package P.\n\nTo main, giving i32.\nGive 0.\n",
+                "package manifests do not support phrase declarations",
+            ),
+            "let declaration": ("Package P.\n\nLet source be \"src\".\n", "package manifests do not support Let"),
+            "import declaration": ("Package P.\n\nImport Math.\n", "package manifests do not support imports"),
+            "duplicate expose": (
+                "Package P.\n\nSources are in \"src\".\nRoot module is P.\nExpose module P.\nExpose module P.\n",
+                "package manifest exposes module P more than once",
+            ),
+            "block comments unsupported": (
+                "Package P.\n\n/* nope */\nSources are in \"src\".\nRoot module is P.\n",
+                "block comments are not supported; use //",
+            ),
+        }
+        for name, (source, contains) in cases.items():
+            with self.subTest(name=name):
+                with self.assertRaises(InscriptionError) as ctx:
+                    parse_manifest(source)
+                self.assertIn(contains, str(ctx.exception))
+
+    def test_v045_package_commands_check_and_diagnostics(self):
+        env = {**os.environ, "PYTHONPATH": str(SRC)}
+        packages = ROOT / "tests" / "fixtures" / "packages"
+
+        basic_check = subprocess.run(
+            [sys.executable, "-m", "inscription", "package", "check", str(packages / "basic_package")],
+            cwd=ROOT,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(basic_check.returncode, 0, basic_check.stderr)
+        self.assertEqual(basic_check.stdout, "package ProtocolTools: ok\n")
+
+        module_check = subprocess.run(
+            [sys.executable, "-m", "inscription", "package", "check", str(packages / "module_package")],
+            cwd=ROOT,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(module_check.returncode, 0, module_check.stderr)
+        self.assertEqual(module_check.stdout, "package ProtocolTools: ok\n")
+
+        missing_source = subprocess.run(
+            [sys.executable, "-m", "inscription", "package", "check", str(packages / "bad_missing_source")],
+            cwd=ROOT,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(missing_source.returncode, 2)
+        self.assertIn("package sources directory `src` does not exist", missing_source.stderr)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_root = Path(tmp)
+            no_manifest = subprocess.run(
+                [sys.executable, "-m", "inscription", "package", "check", str(tmp_root)],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(no_manifest.returncode, 2)
+            self.assertIn("package manifest not found at package.ins", no_manifest.stderr)
+
+            root_missing = tmp_root / "root-missing"
+            (root_missing / "src").mkdir(parents=True)
+            (root_missing / "package.ins").write_text("Package P.\n\nSources are in \"src\".\nRoot module is P.\n")
+            root_missing_proc = subprocess.run(
+                [sys.executable, "-m", "inscription", "package", "check", str(root_missing)],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(root_missing_proc.returncode, 2)
+            self.assertIn("root module P not found at src/P.ins", root_missing_proc.stderr)
+
+            mismatch = tmp_root / "mismatch"
+            (mismatch / "src").mkdir(parents=True)
+            (mismatch / "package.ins").write_text("Package P.\n\nSources are in \"src\".\nRoot module is P.\n")
+            (mismatch / "src" / "P.ins").write_text("Module Other.\n\nTo answer, giving i32.\nGive 1.\n")
+            mismatch_proc = subprocess.run(
+                [sys.executable, "-m", "inscription", "package", "check", str(mismatch)],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(mismatch_proc.returncode, 2)
+            self.assertIn("root module P resolved to module Other; expected P", mismatch_proc.stderr)
+
+            exposed_missing = tmp_root / "exposed-missing"
+            (exposed_missing / "src").mkdir(parents=True)
+            (exposed_missing / "package.ins").write_text(
+                "Package P.\n\nSources are in \"src\".\nRoot module is P.\nExpose module P.Missing.\n"
+            )
+            (exposed_missing / "src" / "P.ins").write_text("Module P.\n\nTo answer, giving i32.\nGive 1.\n")
+            exposed_proc = subprocess.run(
+                [sys.executable, "-m", "inscription", "package", "check", str(exposed_missing)],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(exposed_proc.returncode, 2)
+            self.assertIn("exposed module P.Missing not found at src/P/Missing.ins", exposed_proc.stderr)
+
+    def test_v045_package_test_command_cli(self):
+        try:
+            resolve_toolchain()
+        except ToolchainError as exc:
+            self.skipTest(str(exc))
+        env = {**os.environ, "PYTHONPATH": str(SRC)}
+        packages = ROOT / "tests" / "fixtures" / "packages"
+        basic = packages / "basic_package"
+
+        run_proc = subprocess.run(
+            [sys.executable, "-m", "inscription", "package", "test", str(basic)],
+            cwd=ROOT,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(run_proc.returncode, 0, run_proc.stderr)
+        self.assertIn("test tests/basic.ins::root::addition works ... ok", run_proc.stdout)
+        self.assertIn("test result: ok. 1 passed; 0 failed.", run_proc.stdout)
+
+        list_proc = subprocess.run(
+            [sys.executable, "-m", "inscription", "package", "test", str(basic), "--list"],
+            cwd=ROOT,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(list_proc.returncode, 0, list_proc.stderr)
+        self.assertEqual(list_proc.stdout, "test tests/basic.ins::root::addition works\n")
+
+        filter_proc = subprocess.run(
+            [sys.executable, "-m", "inscription", "package", "test", str(basic), "--filter", "addition"],
+            cwd=ROOT,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(filter_proc.returncode, 0, filter_proc.stderr)
+        self.assertIn("test tests/basic.ins::root::addition works ... ok", filter_proc.stdout)
+
+        no_match_proc = subprocess.run(
+            [sys.executable, "-m", "inscription", "package", "test", str(basic), "--filter", "missing"],
+            cwd=ROOT,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(no_match_proc.returncode, 0, no_match_proc.stderr)
+        self.assertEqual(no_match_proc.stdout, "no tests matched filter `missing`\n")
+
+        no_tests_proc = subprocess.run(
+            [sys.executable, "-m", "inscription", "package", "test", str(packages / "no_tests_package")],
+            cwd=ROOT,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(no_tests_proc.returncode, 0, no_tests_proc.stderr)
+        self.assertEqual(no_tests_proc.stdout, "no tests found\n")
+
+        module_proc = subprocess.run(
+            [sys.executable, "-m", "inscription", "package", "test", str(packages / "module_package")],
+            cwd=ROOT,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(module_proc.returncode, 0, module_proc.stderr)
+        self.assertIn("test tests/checksum.ins::root::checksum works ... ok", module_proc.stdout)
+
+        runtime_proc = subprocess.run(
+            [sys.executable, "-m", "inscription", "package", "test", str(basic), "--runtime-checks", "-O1"],
+            cwd=ROOT,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(runtime_proc.returncode, 0, runtime_proc.stderr)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            temps = Path(tmp) / "temps"
+            save_proc = subprocess.run(
+                [sys.executable, "-m", "inscription", "package", "test", str(basic), "--save-temps", str(temps)],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(save_proc.returncode, 0, save_proc.stderr)
+            self.assertTrue((temps / "basic.tests_basic_ins_root_addition_works.mlir").exists())
+            self.assertTrue((temps / "basic.tests_basic_ins_root_addition_works.lowered.mlir").exists())
+            self.assertTrue((temps / "basic.tests_basic_ins_root_addition_works.ll").exists())
+
+        fail_proc = subprocess.run(
+            [sys.executable, "-m", "inscription", "package", "test", str(packages / "failing_package")],
+            cwd=ROOT,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(fail_proc.returncode, 1)
+        self.assertIn("test tests/fail.ins::root::failing expectation ... FAILED", fail_proc.stdout)
+        self.assertIn("test result: FAILED. 0 passed; 1 failed.", fail_proc.stdout)
+
+    def test_v045_package_check_verify(self):
+        try:
+            resolve_toolchain()
+        except ToolchainError as exc:
+            self.skipTest(str(exc))
+        env = {**os.environ, "PYTHONPATH": str(SRC)}
+        proc = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "inscription",
+                "package",
+                "check",
+                str(ROOT / "tests" / "fixtures" / "packages" / "basic_package"),
+                "--verify",
+            ],
+            cwd=ROOT,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(proc.stdout, "package ProtocolTools: ok\n")
+
 
 
 class FormatterTests(unittest.TestCase):
@@ -7034,6 +7371,40 @@ class FormatterTests(unittest.TestCase):
         self.assertEqual(formatted, expected)
         self.assertEqual(format_source(formatted), formatted)
 
+    def test_format_package_manifest(self):
+        messy = (
+            "//! Package docs.\n\n"
+            "Package ProtocolTools.\n\n"
+            "Root module is ProtocolTools.\n"
+            "Expose module ProtocolTools.Protocol.\n"
+            "Sources are in \"src\".\n"
+            "Version \"0.1.0\".\n"
+            "Tests are in \"tests\".\n"
+            "Expose module ProtocolTools.\n"
+        )
+        expected = (
+            "//! Package docs.\n\n"
+            "Package ProtocolTools.\n\n"
+            "Version \"0.1.0\".\n\n"
+            "Sources are in \"src\".\n"
+            "Tests are in \"tests\".\n\n"
+            "Root module is ProtocolTools.\n\n"
+            "Expose module ProtocolTools.Protocol.\n"
+            "Expose module ProtocolTools.\n"
+        )
+        self.assertEqual(format_source(messy), expected)
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "package.ins"
+            source.write_text(messy)
+            formatted = self.cli("format", str(source))
+            self.assertEqual(formatted.returncode, 0, formatted.stderr)
+            self.assertEqual(formatted.stdout, expected)
+            in_place = self.cli("format", str(source), "--in-place")
+            self.assertEqual(in_place.returncode, 0, in_place.stderr)
+            self.assertEqual(source.read_text(), expected)
+            check_ok = self.cli("format", str(source), "--check")
+            self.assertEqual(check_ok.returncode, 0, check_ok.stderr)
+
     def test_positive_and_golden_fixtures_are_formatter_clean_and_idempotent(self):
         paths = sorted(FIXTURES.rglob("*.ins")) + sorted(GOLDENS.rglob("*.ins")) + sorted((ROOT / "tests" / "goldens_checked").rglob("*.ins"))
         self.assertGreater(len(paths), 0)
@@ -7044,6 +7415,22 @@ class FormatterTests(unittest.TestCase):
                 self.assertEqual(formatted, source)
                 self.assertEqual(format_source(formatted), formatted)
                 normalize_punctuation_source(formatted)
+
+    def test_package_fixtures_are_formatter_clean_and_idempotent(self):
+        paths = sorted((ROOT / "tests" / "fixtures" / "packages").rglob("*.ins"))
+        self.assertGreater(len(paths), 0)
+        for source_path in paths:
+            with self.subTest(source=source_path.relative_to(ROOT)):
+                source = source_path.read_text()
+                if source_path.name == "package.ins":
+                    formatted = format_manifest_source(source)
+                    self.assertEqual(formatted, source)
+                    self.assertEqual(format_manifest_source(formatted), formatted)
+                else:
+                    formatted = format_source(source)
+                    self.assertEqual(formatted, source)
+                    self.assertEqual(format_source(formatted), formatted)
+                    normalize_punctuation_source(formatted)
 
     def test_formatted_source_preserves_representative_source_mlir(self):
         representative = [
@@ -7180,10 +7567,11 @@ class BookDocumentationTests(unittest.TestCase):
             book_src = tmp_root / "book" / "src"
             book_src.mkdir(parents=True)
             (book_src / "example.md").write_text(
-                "```inscription,check\nTo main, giving i32.\nGive 7.\n```\n"
+                "```inscription,check\nTo main, giving i32.\nGive 7.\n```\n\n"
+                "```inscription,manifest\nPackage Example.\n\nSources are in \"src\".\n\nRoot module is Example.\n```\n"
             )
             formatted, checked, _verify_mlir = checker.check_examples(tmp_root)
-            self.assertEqual((formatted, checked), (1, 1))
+            self.assertEqual((formatted, checked), (2, 1))
 
     def test_book_workflow_mentions_pages_and_build_steps(self):
         workflow = (ROOT / ".github" / "workflows" / "book.yml").read_text()

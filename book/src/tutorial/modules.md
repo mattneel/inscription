@@ -27,3 +27,21 @@ PYTHONPATH=src python -m inscription compile main.ins --module-root . --verify
 ```
 
 Nested module names resolve to nested paths, so `Import geometry.points.` looks for `geometry/points.ins` under the module root.
+
+
+## Package module roots
+
+A `package.ins` manifest can declare the package source root so package commands do not need a manual `--module-root`:
+
+```inscription,manifest
+Package MathTools.
+
+Sources are in "src".
+Tests are in "tests".
+
+Root module is MathTools.
+
+Expose module MathTools.
+```
+
+With that manifest, `inscription package test` resolves imports from `src/` even when tests live under `tests/`.

@@ -20,3 +20,19 @@ Let rows be 0.
 For i from 0 up to 3: For j from 0 up to 3: total becomes total plus 1; then rows becomes rows plus 1.
 Give total plus rows.
 ```
+
+
+Package manifests are formatted in manifest mode when the file is named `package.ins` or the first non-comment declaration is `Package`:
+
+```inscription,manifest
+Package ProtocolTools.
+
+Version "0.1.0".
+
+Sources are in "src".
+Tests are in "tests".
+
+Root module is ProtocolTools.
+
+Expose module ProtocolTools.
+```
