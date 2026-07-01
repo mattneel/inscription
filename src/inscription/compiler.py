@@ -447,10 +447,12 @@ def qualify_stmt(stmt: Stmt, module_name: str, record_names: set[str], constant_
     if isinstance(stmt, OwnedBufferBinding):
         return OwnedBufferBinding(
             stmt.name,
-            qualify_expr(stmt.length, module_name, record_names, constant_names),
-            qualify_type(stmt.element_type, module_name, record_names, constant_names),
-            qualify_expr(stmt.fill, module_name, record_names, constant_names),
+            None if stmt.length is None else qualify_expr(stmt.length, module_name, record_names, constant_names),
+            None if stmt.element_type is None else qualify_type(stmt.element_type, module_name, record_names, constant_names),
+            None if stmt.fill is None else qualify_expr(stmt.fill, module_name, record_names, constant_names),
             stmt.line,
+            tuple(qualify_storage_element(value, module_name, record_names, constant_names) for value in stmt.values),
+            stmt.copy_source_name,
         )
     if isinstance(stmt, ViewBinding):
         return ViewBinding(

@@ -2038,8 +2038,45 @@ class Parser:
                 line.number,
                 values=(ByteString(values, line.number),),
             )
-        if re.fullmatch(r'let [a-z][a-z0-9_]* be owned buffer of bytes ".*"', line.text):
-            raise InscriptionError("owned buffer byte-string initialization is not supported in v0.29", line.number)
+        inferred_owned_byte_buffer_match = re.fullmatch(r'let ([a-z][a-z0-9_]*) be owned buffer of bytes (".*")', line.text)
+        if inferred_owned_byte_buffer_match:
+            values = decode_byte_string_token(inferred_owned_byte_buffer_match.group(2), line.number)
+            if not values:
+                raise InscriptionError("owned byte buffer literal must contain at least one byte", line.number)
+            return OwnedBufferBinding(
+                self._name(inferred_owned_byte_buffer_match.group(1), line.number),
+                Integer(len(values), line.number),
+                "u8",
+                None,
+                line.number,
+                values=(ByteString(values, line.number),),
+            )
+        owned_copy_match = re.fullmatch(r"let ([a-z][a-z0-9_]*) be owned buffer copied from (.+)", line.text)
+        if owned_copy_match:
+            source_text = owned_copy_match.group(2).strip()
+            if not NAME_RE.fullmatch(source_text):
+                raise InscriptionError("owned buffer copy source must be a storage binding", line.number)
+            return OwnedBufferBinding(
+                self._name(owned_copy_match.group(1), line.number),
+                None,
+                None,
+                None,
+                line.number,
+                copy_source_name=self._name(source_text, line.number),
+            )
+        owned_buffer_containing_match = re.fullmatch(
+            rf"let ([a-z][a-z0-9_]*) be owned buffer of ({BUFFER_LENGTH_PATTERN}) ({TYPE_REF_PATTERN}) containing (.+)",
+            line.text,
+        )
+        if owned_buffer_containing_match:
+            return OwnedBufferBinding(
+                self._name(owned_buffer_containing_match.group(1), line.number),
+                self._parse_expression(owned_buffer_containing_match.group(2), line.number),
+                self._return_type(owned_buffer_containing_match.group(3), line.number),
+                None,
+                line.number,
+                values=self._parse_containing_list(owned_buffer_containing_match.group(4), line.number),
+            )
         owned_buffer_match = re.fullmatch(
             rf"let ([a-z][a-z0-9_]*) be owned buffer of (.+) ({TYPE_REF_PATTERN}) filled with (.+)",
             line.text,

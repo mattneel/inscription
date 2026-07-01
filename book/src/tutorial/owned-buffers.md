@@ -25,7 +25,29 @@ Let cells be make cells 4.
 Give length of cells.
 ```
 
-Reusable code can either borrow owned buffers through `view of TYPE` parameters or consume them through `owned buffer of TYPE` parameters. Consuming calls require explicit `move`, and the source binding cannot be used afterward. Owned buffers still cannot be copied, rebound, or exposed through extern/export ABI.
+Owned buffers can also start with explicit data. `containing` stores each element in order, while `owned buffer of bytes "..."` creates mutable heap-backed byte storage.
+
+```inscription,check
+To main, giving i32.
+Let cells be owned buffer of 4 i32 containing 1, 2, 3, 4.
+Let text be owned buffer of bytes "hello".
+text at 0 becomes byte "H".
+Give cells at 0 plus length of text.
+```
+
+Use an explicit copy when you want mutable owned storage initialized from an array, buffer, view, or another owned buffer:
+
+```inscription,check
+To main, giving i32.
+Let numbers be array of 4 i32 containing 1, 2, 3, 4.
+Let copy be owned buffer copied from numbers.
+copy at 0 becomes 9.
+Give copy at 0 plus numbers at 0.
+```
+
+The source remains live after the copy. This is the only copy operation for owned buffers; assignment and phrase arguments still do not copy automatically.
+
+Reusable code can either borrow owned buffers through `view of TYPE` parameters or consume them through `owned buffer of TYPE` parameters. Consuming calls require explicit `move`, and the source binding cannot be used afterward. Owned buffers still cannot be implicitly copied, rebound, or exposed through extern/export ABI.
 
 
 Consuming calls are useful when a helper should take responsibility for cleanup or return the buffer onward:

@@ -487,10 +487,12 @@ class StorageAliasBinding:
 @dataclass(frozen=True)
 class OwnedBufferBinding:
     name: str
-    length: Expr
-    element_type: ValueType
-    fill: Expr
+    length: Expr | None
+    element_type: ValueType | None
+    fill: Expr | None
     line: int
+    values: tuple[StorageElement, ...] = ()
+    copy_source_name: str | None = None
 
 
 @dataclass(frozen=True)

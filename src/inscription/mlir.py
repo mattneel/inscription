@@ -940,6 +940,10 @@ class MlirEmitter:
         lines: list[str],
         indent: str,
     ) -> None:
+        if stmt.copy_source_name is not None:
+            self.emit_owned_buffer_copy_binding(stmt, env, lines, indent)
+            return
+        assert stmt.length is not None and stmt.element_type is not None
         element_type = resolve_value_type(
             stmt.element_type,
             stmt.line,
@@ -957,12 +961,57 @@ class MlirEmitter:
         length_index = self.emit_value_as_index(length, lines, indent)
         buffer = OwnedBufferStorage(self.fresh(), element_type, length, static_length)
         lines.append(f"{indent}{buffer.name} = memref.alloc({length_index}) : {dynamic_memref_type(element_type)}")
+        if stmt.values:
+            expanded_values = expand_storage_values("owned buffer", stmt.name, stmt.values, element_type, stmt.line)
+            for index, expr in enumerate(expanded_values):
+                value = self.emit_expr(expr, env, lines, indent, expected=element_type)
+                index_value = self.emit_index_constant(index, lines, indent)
+                lines.append(f"{indent}memref.store {value.name}, {buffer.name}[{index_value}] : {dynamic_memref_type(element_type)}")
+            env[stmt.name] = buffer
+            self.remember_owned_buffer(buffer)
+            return
+        assert stmt.fill is not None
         fill = self.emit_expr(stmt.fill, env, lines, indent, expected=element_type)
         lower = self.emit_index_constant(0, lines, indent)
         step = self.emit_index_constant(1, lines, indent)
         iv = self.fresh()
         lines.append(f"{indent}scf.for {iv} = {lower} to {length_index} step {step} {{")
         lines.append(f"{indent}  memref.store {fill.name}, {buffer.name}[{iv}] : {dynamic_memref_type(element_type)}")
+        lines.append(f"{indent}}}")
+        env[stmt.name] = buffer
+        self.remember_owned_buffer(buffer)
+
+    def emit_owned_buffer_copy_binding(
+        self,
+        stmt: OwnedBufferBinding,
+        env: dict[str, EnvValue],
+        lines: list[str],
+        indent: str,
+    ) -> None:
+        assert stmt.copy_source_name is not None
+        source = self.require_indexable(env[stmt.copy_source_name])
+        element_type = self.storage_element_type(source)
+        length = self.emit_storage_length_i32(source, lines, indent)
+        static_length = self.storage_static_length(source)
+        if self.runtime_checks and static_length is None:
+            one = self.emit_integer(1, "i32", lines, indent)
+            valid_length = self.emit_i32_compare("sge", length, one, lines, indent)
+            self.emit_runtime_assert(valid_length, f"owned buffer copy length check failed at line {stmt.line}", lines, indent)
+        length_index = self.emit_value_as_index(length, lines, indent)
+        buffer = OwnedBufferStorage(self.fresh(), element_type, length, static_length)
+        lines.append(f"{indent}{buffer.name} = memref.alloc({length_index}) : {dynamic_memref_type(element_type)}")
+        lower = self.emit_index_constant(0, lines, indent)
+        step = self.emit_index_constant(1, lines, indent)
+        iv = self.fresh()
+        lines.append(f"{indent}scf.for {iv} = {lower} to {length_index} step {step} {{")
+        source_index = iv
+        if isinstance(source, ViewStorage):
+            start = self.emit_value_as_index(source.start, lines, f"{indent}  ")
+            source_index = self.fresh()
+            lines.append(f"{indent}  {source_index} = arith.addi {start}, {iv} : index")
+        copied = Value(self.fresh(), element_type)
+        lines.append(f"{indent}  {copied.name} = memref.load {source.name}[{source_index}] : {self.storage_mlir_type(source)}")
+        lines.append(f"{indent}  memref.store {copied.name}, {buffer.name}[{iv}] : {dynamic_memref_type(element_type)}")
         lines.append(f"{indent}}}")
         env[stmt.name] = buffer
         self.remember_owned_buffer(buffer)

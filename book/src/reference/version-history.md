@@ -20,3 +20,4 @@ Recent milestones:
 - v0.39: exhaustive enum/union/bool matches and the `anything` wildcard pattern.
 - v0.40: match arm guards with lowercase `when` and ignored union payload fields.
 - v0.41: pattern alternatives with `or` and inclusive integer range patterns with `through`.
+- v0.42: owned buffer `containing`, owned byte-string buffers, and explicit `owned buffer copied from source` initialization.

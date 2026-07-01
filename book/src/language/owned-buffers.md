@@ -21,6 +21,39 @@ Let cells be make cells 4.
 Give length of cells.
 ```
 
+## Literal and copy initialization
+
+Owned buffers can be initialized with explicit elements:
+
+```inscription,check
+To main, giving i32.
+Let cells be owned buffer of 4 i32 containing 1, 2, 3, 4.
+Let total be 0.
+For each index i of cells: total becomes total plus cells at i.
+Give total.
+```
+
+`owned buffer of bytes "..."` decodes a non-empty byte string into mutable owned `u8` storage. It does not add a null terminator and is still byte storage, not a string type.
+
+```inscription,check
+To main, giving i32.
+Let bytes be owned buffer of bytes "hello".
+bytes at 0 becomes byte "H".
+Give length of bytes plus (bytes at 0 as i32).
+```
+
+Use `owned buffer copied from source` to make an explicit element-wise copy from a fixed buffer, array, view, or owned buffer:
+
+```inscription,check
+To main, giving i32.
+Let numbers be array of 4 i32 containing 1, 2, 3, 4.
+Let copy be owned buffer copied from numbers.
+copy at 0 becomes 10.
+Give copy at 0 plus numbers at 0.
+```
+
+Copying does not consume the source, and the copy has a distinct storage root. The copy is mutable even when the source is an immutable array or read-only view. Zero-length owned buffers remain unsupported; dynamic copy sources are checked for nonzero length when `--runtime-checks` is enabled.
+
 ## Consuming parameters and `move`
 
 Normal phrases can take ownership of owned buffers with an owned-buffer parameter. The caller must pass the argument with explicit `move`; no implicit moves or copies are performed.
@@ -142,4 +175,4 @@ Mixed branches are rejected because the caller would not know whether it still o
 
 ## Current restrictions
 
-Owned buffers cannot be copied, rebound, stored in records or unions, exposed through extern/export ABI, or moved from fixed buffers, arrays, or views. Direct temporary moves are allowed only as `move (owned-buffer-returning call)` actuals to consuming parameters. All-path moves of outer-scope owned buffers are allowed through `When`/`Otherwise` and step-level `Match`. Mixed move/live branches are rejected. Loops still reject moving an outer-scope owned buffer; move a loop-local binding instead.
+Owned buffers cannot be implicitly copied, rebound, stored in records or unions, exposed through extern/export ABI, or moved from fixed buffers, arrays, or views. Explicit `owned buffer copied from source` creates a fresh owned allocation without consuming the source. Direct temporary moves are allowed only as `move (owned-buffer-returning call)` actuals to consuming parameters. All-path moves of outer-scope owned buffers are allowed through `When`/`Otherwise` and step-level `Match`. Mixed move/live branches are rejected. Loops still reject moving an outer-scope owned buffer; move a loop-local binding instead.

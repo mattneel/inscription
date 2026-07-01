@@ -2225,6 +2225,7 @@ class CompilerTests(unittest.TestCase):
                 "To highlight anything flag: i1, giving i32.\nGive match flag:\ntrue gives 1;\nanything gives 0.\n",
                 "Union HighlightGuard has none; some value: i32 and marker: i32.\n\nTo highlight guard maybe: HighlightGuard, giving i32.\nGive match maybe:\nHighlightGuard.some with value ignored and marker as mark when mark is greater than zero gives mark;\nanything gives 0.\n",
                 "To highlight range b: u8, giving i32.\nGive match b:\nbyte \"0\" through byte \"9\" or byte \"A\" gives 1;\nanything gives 0.\n",
+                "To highlight copied, giving i32.\nLet cells be owned buffer of 1 i32 containing 7.\nLet copy be owned buffer copied from cells.\nGive copy at 0.\n",
             ]
         )
         html = highlight_source(source, output_format="html")
@@ -4803,6 +4804,252 @@ Give result plus seen.
             "range endpoint must have type i32, got i64",
         )
 
+    def test_v042_owned_buffer_literals_and_copy_initialization(self):
+        containing = compile_source(self.fixture("owned_buffer_containing.ins"))
+        self.assertIn("memref.alloc", containing)
+        self.assertIn("memref.store", containing)
+        self.assertIn("arith.constant 4 : i32", containing)
+
+        owned_bytes = compile_source(self.fixture("owned_buffer_bytes.ins"))
+        self.assertIn("memref<?xi8>", owned_bytes)
+        self.assertIn("arith.constant 104 : i8", owned_bytes)
+
+        copy_array = compile_source(self.fixture("owned_buffer_copy_array.ins"))
+        self.assertIn("func.func @copy_array", copy_array)
+        self.assertIn("scf.for", copy_array)
+        self.assertIn("memref.load", copy_array)
+        self.assertIn("memref.store", copy_array)
+
+        copy_view = compile_source(self.fixture("owned_buffer_copy_view.ins"))
+        self.assertIn("arith.addi", copy_view)
+        self.assertIn("memref<?xi32>", copy_view)
+
+        copy_owned = compile_source(self.fixture("owned_buffer_copy_owned.ins"))
+        self.assertIn("func.func @copy_owned", copy_owned)
+        self.assertIn("memref.dealloc", copy_owned)
+
+        returned = compile_source(self.fixture("owned_buffer_copy_return.ins"))
+        self.assertIn("func.func @make_bytes() -> (memref<?xi8>, i32)", returned)
+        self.assertIn("return", returned)
+
+        copy_move = compile_source(self.fixture("owned_buffer_copy_move.ins"))
+        self.assertIn("func.call @sum_and_drop_cells", copy_move)
+
+        layout = compile_source(self.fixture("owned_buffer_bytes_layout.ins"))
+        self.assertIn("func.func @owned_bytes_layout", layout)
+        self.assertIn("memref<?xi8>", layout)
+
+        self.assertCompileError(
+            "To bad, giving i32.\n"
+            "Let cells be owned buffer of 4 i32 containing 1, 2, 3.\n"
+            "Give 0.\n",
+            "owned buffer cells expects 4 elements, got 3",
+        )
+        self.assertCompileError(
+            "To bad, giving i32.\n"
+            "Let cells be owned buffer of 2 i32 containing 1, true.\n"
+            "Give 0.\n",
+            "owned buffer cells element 1 must have type i32, got i1",
+        )
+        self.assertCompileError(
+            "Union MaybeI32 has none.\n\n"
+            "To bad, giving i32.\n"
+            "Let values be owned buffer of 1 MaybeI32 containing MaybeI32.none.\n"
+            "Give 0.\n",
+            "owned buffer element type may not be a union type in v0.42",
+        )
+        self.assertCompileError(
+            "To bad, giving i32.\n"
+            "Let cells be owned buffer of 5 i32 containing bytes \"hello\".\n"
+            "Give 0.\n",
+            "byte string literal can only initialize u8 arrays, buffers, or owned buffers, got i32",
+        )
+        self.assertCompileError(
+            "To bad, giving i32.\n"
+            "Let bytes be owned buffer of 4 u8 containing bytes \"hello\".\n"
+            "Give 0.\n",
+            "owned buffer bytes expects 4 elements, got 5",
+        )
+        self.assertCompileError(
+            "To bad, giving i32.\n"
+            "Let bytes be owned buffer of bytes \"\".\n"
+            "Give 0.\n",
+            "owned byte buffer literal must contain at least one byte",
+        )
+        self.assertCompileError(
+            "To bad, giving i32.\n"
+            "Let copy be owned buffer copied from missing.\n"
+            "Give 0.\n",
+            "unknown binding missing",
+        )
+        self.assertCompileError(
+            "To bad, giving i32.\n"
+            "Let value be 1.\n"
+            "Let copy be owned buffer copied from value.\n"
+            "Give 0.\n",
+            "owned buffer copy source value must be buffer, array, view, or owned buffer, got i32",
+        )
+        self.assertCompileError(
+            "To consume cells cells: owned buffer of i32, giving i32.\n"
+            "Give length of cells.\n\n"
+            "To bad, giving i32.\n"
+            "Let cells be owned buffer of 4 i32 filled with 1.\n"
+            "Let n be consume cells move cells.\n"
+            "Let copy be owned buffer copied from cells.\n"
+            "Give n.\n",
+            "owned buffer cells was moved and cannot be used",
+        )
+        self.assertCompileError(
+            "To bad, giving i32.\n"
+            "Let numbers be array of 4 i32 containing 1, 2, 3, 4.\n"
+            "Let empty be view of numbers from 0 for 0.\n"
+            "Let copy be owned buffer copied from empty.\n"
+            "Give 0.\n",
+            "owned buffer copy source must have length at least 1",
+        )
+        self.assertCompileError(
+            "To make cells, giving owned buffer of i32.\n"
+            "Let cells be owned buffer of 4 i32 filled with 1.\n"
+            "Give cells.\n\n"
+            "To bad, giving i32.\n"
+            "Let copy be owned buffer copied from make cells.\n"
+            "Give 0.\n",
+            "owned buffer copy source must be a storage binding",
+        )
+
+    def test_v042_owned_buffer_literal_artifacts_and_runtime_checks(self):
+        try:
+            resolve_toolchain()
+        except ToolchainError:
+            return
+
+        env = {**os.environ, "PYTHONPATH": str(SRC)}
+        checked = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "inscription",
+                "run",
+                str(FIXTURES / "checked_owned_copy_dynamic.ins"),
+                "--runtime-checks",
+            ],
+            cwd=ROOT,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(checked.returncode, 4, checked.stderr)
+        self.assertEqual(checked.stdout, "")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            llvm_ir = tmp_path / "owned_buffer_containing.ll"
+            llvm_proc = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "inscription",
+                    "compile",
+                    str(FIXTURES / "owned_buffer_containing.ins"),
+                    "--emit",
+                    "llvm-ir",
+                    "--verify",
+                    "-o",
+                    str(llvm_ir),
+                ],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(llvm_proc.returncode, 0, llvm_proc.stderr)
+            self.assertIn("define i32 @main", llvm_ir.read_text())
+
+            exe = tmp_path / "owned_buffer_containing"
+            exe_proc = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "inscription",
+                    "compile",
+                    str(FIXTURES / "owned_buffer_containing.ins"),
+                    "--emit",
+                    "executable",
+                    "-o",
+                    str(exe),
+                ],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(exe_proc.returncode, 0, exe_proc.stderr)
+            run_proc = subprocess.run([str(exe)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False)
+            self.assertEqual(run_proc.returncode, 10, run_proc.stderr)
+            self.assertEqual(run_proc.stdout, "")
+
+            try:
+                resolve_toolchain(require_static_library=True)
+            except ToolchainError:
+                pass
+            else:
+                archive = tmp_path / "libowned_buffer_containing.a"
+                archive_proc = subprocess.run(
+                    [
+                        sys.executable,
+                        "-m",
+                        "inscription",
+                        "compile",
+                        str(FIXTURES / "owned_buffer_containing.ins"),
+                        "--emit",
+                        "static-library",
+                        "-o",
+                        str(archive),
+                    ],
+                    cwd=ROOT,
+                    env=env,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    check=False,
+                )
+                self.assertEqual(archive_proc.returncode, 0, archive_proc.stderr)
+                self.assertGreater(archive.stat().st_size, 0)
+
+            temps = tmp_path / "owned-buffer-containing-temps"
+            save_proc = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "inscription",
+                    "compile",
+                    str(FIXTURES / "owned_buffer_containing.ins"),
+                    "--emit",
+                    "llvm-ir",
+                    "--verify",
+                    "--save-temps",
+                    str(temps),
+                    "-o",
+                    str(tmp_path / "owned_buffer_containing.saved.ll"),
+                ],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(save_proc.returncode, 0, save_proc.stderr)
+            self.assertTrue((temps / "owned_buffer_containing.mlir").exists())
+            self.assertTrue((temps / "owned_buffer_containing.lowered.mlir").exists())
+            self.assertTrue((temps / "owned_buffer_containing.ll").exists())
+
     def test_v041_pattern_range_artifacts(self):
         try:
             resolve_toolchain()
@@ -6027,7 +6274,7 @@ Give result plus seen.
             ),
             "byte string splice in non-u8 array": (
                 "bad gives i32:\n  let cells be array of 5 i32 containing bytes \"hello\"\n  0\n",
-                "byte string literal can only initialize u8 arrays or buffers, got i32",
+                "byte string literal can only initialize u8 arrays, buffers, or owned buffers, got i32",
             ),
             "byte string splice count mismatch": (
                 "bad gives i32:\n  let text be array of 4 u8 containing bytes \"hello\"\n  0\n",
@@ -6035,7 +6282,7 @@ Give result plus seen.
             ),
             "byte string splice in enum array": (
                 "enum ByteEnum: u8:\n  a be 65\n\nbad gives i32:\n  let values be array of 1 ByteEnum containing bytes \"A\"\n  0\n",
-                "byte string literal can only initialize u8 arrays or buffers, got ByteEnum",
+                "byte string literal can only initialize u8 arrays, buffers, or owned buffers, got ByteEnum",
             ),
             "duplicate byte match pattern": (
                 "bad b: u8 gives i32:\n  match b:\n    byte \"A\" gives 1\n    65 gives 2\n    otherwise gives 3\n",
@@ -6223,9 +6470,9 @@ Give result plus seen.
                 "bad gives i32:\n  for i from 0 up to 1:\n    let cells be owned buffer of 4 i32 filled with 0\n    cells becomes 1\n  0\n",
                 "cannot rebind owned buffer cells",
             ),
-            "owned buffer byte string unsupported": (
-                "bad gives i32:\n  let bytes be owned buffer of bytes \"hello\"\n  0\n",
-                "owned buffer byte-string initialization is not supported in v0.29",
+            "empty owned byte buffer": (
+                "bad gives i32:\n  let bytes be owned buffer of bytes \"\"\n  0\n",
+                "owned byte buffer literal must contain at least one byte",
             ),
             "owned buffer static index out of bounds": (
                 "bad gives i32:\n  let cells be owned buffer of 4 i32 filled with 0\n  cells at 4\n",

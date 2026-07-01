@@ -1003,9 +1003,9 @@ def _check_view_type(view_type: ViewType, line: int) -> None:
         raise InscriptionError(f"view element type must be an integer type, got {format_type(view_type.element_type)}", line)
 
 
-def _check_owned_buffer_element_type(element_type: ValueType, line: int) -> None:
+def _check_owned_buffer_element_type(element_type: ValueType, line: int, *, version: str = "v0.36") -> None:
     if isinstance(element_type, UnionType):
-        raise InscriptionError("owned buffer element type may not be a union type in v0.36", line)
+        raise InscriptionError(f"owned buffer element type may not be a union type in {version}", line)
     if not is_numeric_type(element_type) and not isinstance(element_type, EnumType):
         raise InscriptionError(f"owned buffer element type must be numeric or enum, got {format_type(element_type)}", line)
 
@@ -1240,7 +1240,7 @@ def _declare_let(
 
 
 def expand_storage_values(
-    kind: Literal["buffer", "array"],
+    kind: Literal["buffer", "array", "owned buffer"],
     name: str,
     values: tuple[StorageElement, ...],
     element_type: ValueType,
@@ -1251,7 +1251,7 @@ def expand_storage_values(
         if isinstance(value, ByteString):
             if element_type != "u8":
                 raise InscriptionError(
-                    f"byte string literal can only initialize u8 arrays or buffers, got {format_type(element_type)}",
+                    f"byte string literal can only initialize u8 arrays, buffers, or owned buffers, got {format_type(element_type)}",
                     value.line,
                 )
             expanded.extend(Integer(byte, value.line) for byte in value.values)
@@ -1341,8 +1341,27 @@ def _declare_owned_buffer(
 ) -> None:
     _check_no_shadow(stmt.name, stmt.line, bindings, kind="owned buffer")
     env = _env_types(bindings)
+    if stmt.copy_source_name is not None:
+        source = bindings.get(stmt.copy_source_name)
+        if source is None:
+            raise InscriptionError(f"unknown binding {stmt.copy_source_name}", stmt.line)
+        if source.moved:
+            raise InscriptionError(f"owned buffer {stmt.copy_source_name} was moved and cannot be used", stmt.line)
+        if not isinstance(source.type_name, BufferType | ArrayType | ViewType | OwnedBufferType):
+            raise InscriptionError(
+                f"owned buffer copy source {stmt.copy_source_name} must be buffer, array, view, or owned buffer, got {format_type(source.type_name)}",
+                stmt.line,
+            )
+        element_type = source.type_name.element_type
+        _check_owned_buffer_element_type(element_type, stmt.line, version="v0.42")
+        static_length = _static_storage_length(source.type_name)
+        if static_length is not None and static_length < 1:
+            raise InscriptionError("owned buffer copy source must have length at least 1", stmt.line)
+        bindings[stmt.name] = Binding(OwnedBufferType(element_type, static_length), "owned_buffer", stmt.line, root=stmt.name, scope_depth=scope_depth)
+        return
+
+    assert stmt.length is not None and stmt.element_type is not None
     _check_expr_ownership(stmt.length, bindings, functions, records, constants, scope_depth=scope_depth)
-    _check_expr_ownership(stmt.fill, bindings, functions, records, constants, scope_depth=scope_depth)
     length_type = _infer_declared_type(stmt.length, "i32", env, functions, records, constants)
     if length_type != "i32":
         raise InscriptionError(f"owned buffer length must have type i32, got {format_type(length_type)}", stmt.line)
@@ -1350,13 +1369,30 @@ def _declare_owned_buffer(
     if static_length is not None and static_length < 1:
         raise InscriptionError("owned buffer length must be at least 1", getattr(stmt.length, "line", stmt.line))
     element_type = resolve_value_type(stmt.element_type, stmt.line, records, constants, functions, env)
-    _check_owned_buffer_element_type(element_type, stmt.line)
-    actual = _infer_declared_type(stmt.fill, element_type, env, functions, records, constants)
-    if actual != element_type:
-        raise InscriptionError(
-            f"owned buffer {stmt.name} fill value must have type {format_type(element_type)}, got {format_type(actual)}",
-            stmt.line,
-        )
+    _check_owned_buffer_element_type(element_type, stmt.line, version="v0.42" if stmt.values else "v0.36")
+    if stmt.values:
+        values = expand_storage_values("owned buffer", stmt.name, stmt.values, element_type, stmt.line)
+        if static_length is not None and len(values) != static_length:
+            raise InscriptionError(f"owned buffer {stmt.name} expects {static_length} elements, got {len(values)}", stmt.line)
+        if static_length is None:
+            raise InscriptionError("owned buffer containing length must be compile-time evaluable", getattr(stmt.length, "line", stmt.line))
+        for index, value in enumerate(values):
+            _check_expr_ownership(value, bindings, functions, records, constants, scope_depth=scope_depth)
+            actual = _infer_declared_type(value, element_type, env, functions, records, constants)
+            if actual != element_type:
+                raise InscriptionError(
+                    f"owned buffer {stmt.name} element {index} must have type {format_type(element_type)}, got {format_type(actual)}",
+                    getattr(value, "line", stmt.line),
+                )
+    else:
+        assert stmt.fill is not None
+        _check_expr_ownership(stmt.fill, bindings, functions, records, constants, scope_depth=scope_depth)
+        actual = _infer_declared_type(stmt.fill, element_type, env, functions, records, constants)
+        if actual != element_type:
+            raise InscriptionError(
+                f"owned buffer {stmt.name} fill value must have type {format_type(element_type)}, got {format_type(actual)}",
+                stmt.line,
+            )
     bindings[stmt.name] = Binding(OwnedBufferType(element_type, static_length), "owned_buffer", stmt.line, root=stmt.name, scope_depth=scope_depth)
 
 
