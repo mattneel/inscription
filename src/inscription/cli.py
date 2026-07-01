@@ -8,7 +8,8 @@ from pathlib import Path
 from .buildscript import build_step_display, load_build_plan, run_build_script
 from .package import PackageTestSummary
 from .compiler import compile_file, load_program
-from .diagnostics import InscriptionError, render_exception
+from .diagnostics import Diagnostic, InscriptionError, SourceSpan, render_diagnostic, render_exception
+from .diagnostic_codes import diagnostic_catalog_json, explain_diagnostic_code, lookup_diagnostic_code, sorted_diagnostic_codes
 from .doctor import run_doctor
 from .formatter import format_file
 from .interface import emit_c_header, emit_interface_json, load_interface_context
@@ -101,6 +102,43 @@ def _attach_cli_source_context(args: argparse.Namespace, exc: InscriptionError) 
         return exc
 
 
+def _render_toolchain_error(exc: ToolchainError) -> str:
+    message = str(exc)
+    if "not found" in message:
+        code = "INS-TOOL-0001"
+    elif "does not report" in message:
+        code = "INS-TOOL-0002"
+    else:
+        code = None
+    return render_diagnostic(Diagnostic(message, code=code))
+
+
+def _explain_list_text() -> str:
+    entries = sorted_diagnostic_codes()
+    width = max(len(entry.code) for entry in entries)
+    return "".join(f"{entry.code:<{width}}  {entry.title}\n" for entry in entries)
+
+
+def _print_test_failure_diagnostic(result) -> None:
+    source_path = getattr(result, "source_path", None)
+    source = None
+    if isinstance(source_path, Path) and source_path.exists():
+        try:
+            source = source_path.read_text()
+        except OSError:
+            source = None
+    line = _first_expect_line(result.test) or result.test.line
+    path = source_path.as_posix() if isinstance(source_path, Path) else None
+    print(render_diagnostic(Diagnostic("expect failed", code="INS-TEST-0001", span=SourceSpan(path, line)), source=source))
+
+
+def _first_expect_line(test) -> int | None:
+    for stmt in getattr(test, "body", ()):  # direct Expect statements cover current source tests.
+        if stmt.__class__.__name__ == "ExpectStmt":
+            return getattr(stmt, "line", None)
+    return None
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="inscription")
     parser.add_argument("--version", action="store_true", help="print the Inscription tool version and exit")
@@ -158,6 +196,11 @@ def main(argv: list[str] | None = None) -> int:
 
     version_p = sub.add_parser("version", help="print deterministic version metadata")
     version_p.add_argument("--json", action="store_true", help="emit version metadata as JSON")
+
+    explain_p = sub.add_parser("explain", help="explain a stable diagnostic code")
+    explain_p.add_argument("code", nargs="?", help="diagnostic code to explain, for example INS-SEM-0001")
+    explain_p.add_argument("--list", action="store_true", help="list known diagnostic codes")
+    explain_p.add_argument("--json", action="store_true", help="emit diagnostic catalog or entry as JSON")
 
     doctor_p = sub.add_parser("doctor", help="run deterministic environment and package health checks")
     doctor_p.add_argument("root", nargs="?", type=Path, default=Path("."), help="package root to inspect when package.ins is present")
@@ -291,6 +334,23 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 print("\n".join(version_lines()))
             return 0
+        if args.command == "explain":
+            if args.list:
+                if args.json:
+                    sys.stdout.write(diagnostic_catalog_json())
+                else:
+                    sys.stdout.write(_explain_list_text())
+                return 0
+            if args.code is None:
+                raise InscriptionError("explain requires CODE or --list")
+            entry = lookup_diagnostic_code(args.code)
+            if entry is None:
+                raise InscriptionError(f"unknown diagnostic code {args.code.upper()}")
+            if args.json:
+                print(json.dumps(entry.__dict__, indent=2, ensure_ascii=False))
+            else:
+                sys.stdout.write(explain_diagnostic_code(entry))
+            return 0
         if args.command == "doctor":
             result = run_doctor(
                 args.root,
@@ -417,6 +477,8 @@ def main(argv: list[str] | None = None) -> int:
             for result in summary.results:
                 status = "ok" if result.passed else "FAILED"
                 print(f"test {result.display_name} ... {status}")
+                if not result.passed:
+                    _print_test_failure_diagnostic(result)
             print()
             if summary.failed:
                 print(f"test result: FAILED. {summary.passed} passed; {summary.failed} failed.")
@@ -477,6 +539,8 @@ def main(argv: list[str] | None = None) -> int:
                 for result in summary.results:
                     status = "ok" if result.passed else "FAILED"
                     print(f"test {result.display_name} ... {status}")
+                    if not result.passed:
+                        _print_test_failure_diagnostic(result)
                 print()
                 if summary.failed:
                     print(f"test result: FAILED. {summary.passed} passed; {summary.failed} failed.")
@@ -604,6 +668,8 @@ def main(argv: list[str] | None = None) -> int:
                         for test_result in result.test_summary.results:
                             status = "ok" if test_result.passed else "FAILED"
                             print(f"test {test_result.display_name} ... {status}")
+                            if not test_result.passed:
+                                _print_test_failure_diagnostic(test_result)
                         print()
                         print(
                             f"test result: FAILED. {result.test_summary.passed} passed; "
@@ -695,6 +761,8 @@ def main(argv: list[str] | None = None) -> int:
         if isinstance(exc, InscriptionError):
             _attach_cli_source_context(args, exc)
             print(render_exception(exc), file=sys.stderr)
+        elif isinstance(exc, ToolchainError):
+            print(_render_toolchain_error(exc), file=sys.stderr)
         else:
             print(f"error: {exc}", file=sys.stderr)
         return 2

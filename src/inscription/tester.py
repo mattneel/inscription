@@ -20,6 +20,7 @@ class TestRunItem:
     display_name: str
     passed: bool
     artifacts: ArtifactResult | None = None
+    source_path: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -140,5 +141,5 @@ def run_tests(
             passed += 1
         else:
             failed += 1
-        results.append(TestRunItem(test, display, ok, artifacts))
+        results.append(TestRunItem(test, display, ok, artifacts, source_path=source_path))
     return TestRunSummary(passed, failed, tuple(results))

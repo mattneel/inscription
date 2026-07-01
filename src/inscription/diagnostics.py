@@ -4,6 +4,8 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
+from .diagnostic_codes import diagnostic_code_for_message
+
 
 @dataclass(frozen=True)
 class SourceSpan:
@@ -52,7 +54,7 @@ class InscriptionError(Exception):
         self.end_column = end_column
         self.path = _path_text(path)
         self.source = source
-        self.code = code
+        self.code = code or diagnostic_code_for_message(message)
         self.notes = notes
         if line is None:
             super().__init__(message)
@@ -103,7 +105,8 @@ def render_diagnostic(diagnostic: Diagnostic, *, source: str | None = None) -> s
     """Render a deterministic, color-free diagnostic with a source excerpt."""
 
     severity = diagnostic.severity or "error"
-    out = [f"{severity}: {diagnostic.message}"]
+    header = f"{severity}[{diagnostic.code}]" if diagnostic.code else severity
+    out = [f"{header}: {diagnostic.message}"]
     if diagnostic.span is not None:
         _append_span(out, diagnostic.span, diagnostic.message, source)
     for note in diagnostic.notes:

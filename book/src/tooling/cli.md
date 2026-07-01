@@ -6,6 +6,8 @@ Common commands:
 PYTHONPATH=src python -m inscription --version
 PYTHONPATH=src python -m inscription version --json
 PYTHONPATH=src python -m inscription doctor --json
+PYTHONPATH=src python -m inscription explain INS-SEM-0001
+PYTHONPATH=src python -m inscription explain --list
 PYTHONPATH=src python -m inscription compile SOURCE --verify
 PYTHONPATH=src python -m inscription run SOURCE
 PYTHONPATH=src python -m inscription test SOURCE
@@ -21,7 +23,7 @@ PYTHONPATH=src python -m inscription check-tools --show-pipeline
 PYTHONPATH=src python -m inscription doctor --check-pages-workflow
 ```
 
-`--version` and `version` print deterministic version metadata. `doctor` checks Python, LLVM/MLIR tools, optional artifact/docs tools, package health, and build-script health without mutating files. `compile` emits artifacts without executing the program. `run` lowers through LLVM 22 and executes `main` with `lli`. `test` discovers top-level `Test ... .` declarations, compiles each selected test through the MLIR/LLVM pipeline, and reports a deterministic summary. `package new` and `package init` generate formatter-clean package skeletons. `package format` checks or rewrites package-owned `.ins` files. `package clean` removes generated package `build/` artifacts. `package check` validates `package.ins` manifests, dependency graphs, and package source layout. `package test` discovers test files from the manifest test directory and runs them with the package source directory plus direct dependency exposed modules as import roots. `package build` emits package-aware artifacts through the existing compile pipeline. `package release` assembles deterministic release bundle directories and can add reproducible archives plus SHA-256 manifests; release metadata includes Inscription tool/language metadata. `build` interprets `build.ins` and dispatches named release/archive, clean, format, check, test, artifact, documentation, and group steps through the package machinery. `format` is parse-only and does not need LLVM tools. `highlight` uses the same Inscription lexer used by this book.
+`--version` and `version` print deterministic version metadata. `explain` prints local diagnostic-code explanations and `explain --list` lists the deterministic diagnostic catalog. `doctor` checks Python, LLVM/MLIR tools, optional artifact/docs tools, package health, and build-script health without mutating files. `compile` emits artifacts without executing the program. `run` lowers through LLVM 22 and executes `main` with `lli`. `test` discovers top-level `Test ... .` declarations, compiles each selected test through the MLIR/LLVM pipeline, and reports a deterministic summary. `package new` and `package init` generate formatter-clean package skeletons. `package format` checks or rewrites package-owned `.ins` files. `package clean` removes generated package `build/` artifacts. `package check` validates `package.ins` manifests, dependency graphs, and package source layout. `package test` discovers test files from the manifest test directory and runs them with the package source directory plus direct dependency exposed modules as import roots. `package build` emits package-aware artifacts through the existing compile pipeline. `package release` assembles deterministic release bundle directories and can add reproducible archives plus SHA-256 manifests; release metadata includes Inscription tool/language metadata. `build` interprets `build.ins` and dispatches named release/archive, clean, format, check, test, artifact, documentation, and group steps through the package machinery. `format` is parse-only and does not need LLVM tools. `highlight` uses the same Inscription lexer used by this book.
 
 Useful test options:
 
@@ -34,7 +36,7 @@ PYTHONPATH=src python -m inscription test SOURCE --save-temps /tmp/inscription-t
 
 `test` exits 0 when all selected tests pass, exits 1 when any selected test fails at runtime, and exits 2 for compiler/tooling diagnostics.
 
-Compiler, package, build-script, and formatter diagnostics render source excerpts when a source span is available. Output is deterministic and color-free by default.
+Compiler, package, build-script, formatter, and common test diagnostics render source excerpts when a source span is available. v0.63 diagnostics may include stable codes such as `error[INS-SEM-0001]: ...`; use `inscription explain CODE` for details. Output is deterministic and color-free by default.
 
 
 Useful package commands:

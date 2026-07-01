@@ -20,6 +20,7 @@ sys.path.insert(0, str(SRC))
 
 from inscription.buildscript import parse_build_script
 from inscription.compiler import compile_file as _compile_file, compile_source as _compile_source, load_program
+from inscription.diagnostic_codes import CODE_RE, DIAGNOSTIC_CODES, diagnostic_catalog_payload, sorted_diagnostic_codes
 from inscription.diagnostics import Diagnostic, InscriptionError, SourceSpan, render_diagnostic
 from inscription.formatter import format_source
 from inscription.interpreter import FloatValue, IntValue, Interpreter, InterpreterError
@@ -10103,6 +10104,152 @@ Give result plus seen.
             self.assertIn("build.ins:5", build_proc.stderr)
             self.assertIn("Build.c header named \"library\".", build_proc.stderr)
             self.assertIn("^^^^^^^", build_proc.stderr)
+
+    def test_v063_diagnostic_code_registry_and_renderer(self):
+        codes = list(DIAGNOSTIC_CODES)
+        self.assertEqual(codes, sorted(codes))
+        self.assertEqual(len(codes), len(set(codes)))
+        for code, entry in DIAGNOSTIC_CODES.items():
+            with self.subTest(code=code):
+                self.assertRegex(code, CODE_RE)
+                self.assertEqual(entry.code, code)
+                self.assertTrue(entry.category)
+                self.assertTrue(entry.title)
+                self.assertTrue(entry.summary)
+                self.assertTrue(entry.explanation)
+
+        payload = diagnostic_catalog_payload()
+        self.assertEqual([entry["code"] for entry in payload], codes)
+        self.assertEqual([entry.code for entry in sorted_diagnostic_codes()], codes)
+
+        coded = render_diagnostic(
+            Diagnostic("unknown binding missing", SourceSpan("example.ins", 2, 6, end_column=13), code="INS-SEM-0001"),
+            source="To main, giving i32.\nGive missing.\n",
+        )
+        self.assertIn("error[INS-SEM-0001]: unknown binding missing", coded)
+        self.assertIn("--> example.ins:2:6", coded)
+
+        plain = render_diagnostic(Diagnostic("plain failure"))
+        self.assertEqual(plain, "error: plain failure")
+
+        diagnostics_page = ROOT / "book" / "src" / "reference" / "diagnostics.md"
+        diagnostics_text = diagnostics_page.read_text()
+        for code in codes:
+            with self.subTest(documented_code=code):
+                self.assertIn(code, diagnostics_text)
+
+    def test_v063_explain_cli_and_coded_diagnostic_smokes(self):
+        env = {**os.environ, "PYTHONPATH": str(SRC)}
+
+        def run_cli(*args: str | Path, cwd: Path = ROOT) -> subprocess.CompletedProcess[str]:
+            return subprocess.run(
+                [sys.executable, "-m", "inscription", *(str(arg) for arg in args)],
+                cwd=cwd,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+
+        listed = run_cli("explain", "--list")
+        self.assertEqual(listed.returncode, 0, listed.stderr)
+        listed_codes = [line.split()[0] for line in listed.stdout.splitlines() if line.strip()]
+        self.assertEqual(listed_codes, list(DIAGNOSTIC_CODES))
+        self.assertIn("INS-SEM-0001", listed.stdout)
+
+        listed_json = run_cli("explain", "--list", "--json")
+        self.assertEqual(listed_json.returncode, 0, listed_json.stderr)
+        self.assertEqual(json.loads(listed_json.stdout), diagnostic_catalog_payload())
+
+        explained = run_cli("explain", "ins-sem-0001")
+        self.assertEqual(explained.returncode, 0, explained.stderr)
+        self.assertIn("INS-SEM-0001: Unknown binding", explained.stdout)
+        self.assertIn("The compiler could not find a binding", explained.stdout)
+
+        explained_json = run_cli("explain", "INS-PARSE-0001", "--json")
+        self.assertEqual(explained_json.returncode, 0, explained_json.stderr)
+        self.assertEqual(json.loads(explained_json.stdout)["code"], "INS-PARSE-0001")
+
+        unknown = run_cli("explain", "INS-NOPE-9999")
+        self.assertEqual(unknown.returncode, 2)
+        self.assertIn("unknown diagnostic code INS-NOPE-9999", unknown.stderr)
+        self.assertIn("error[INS-COMP-0001]", unknown.stderr)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            bad = tmp_path / "bad.ins"
+            bad.write_text("To main, giving i32.\nGive missing.\n")
+            bad_proc = run_cli("compile", bad)
+            self.assertEqual(bad_proc.returncode, 2)
+            self.assertIn("error[INS-SEM-0001]", bad_proc.stderr)
+            self.assertIn(f"{bad}:2", bad_proc.stderr)
+            self.assertIn("Give missing.", bad_proc.stderr)
+
+            bad_period = tmp_path / "bad_period.ins"
+            bad_period.write_text("To main, giving i32.\nGive 42\n")
+            period_proc = run_cli("compile", bad_period)
+            self.assertEqual(period_proc.returncode, 2)
+            self.assertIn("error[INS-PARSE-0001]", period_proc.stderr)
+
+            bad_pkg = tmp_path / "badpkg"
+            bad_pkg.mkdir()
+            (bad_pkg / "package.ins").write_text(
+                "Package Bad.\n\n"
+                "Sources are in \"src\".\n"
+                "Sources are in \"source\".\n\n"
+                "Root module is Bad.\n"
+            )
+            pkg_proc = run_cli("package", "check", bad_pkg)
+            self.assertEqual(pkg_proc.returncode, 2)
+            self.assertIn("error[INS-PKG-0002]", pkg_proc.stderr)
+            self.assertIn("Sources are in \"source\".", pkg_proc.stderr)
+
+            bad_build = tmp_path / "badbuild"
+            (bad_build / "src").mkdir(parents=True)
+            (bad_build / "package.ins").write_text(
+                "Package BadBuild.\n\n"
+                "Sources are in \"src\".\n\n"
+                "Root module is BadBuild.\n"
+                "Expose module BadBuild.\n"
+            )
+            (bad_build / "src" / "BadBuild.ins").write_text("Module BadBuild.\n\nTo main, giving i32.\nGive 0.\n")
+            (bad_build / "build.ins").write_text(
+                "Import Build.\n\n"
+                "To build package package: Build.Package.\n"
+                "Build.static library named \"library\".\n"
+                "Build.c header named \"library\".\n"
+            )
+            build_proc = run_cli("build", bad_build, "--list")
+            self.assertEqual(build_proc.returncode, 2)
+            self.assertIn("error[INS-BUILD-0001]", build_proc.stderr)
+            self.assertIn("Build.c header named \"library\".", build_proc.stderr)
+
+            messy = tmp_path / "messy.ins"
+            messy.write_text("\n\nTo main, giving i32.\n\nGive   1 plus 2.\n")
+            fmt_proc = run_cli("format", messy, "--check")
+            self.assertEqual(fmt_proc.returncode, 2)
+            self.assertIn("error[INS-FMT-0001]", fmt_proc.stderr)
+
+            failing_test = tmp_path / "failing_test.ins"
+            failing_test.write_text("Test failure.\nExpect 1 is equal to 2.\n")
+            test_proc = run_cli("test", failing_test)
+            self.assertEqual(test_proc.returncode, 1)
+            self.assertIn("error[INS-TEST-0001]", test_proc.stdout)
+            self.assertIn("Expect 1 is equal to 2.", test_proc.stdout)
+
+            owned = tmp_path / "owned_bad.ins"
+            owned.write_text(
+                "To consume cells cells: owned buffer of i32, giving i32.\n"
+                "Give length of cells.\n\n"
+                "To bad, giving i32.\n"
+                "Let cells be owned buffer of 4 i32 filled with 1.\n"
+                "Let n be consume cells move cells.\n"
+                "Give length of cells.\n"
+            )
+            owned_proc = run_cli("compile", owned)
+            self.assertEqual(owned_proc.returncode, 2)
+            self.assertIn("error[INS-OWN-0001]", owned_proc.stderr)
 
 
 class FormatterTests(unittest.TestCase):
