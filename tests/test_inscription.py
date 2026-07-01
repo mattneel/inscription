@@ -8473,6 +8473,215 @@ Give result plus seen.
             self.assertIn("build step tests ... ok", no_tests_proc.stdout)
             self.assertIn("no tests found", no_tests_proc.stdout)
 
+    def test_v052_build_group_parser_default_and_diagnostics(self):
+        source = (
+            "Import Build.\n\n"
+            "To build package package: Build.Package.\n"
+            "Build.check package named \"check\".\n"
+            "Build.tests named \"tests\".\n"
+            "Build.static library named \"library\".\n"
+            "Build.group named \"ci\" with steps \"check\" and \"tests\".\n"
+            "Build.group named \"release\" with steps \"ci\" and \"library\".\n"
+            "Build.default step is \"ci\".\n"
+        )
+        script = parse_build_script(source)
+        self.assertEqual(script.default_step, "ci")
+        self.assertEqual([(step.name, step.emit, step.dependencies) for step in script.steps], [
+            ("check", "package-check", ()),
+            ("tests", "package-tests", ()),
+            ("library", "static-library", ()),
+            ("ci", "group", ("check", "tests")),
+            ("release", "group", ("ci", "library")),
+        ])
+        formatted = format_source(source)
+        self.assertEqual(format_source(formatted), formatted)
+
+        cases = {
+            "empty group": (
+                "Import Build.\n\nTo build package package: Build.Package.\n"
+                "Build.group named \"ci\" with steps.\n",
+                "build group ci must include at least one step",
+            ),
+            "duplicate group dependency": (
+                "Import Build.\n\nTo build package package: Build.Package.\n"
+                "Build.check package named \"check\".\n"
+                "Build.group named \"ci\" with steps \"check\" and \"check\".\n",
+                "build group ci includes step check more than once",
+            ),
+            "unknown group dependency": (
+                "Import Build.\n\nTo build package package: Build.Package.\n"
+                "Build.group named \"ci\" with steps \"missing\".\n",
+                "build group ci references unknown step missing",
+            ),
+            "group cycle": (
+                "Import Build.\n\nTo build package package: Build.Package.\n"
+                "Build.group named \"a\" with steps \"b\".\n"
+                "Build.group named \"b\" with steps \"a\".\n",
+                "build step dependency cycle detected: a -> b -> a",
+            ),
+            "duplicate default": (
+                "Import Build.\n\nTo build package package: Build.Package.\n"
+                "Build.check package named \"check\".\n"
+                "Build.default step is \"check\".\n"
+                "Build.default step is \"check\".\n",
+                "build script declares default step more than once",
+            ),
+            "unknown default": (
+                "Import Build.\n\nTo build package package: Build.Package.\n"
+                "Build.default step is \"missing\".\n",
+                "default build step missing is not defined",
+            ),
+            "bad dependency name": (
+                "Import Build.\n\nTo build package package: Build.Package.\n"
+                "Build.group named \"ci\" with steps \"../check\".\n",
+                "build step name must not contain path separators",
+            ),
+            "duplicate group name": (
+                "Import Build.\n\nTo build package package: Build.Package.\n"
+                "Build.check package named \"ci\".\n"
+                "Build.group named \"ci\" with steps \"ci\".\n",
+                "build step ci is already defined",
+            ),
+        }
+        for name, (case_source, contains) in cases.items():
+            with self.subTest(name=name):
+                with self.assertRaises(InscriptionError) as ctx:
+                    parse_build_script(case_source)
+                self.assertIn(contains, str(ctx.exception))
+
+    def test_v052_build_groups_default_execution_and_save_temps(self):
+        env = {**os.environ, "PYTHONPATH": str(SRC)}
+        fixture = ROOT / "tests" / "fixtures" / "packages" / "build_script_group_package"
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            package = tmp_path / "build_script_group_package"
+            shutil.copytree(fixture, package)
+
+            list_proc = subprocess.run(
+                [sys.executable, "-m", "inscription", "build", str(package), "--list"],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(list_proc.returncode, 0, list_proc.stderr)
+            self.assertIn("build step ci: group -> check, tests\n", list_proc.stdout)
+            self.assertIn("build step release: group -> check, tests, library, header\n", list_proc.stdout)
+            self.assertIn("build default: ci\n", list_proc.stdout)
+
+            default_proc = subprocess.run(
+                [sys.executable, "-m", "inscription", "build", str(package)],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(default_proc.returncode, 0, default_proc.stderr)
+            self.assertIn("build step check ... ok", default_proc.stdout)
+            self.assertIn("build step tests ... ok", default_proc.stdout)
+            self.assertIn("build step ci ... ok", default_proc.stdout)
+            self.assertNotIn("build step library ... ok", default_proc.stdout)
+            self.assertFalse((package / "build" / "liblibrary.a").exists())
+
+            temps = tmp_path / "temps"
+            release_proc = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "inscription",
+                    "build",
+                    str(package),
+                    "release",
+                    "--save-temps",
+                    str(temps),
+                ],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(release_proc.returncode, 0, release_proc.stderr)
+            self.assertIn("build step release ... ok", release_proc.stdout)
+            self.assertTrue((package / "build" / "liblibrary.a").exists())
+            self.assertTrue((package / "build" / "header.h").exists())
+            self.assertTrue(any((temps / "tests").glob("*.ll")))
+            self.assertTrue((temps / "library" / "BuildGroup.mlir").exists())
+            self.assertFalse((temps / "release").exists())
+
+            app_proc = subprocess.run(
+                [sys.executable, "-m", "inscription", "build", str(package), "app"],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(app_proc.returncode, 0, app_proc.stderr)
+            run_proc = subprocess.run([str(package / "build" / "app")], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False)
+            self.assertEqual(run_proc.returncode, 42, run_proc.stderr)
+
+    def test_v052_build_groups_deduplicate_and_propagate_failures(self):
+        env = {**os.environ, "PYTHONPATH": str(SRC)}
+        fixtures = ROOT / "tests" / "fixtures" / "packages"
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            package = tmp_path / "build_script_group_package"
+            shutil.copytree(fixtures / "build_script_group_package", package)
+            (package / "build.ins").write_text(
+                "Import Build.\n\n"
+                "To build package package: Build.Package.\n"
+                "Build.check package named \"check\".\n"
+                "Build.tests named \"tests\".\n"
+                "Build.static library named \"library\".\n"
+                "Build.group named \"ci\" with steps \"check\" and \"tests\".\n"
+                "Build.group named \"all\" with steps \"ci\" and \"tests\" and \"library\".\n"
+                "Build.default step is \"all\".\n"
+            )
+            all_proc = subprocess.run(
+                [sys.executable, "-m", "inscription", "build", str(package)],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(all_proc.returncode, 0, all_proc.stderr)
+            self.assertEqual(all_proc.stdout.count("build step tests ... ok"), 1)
+            self.assertIn("build step ci ... ok", all_proc.stdout)
+            self.assertIn("build step all ... ok", all_proc.stdout)
+
+            failing = tmp_path / "failing_package"
+            shutil.copytree(fixtures / "failing_package", failing)
+            (failing / "build.ins").write_text(
+                "Import Build.\n\n"
+                "To build package package: Build.Package.\n"
+                "Build.tests named \"tests\".\n"
+                "Build.static library named \"library\".\n"
+                "Build.group named \"ci\" with steps \"tests\" and \"library\".\n"
+                "Build.default step is \"ci\".\n"
+            )
+            failing_proc = subprocess.run(
+                [sys.executable, "-m", "inscription", "build", str(failing)],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(failing_proc.returncode, 1)
+            self.assertIn("build step tests ... FAILED", failing_proc.stdout)
+            self.assertIn("build step ci ... FAILED", failing_proc.stdout)
+            self.assertFalse((failing / "build" / "liblibrary.a").exists())
+
 
 class FormatterTests(unittest.TestCase):
     def cli(self, *args: str, cwd: Path | None = None) -> subprocess.CompletedProcess[str]:

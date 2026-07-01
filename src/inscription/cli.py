@@ -4,7 +4,7 @@ import argparse
 import sys
 from pathlib import Path
 
-from .buildscript import build_step_display, list_build_steps, run_build_script
+from .buildscript import build_step_display, load_build_plan, run_build_script
 from .package import PackageTestSummary
 from .compiler import compile_file, load_program
 from .diagnostics import InscriptionError
@@ -382,9 +382,11 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "build":
             root, step_name = _resolve_build_positionals(args.build_args)
             if args.list:
-                steps = list_build_steps(root)
-                for step in steps:
+                script = load_build_plan(root)
+                for step in script.steps:
                     print(f"build step {step.name}: {build_step_display(step)}")
+                if script.default_step is not None:
+                    print(f"build default: {script.default_step}")
                 return 0
             results = run_build_script(
                 root,
@@ -396,18 +398,19 @@ def main(argv: list[str] | None = None) -> int:
             )
             exit_status = 0
             for result in results:
-                if isinstance(result.test_summary, PackageTestSummary) and result.test_summary.failed:
+                if result.failed:
                     print(f"build step {result.step.name} ... FAILED")
-                    for test_result in result.test_summary.results:
-                        status = "ok" if test_result.passed else "FAILED"
-                        print(f"test {test_result.display_name} ... {status}")
-                    print()
-                    print(
-                        f"test result: FAILED. {result.test_summary.passed} passed; "
-                        f"{result.test_summary.failed} failed."
-                    )
+                    if isinstance(result.test_summary, PackageTestSummary):
+                        for test_result in result.test_summary.results:
+                            status = "ok" if test_result.passed else "FAILED"
+                            print(f"test {test_result.display_name} ... {status}")
+                        print()
+                        print(
+                            f"test result: FAILED. {result.test_summary.passed} passed; "
+                            f"{result.test_summary.failed} failed."
+                        )
                     exit_status = 1
-                    break
+                    continue
                 print(f"build step {result.step.name} ... ok")
                 if isinstance(result.test_summary, str):
                     print(result.test_summary)

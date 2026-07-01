@@ -58,6 +58,7 @@ class BuildStep:
     name: str
     emit: str
     line: int
+    dependencies: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -65,6 +66,7 @@ class BuildScript:
     path: Path
     steps: tuple[BuildStep, ...]
     comments: tuple[SourceComment, ...] = ()
+    default_step: str | None = None
 
 
 @dataclass(frozen=True)
@@ -74,9 +76,12 @@ class BuildExecutionResult:
     package_result: PackageBuildResult | None = None
     package_context: PackageContext | None = None
     test_summary: PackageTestSummary | str | None = None
+    failed: bool = False
 
     @property
     def exit_status(self) -> int:
+        if self.failed:
+            return 1
         if isinstance(self.test_summary, PackageTestSummary):
             return self.test_summary.exit_status
         return 0
@@ -135,6 +140,7 @@ def parse_build_script(source: str, *, path: Path | None = None) -> BuildScript:
 
     steps: list[BuildStep] = []
     seen: set[str] = set()
+    default_step: str | None = None
     body_sentences = sentences[build_sentence_index + 1 :]
     for sentence in body_sentences:
         text = sentence.text
@@ -150,6 +156,12 @@ def parse_build_script(source: str, *, path: Path | None = None) -> BuildScript:
             # v0.50 accepts pure setup statements syntactically, but artifact names
             # intentionally remain string literals in Build API calls.
             continue
+        default_name = _parse_default_step(text, sentence.line)
+        if default_name is not None:
+            if default_step is not None:
+                raise InscriptionError("build script declares default step more than once", sentence.line)
+            default_step = default_name
+            continue
         step = _parse_build_call(text, sentence.line)
         if step is None:
             raise InscriptionError("build script body supports only Build artifact requests in v0.50", sentence.line)
@@ -157,7 +169,9 @@ def parse_build_script(source: str, *, path: Path | None = None) -> BuildScript:
             raise InscriptionError(f"build step {step.name} is already defined", sentence.line)
         seen.add(step.name)
         steps.append(step)
-    return BuildScript(path or Path(BUILD_SCRIPT_NAME), tuple(steps), comments.comments)
+    script = BuildScript(path or Path(BUILD_SCRIPT_NAME), tuple(steps), comments.comments, default_step)
+    _validate_build_script_graph(script)
+    return script
 
 
 def _is_source_top_level(text: str) -> bool:
@@ -194,6 +208,9 @@ def _validate_build_phrase(text: str, line: int) -> None:
 
 
 def _parse_build_call(text: str, line: int) -> BuildStep | None:
+    group = _parse_group_step(text, line)
+    if group is not None:
+        return group
     for prefix, emit in _BUILD_CALLS.items():
         if not text.startswith(prefix + " "):
             continue
@@ -208,6 +225,90 @@ def _parse_build_call(text: str, line: int) -> BuildStep | None:
     if text.startswith("Build."):
         raise InscriptionError("malformed Build artifact request", line)
     return None
+
+
+def _parse_group_step(text: str, line: int) -> BuildStep | None:
+    prefix = "Build.group named "
+    if not text.startswith(prefix):
+        return None
+    rest = text[len(prefix) :].strip()
+    marker = " with steps"
+    marker_index = rest.find(marker)
+    if marker_index < 0:
+        raise InscriptionError("malformed Build group request", line)
+    name_token = rest[:marker_index].strip()
+    if not (name_token.startswith('"') and name_token.endswith('"')):
+        raise InscriptionError("build artifact names must be string literals in v0.50", line)
+    name = _parse_build_string(name_token, line)
+    _validate_step_name(name, line)
+    dependencies_text = rest[marker_index + len(marker) :].strip()
+    if not dependencies_text:
+        raise InscriptionError(f"build group {name} must include at least one step", line)
+    dependencies = _parse_group_dependencies(name, dependencies_text, line)
+    return BuildStep(name, "group", line, dependencies)
+
+
+def _parse_group_dependencies(group_name: str, text: str, line: int) -> tuple[str, ...]:
+    dependencies: list[str] = []
+    seen: set[str] = set()
+    for token in text.split(" and "):
+        token = token.strip()
+        if not (token.startswith('"') and token.endswith('"')):
+            raise InscriptionError("build group step names must be string literals in v0.52", line)
+        name = _parse_build_string(token, line)
+        _validate_step_name(name, line)
+        if name in seen:
+            raise InscriptionError(f"build group {group_name} includes step {name} more than once", line)
+        seen.add(name)
+        dependencies.append(name)
+    return tuple(dependencies)
+
+
+def _parse_default_step(text: str, line: int) -> str | None:
+    prefix = "Build.default step is "
+    if not text.startswith(prefix):
+        return None
+    token = text[len(prefix) :].strip()
+    if not (token.startswith('"') and token.endswith('"')):
+        raise InscriptionError("default build step name must be a string literal in v0.52", line)
+    name = _parse_build_string(token, line)
+    _validate_step_name(name, line)
+    return name
+
+
+def _validate_build_script_graph(script: BuildScript) -> None:
+    by_name = {step.name: step for step in script.steps}
+    for step in script.steps:
+        if step.emit != "group":
+            continue
+        for dependency in step.dependencies:
+            if dependency not in by_name:
+                raise InscriptionError(f"build group {step.name} references unknown step {dependency}", step.line)
+    if script.default_step is not None and script.default_step not in by_name:
+        raise InscriptionError(f"default build step {script.default_step} is not defined")
+    _check_dependency_cycles(by_name)
+
+
+def _check_dependency_cycles(by_name: dict[str, BuildStep]) -> None:
+    visiting: list[str] = []
+    visited: set[str] = set()
+
+    def visit(name: str) -> None:
+        if name in visited:
+            return
+        if name in visiting:
+            start = visiting.index(name)
+            cycle = [*visiting[start:], name]
+            raise InscriptionError(f"build step dependency cycle detected: {' -> '.join(cycle)}")
+        visiting.append(name)
+        step = by_name[name]
+        for dependency in step.dependencies:
+            visit(dependency)
+        visiting.pop()
+        visited.add(name)
+
+    for step_name in by_name:
+        visit(step_name)
 
 
 def _build_phrase_signature(text: str) -> str:
@@ -267,15 +368,21 @@ def output_path_for_step(package_root: Path, step: BuildStep) -> Path:
 
 
 def build_step_display(step: BuildStep) -> str:
+    if step.emit == "group":
+        return "group -> " + ", ".join(step.dependencies)
     return _STEP_DISPLAY.get(step.emit, step.emit)
 
 
-def list_build_steps(package_root: Path) -> tuple[BuildStep, ...]:
+def load_build_plan(package_root: Path) -> BuildScript:
     load_package_context(package_root)
     script = load_build_script(package_root)
     if not script.steps:
         raise InscriptionError("build script did not declare any build steps")
-    return script.steps
+    return script
+
+
+def list_build_steps(package_root: Path) -> tuple[BuildStep, ...]:
+    return load_build_plan(package_root).steps
 
 
 def run_build_script(
@@ -288,47 +395,113 @@ def run_build_script(
     verify: bool = False,
 ) -> tuple[BuildExecutionResult, ...]:
     root = package_root.resolve()
-    script = load_build_script(root)
+    script = load_build_plan(root)
     if not script.steps:
         raise InscriptionError("build script did not declare any build steps")
-    selected = script.steps
+    by_name = {step.name: step for step in script.steps}
+    selected = _selected_build_roots(script, step_name=step_name)
+    executed: set[str] = set()
     if step_name is not None:
-        selected = tuple(step for step in script.steps if step.name == step_name)
-        if not selected:
+        if step_name not in by_name:
             raise InscriptionError(f"build step {step_name} is not defined")
     results: list[BuildExecutionResult] = []
     for step in selected:
-        step_save_temps = save_temps / step.name if save_temps is not None else None
-        if step.emit == "package-check":
-            context = check_package(root, verify=verify)
-            results.append(BuildExecutionResult(step, package_context=context))
-            continue
-        if step.emit in {"package-tests", "package-tests-with-dependencies"}:
-            summary = run_package_tests(
-                root,
-                include_dependencies=step.emit == "package-tests-with-dependencies",
+        failed = _run_step(
+            step,
+            by_name=by_name,
+            root=root,
+            runtime_checks=runtime_checks,
+            opt_level=opt_level,
+            save_temps=save_temps,
+            verify=verify,
+            executed=executed,
+            results=results,
+        )
+        if failed:
+            break
+    return tuple(results)
+
+
+def _selected_build_roots(script: BuildScript, *, step_name: str | None) -> tuple[BuildStep, ...]:
+    by_name = {step.name: step for step in script.steps}
+    if step_name is not None:
+        if step_name not in by_name:
+            raise InscriptionError(f"build step {step_name} is not defined")
+        return (by_name[step_name],)
+    if script.default_step is not None:
+        return (by_name[script.default_step],)
+    return tuple(step for step in script.steps if step.emit != "group")
+
+
+def _run_step(
+    step: BuildStep,
+    *,
+    by_name: dict[str, BuildStep],
+    root: Path,
+    runtime_checks: bool,
+    opt_level: str,
+    save_temps: Path | None,
+    verify: bool,
+    executed: set[str],
+    results: list[BuildExecutionResult],
+) -> bool:
+    if step.name in executed:
+        return False
+    if step.emit == "group":
+        for dependency_name in step.dependencies:
+            failed = _run_step(
+                by_name[dependency_name],
+                by_name=by_name,
+                root=root,
                 runtime_checks=runtime_checks,
                 opt_level=opt_level,
-                save_temps=step_save_temps,
+                save_temps=save_temps,
+                verify=verify,
+                executed=executed,
+                results=results,
             )
-            results.append(BuildExecutionResult(step, test_summary=summary))
-            if isinstance(summary, PackageTestSummary) and summary.failed:
-                break
-            continue
-        output = output_path_for_step(root, step)
-        output.parent.mkdir(parents=True, exist_ok=True)
-        result = build_package_artifact(
+            if failed:
+                results.append(BuildExecutionResult(step, failed=True))
+                return True
+        executed.add(step.name)
+        results.append(BuildExecutionResult(step))
+        return False
+
+    step_save_temps = save_temps / step.name if save_temps is not None else None
+    if step.emit == "package-check":
+        context = check_package(root, verify=verify)
+        executed.add(step.name)
+        results.append(BuildExecutionResult(step, package_context=context))
+        return False
+    if step.emit in {"package-tests", "package-tests-with-dependencies"}:
+        summary = run_package_tests(
             root,
-            emit=step.emit,
-            output=output,
+            include_dependencies=step.emit == "package-tests-with-dependencies",
             runtime_checks=runtime_checks,
             opt_level=opt_level,
             save_temps=step_save_temps,
-            verify=verify,
         )
-        if result.data is not None:
-            output.write_bytes(result.data)
-        elif result.text is not None:
-            output.write_text(result.text)
-        results.append(BuildExecutionResult(step, output, result))
-    return tuple(results)
+        failed = isinstance(summary, PackageTestSummary) and summary.failed > 0
+        if not failed:
+            executed.add(step.name)
+        results.append(BuildExecutionResult(step, test_summary=summary, failed=failed))
+        return failed
+
+    output = output_path_for_step(root, step)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    result = build_package_artifact(
+        root,
+        emit=step.emit,
+        output=output,
+        runtime_checks=runtime_checks,
+        opt_level=opt_level,
+        save_temps=step_save_temps,
+        verify=verify,
+    )
+    if result.data is not None:
+        output.write_bytes(result.data)
+    elif result.text is not None:
+        output.write_text(result.text)
+    executed.add(step.name)
+    results.append(BuildExecutionResult(step, output, result))
+    return False
