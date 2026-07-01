@@ -2240,6 +2240,7 @@ class CompilerTests(unittest.TestCase):
                 "Union HighlightGuard has none; some value: i32 and marker: i32.\n\nTo highlight guard maybe: HighlightGuard, giving i32.\nGive match maybe:\nHighlightGuard.some with value ignored and marker as mark when mark is greater than zero gives mark;\nanything gives 0.\n",
                 "To highlight range b: u8, giving i32.\nGive match b:\nbyte \"0\" through byte \"9\" or byte \"A\" gives 1;\nanything gives 0.\n",
                 "To highlight copied, giving i32.\nLet cells be owned buffer of 1 i32 containing 7.\nLet copy be owned buffer copied from cells.\nGive copy at 0.\n",
+                "Test highlight test.\nExpect true.\n",
             ]
         )
         html = highlight_source(source, output_format="html")
@@ -6781,6 +6782,168 @@ Give result plus seen.
         for name, (source, contains) in cases.items():
             with self.subTest(name=name):
                 self.assertCompileError(source, contains)
+
+    def test_v044_first_class_test_diagnostics(self):
+        cases = {
+            "expect outside test": (
+                "To main, giving i32.\nExpect true.\nGive 0.\n",
+                "Expect is only valid inside tests",
+            ),
+            "give inside test": (
+                "Test bad.\nGive 0.\n",
+                "Give is not valid inside a test",
+            ),
+            "expect not boolean": (
+                "Test bad.\nExpect 1.\n",
+                "Expect condition must have type i1, got i32",
+            ),
+            "duplicate test": (
+                "Test duplicate.\nExpect true.\n\nTest duplicate.\nExpect true.\n",
+                "test `duplicate` is already defined",
+            ),
+            "empty test": (
+                "Test empty.\n",
+                "test `empty` must contain at least one Expect",
+            ),
+            "test type error": (
+                "Test bad.\nLet x be true plus 1.\nExpect true.\n",
+                "plus requires integer operands, got i1 and i32",
+            ),
+        }
+        for name, (source, contains) in cases.items():
+            with self.subTest(name=name):
+                self.assertCompileError(source, contains)
+
+    def test_v044_test_command_cli(self):
+        try:
+            resolve_toolchain()
+        except ToolchainError as exc:
+            self.skipTest(str(exc))
+        env = {**os.environ, "PYTHONPATH": str(SRC)}
+        source = FIXTURES / "test_basic.ins"
+        run_proc = subprocess.run(
+            [sys.executable, "-m", "inscription", "test", str(source)],
+            cwd=ROOT,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(run_proc.returncode, 0, run_proc.stderr)
+        self.assertIn("test root::addition works ... ok", run_proc.stdout)
+        self.assertIn("test result: ok. 1 passed; 0 failed.", run_proc.stdout)
+
+        list_proc = subprocess.run(
+            [sys.executable, "-m", "inscription", "test", str(source), "--list"],
+            cwd=ROOT,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(list_proc.returncode, 0, list_proc.stderr)
+        self.assertEqual(list_proc.stdout, "test root::addition works\n")
+
+        filter_proc = subprocess.run(
+            [sys.executable, "-m", "inscription", "test", str(source), "--filter", "addition"],
+            cwd=ROOT,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(filter_proc.returncode, 0, filter_proc.stderr)
+        self.assertIn("test root::addition works ... ok", filter_proc.stdout)
+
+        no_match_proc = subprocess.run(
+            [sys.executable, "-m", "inscription", "test", str(source), "--filter", "missing"],
+            cwd=ROOT,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(no_match_proc.returncode, 0, no_match_proc.stderr)
+        self.assertEqual(no_match_proc.stdout, "no tests matched filter `missing`\n")
+
+        opt_proc = subprocess.run(
+            [sys.executable, "-m", "inscription", "test", str(source), "-O1"],
+            cwd=ROOT,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(opt_proc.returncode, 0, opt_proc.stderr)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            temps = Path(tmp) / "temps"
+            save_proc = subprocess.run(
+                [sys.executable, "-m", "inscription", "test", str(source), "--save-temps", str(temps)],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(save_proc.returncode, 0, save_proc.stderr)
+            self.assertTrue((temps / "test_basic.root_addition_works.mlir").exists())
+            self.assertTrue((temps / "test_basic.root_addition_works.lowered.mlir").exists())
+            self.assertTrue((temps / "test_basic.root_addition_works.ll").exists())
+
+        failing = ROOT / "tests" / "fixtures" / "negative_runtime" / "test_failing_expect.ins"
+        fail_proc = subprocess.run(
+            [sys.executable, "-m", "inscription", "test", str(failing)],
+            cwd=ROOT,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(fail_proc.returncode, 1)
+        self.assertIn("test root::failing expectation ... FAILED", fail_proc.stdout)
+        self.assertIn("test result: FAILED. 0 passed; 1 failed.", fail_proc.stdout)
+
+    def test_v044_test_command_modules_and_runtime_checks(self):
+        try:
+            resolve_toolchain()
+        except ToolchainError as exc:
+            self.skipTest(str(exc))
+        env = {**os.environ, "PYTHONPATH": str(SRC)}
+        module_source = FIXTURES / "test_modules" / "main.ins"
+        module_proc = subprocess.run(
+            [sys.executable, "-m", "inscription", "test", str(module_source)],
+            cwd=ROOT,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(module_proc.returncode, 0, module_proc.stderr)
+        self.assertIn("test Math::square works ... ok", module_proc.stdout)
+        self.assertIn("test root::imported square works ... ok", module_proc.stdout)
+
+        owned_proc = subprocess.run(
+            [sys.executable, "-m", "inscription", "test", str(FIXTURES / "test_buffers_owned.ins"), "--runtime-checks"],
+            cwd=ROOT,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(owned_proc.returncode, 0, owned_proc.stderr)
+        self.assertIn("test root::buffer sum works ... ok", owned_proc.stdout)
+        self.assertIn("test root::owned buffer move works ... ok", owned_proc.stdout)
+
 
 
 class FormatterTests(unittest.TestCase):

@@ -22,6 +22,7 @@ from .ast import (
     Comparison,
     EnumCase,
     EnumType,
+    ExpectStmt,
     Expr,
     FieldAccess,
     FieldAssignStmt,
@@ -55,6 +56,7 @@ from .ast import (
     StorageAliasBinding,
     StorageElement,
     Stmt,
+    TestDecl,
     TypeName,
     Unary,
     UnionConstructor,
@@ -221,6 +223,12 @@ def emit_mlir(program: Program, *, runtime_checks: bool = False) -> str:
     return emitter.emit_program(program)
 
 
+def emit_test_mlir(program: Program, test: TestDecl, *, runtime_checks: bool = False) -> str:
+    analyze(program)
+    emitter = MlirEmitter(program, runtime_checks=runtime_checks)
+    return emitter.emit_test_program(program, test)
+
+
 class MlirEmitter:
     def __init__(self, program: Program, *, runtime_checks: bool = False):
         type_alias_table(program)
@@ -269,6 +277,56 @@ class MlirEmitter:
         lines.append("}")
         return "\n".join(lines) + "\n"
 
+    def emit_test_program(self, program: Program, test: TestDecl) -> str:
+        lines = ["module {"]
+        emitted_declarations: set[str] = set()
+        emitted_any = False
+        for fn in program.functions:
+            resolved = self.functions[fn.name]
+            if resolved.implementation != "extern" or resolved.extern_symbol in emitted_declarations:
+                continue
+            self.emit_extern_declaration(resolved, lines)
+            emitted_declarations.add(resolved.extern_symbol)
+            emitted_any = True
+        normal_functions = [
+            fn
+            for fn in program.functions
+            if self.functions[fn.name].implementation != "extern" and self.call_symbol(self.functions[fn.name]) != "main"
+        ]
+        for index, fn in enumerate(normal_functions):
+            if emitted_any or index:
+                lines.append("")
+            self.emit_function(fn, lines)
+            emitted_any = True
+        if emitted_any:
+            lines.append("")
+        self.emit_test_main(test, lines)
+        lines.append("}")
+        return "\n".join(lines) + "\n"
+
+    def reset_function_state(self) -> None:
+        self.counter = 0
+        self.constants = {}
+        self.binding_order = []
+        self.record_order = []
+        self.union_order = []
+        self.owned_buffer_scopes = [[]]
+        self.moved_owned_buffers = set()
+        self.while_counter = 0
+        self.while_depth = 0
+        self.for_counter = 0
+        self.for_depth = 0
+
+    def emit_test_main(self, test: TestDecl, lines: list[str]) -> None:
+        self.reset_function_state()
+        lines.append("  func.func @main() -> i32 {")
+        env: dict[str, EnvValue] = {}
+        self.emit_steps(test.body, env, lines, "    ")
+        self.emit_owned_deallocs(lines, "    ")
+        zero = self.emit_integer(0, "i32", lines, "    ")
+        lines.append(f"    return {zero.name} : i32")
+        lines.append("  }")
+
     def emit_extern_declaration(self, fn: Function, lines: list[str]) -> None:
         assert fn.extern_symbol is not None
         args = ", ".join(self.function_argument_types(fn))
@@ -277,8 +335,7 @@ class MlirEmitter:
 
     def emit_function(self, fn: Function, lines: list[str]) -> None:
         fn = self.functions[fn.name]
-        self.counter = 0
-        self.constants = {}
+        self.reset_function_state()
         self.binding_order = [
             param.name
             for param in fn.params
@@ -286,12 +343,6 @@ class MlirEmitter:
         ]
         self.record_order = [param.name for param in fn.params if isinstance(param.type_name, RecordType)]
         self.union_order = [param.name for param in fn.params if isinstance(param.type_name, UnionType)]
-        self.owned_buffer_scopes = [[]]
-        self.moved_owned_buffers = set()
-        self.while_counter = 0
-        self.while_depth = 0
-        self.for_counter = 0
-        self.for_depth = 0
         args = ", ".join(self.function_argument_decls(fn))
         return_suffix = "" if fn.return_type is None else f" -> {self.return_type_list(fn.return_type)}"
         lines.append(f"  func.func @{self.call_symbol(fn)}({args}){return_suffix} {{")
@@ -530,6 +581,9 @@ class MlirEmitter:
             return
         if isinstance(stmt, RequireStmt):
             self.emit_require(stmt, env, lines, indent)
+            return
+        if isinstance(stmt, ExpectStmt):
+            self.emit_expect(stmt, env, lines, indent)
             return
         if isinstance(stmt, SetStmt):
             env_types = self.env_types(env)
@@ -845,6 +899,10 @@ class MlirEmitter:
             return
         condition = self.emit_expr(stmt.expr, env, lines, indent, expected="i1")
         self.emit_runtime_assert(condition, f"require failed at line {stmt.line}", lines, indent)
+
+    def emit_expect(self, stmt: ExpectStmt, env: dict[str, EnvValue], lines: list[str], indent: str) -> None:
+        condition = self.emit_expr(stmt.expr, env, lines, indent, expected="i1")
+        self.emit_runtime_assert(condition, "expect failed", lines, indent)
 
     def emit_runtime_assert(self, condition: Value, message: str, lines: list[str], indent: str) -> None:
         escaped = message.replace("\\", "\\\\").replace('"', '\\"')

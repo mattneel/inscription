@@ -25,6 +25,7 @@ from .ast import (
     EnumCase,
     EnumCaseDecl,
     EnumDecl,
+    ExpectStmt,
     Expr,
     FieldAccess,
     FieldAssignStmt,
@@ -65,6 +66,7 @@ from .ast import (
     SizeOfType,
     StorageAliasBinding,
     StorageElement,
+    TestDecl,
     TypeAliasDecl,
     TypeName,
     Unary,
@@ -93,10 +95,10 @@ STRING_LITERAL_RE = r'"(?:\\.|[^"\\])*"'
 TOKEN_RE = re.compile(rf"\s*({STRING_LITERAL_RE}|{FLOAT_LITERAL_RE}|-?\d+|[A-Z][A-Za-z0-9_]*|[a-z][a-z0-9_]*|[().,])")
 RESERVED = {
     "address", "alignment", "and", "anything", "arguments", "array", "as", "at", "be", "becomes", "bitwise", "buffer", "by", "call",
-    "check", "constant", "containing", "divided", "do", "does", "each", "else", "equal", "export", "extern", "false", "filled", "float", "for", "from",
+    "check", "constant", "containing", "divided", "do", "does", "each", "else", "equal", "expect", "export", "extern", "false", "filled", "float", "for", "from",
     "enum", "function", "gives", "greater", "f32", "f64", "i1", "i32", "i64", "if", "in", "index", "input", "into", "import",
     "i8", "i16", "is", "layout", "length", "less", "let", "match", "memref", "minus", "module", "move", "no", "not", "or", "otherwise", "output", "packed", "parameters",
-    "pointer", "plus", "print", "read", "remainder", "require", "return", "set", "shifted", "size", "takes", "than", "then", "through", "times", "to",
+    "pointer", "plus", "print", "read", "remainder", "require", "return", "set", "shifted", "size", "takes", "test", "than", "then", "through", "times", "to",
     "track", "true", "type", "u8", "u16", "u32", "u64", "union", "up", "record", "view", "when", "while", "with", "write", "xor", "zero",
 }
 TYPE_NAMES: set[str] = {"i1", "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "f32", "f64"}
@@ -210,7 +212,7 @@ def _is_string_token(token: str) -> bool:
     return len(token) >= 2 and token[0] == '"' and token[-1] == '"'
 
 
-ParsedTopLevel = RecordDecl | EnumDecl | UnionDecl | TypeAliasDecl | ConstantDecl | CheckStmt | Function
+ParsedTopLevel = RecordDecl | EnumDecl | UnionDecl | TypeAliasDecl | ConstantDecl | CheckStmt | Function | TestDecl
 
 
 TOP_LEVEL_SENTENCE_PREFIXES = (
@@ -226,6 +228,7 @@ TOP_LEVEL_SENTENCE_PREFIXES = (
     "Union ",
     "External ",
     "To ",
+    "Test ",
 )
 
 DOCUMENTABLE_SENTENCE_PREFIXES = (
@@ -239,6 +242,7 @@ DOCUMENTABLE_SENTENCE_PREFIXES = (
     "Union ",
     "External ",
     "To ",
+    "Test ",
 )
 
 LEGACY_TOP_LEVEL_RE = re.compile(
@@ -360,8 +364,22 @@ def _normalize_punctuation_source_from_comments(comments: SourceCommentInfo) -> 
             body_lines = _translate_body_sentences(body, is_gives=is_gives, indent=2)
             output.extend(body_lines)
             continue
+        if text.startswith("Test "):
+            _attach_doc_for_output_line(docs_by_line, comments.declaration_docs, sentence.line, len(output) + 1)
+            output.append(_translate_test_sentence(text, sentence.line))
+            index += 1
+            body: list[PunctuationSentence] = []
+            while index < len(sentences):
+                candidate = sentences[index]
+                candidate_text = _apply_import_aliases(candidate.text, aliases)
+                if _is_phrase_boundary_sentence(candidate_text):
+                    break
+                body.append(PunctuationSentence(candidate_text, candidate.line))
+                index += 1
+            output.extend(_translate_test_body_sentences(body, indent=2))
+            continue
         raise InscriptionError(
-            "expected top-level declaration sentence starting with Module, Import, Type, Constant, Check, Record, Layout record, Packed layout record, Enum, Union, External, or To",
+            "expected top-level declaration sentence starting with Module, Import, Type, Constant, Check, Record, Layout record, Packed layout record, Enum, Union, External, To, or Test",
             sentence.line,
         )
     return NormalizedSource("\n".join(output) + ("\n" if output else ""), comments.module_documentation, docs_by_line)
@@ -604,6 +622,13 @@ def _normalize_line_punctuation_source(source: str, declaration_docs: dict[int, 
             _attach_doc_for_output_line(docs_by_line, declaration_docs, number, len(lines) + 1)
             lines.append(_translate_to_sentence(text, number))
             continue
+        if indent == 0 and text.startswith("Test "):
+            _attach_doc_for_output_line(docs_by_line, declaration_docs, number, len(lines) + 1)
+            lines.append(_translate_test_sentence(text, number))
+            continue
+        if text.startswith("Expect "):
+            lines.extend(_translate_expect_sentence(text, number, indent))
+            continue
         if text.startswith("Give "):
             lines.extend(_translate_give_sentence(text, number, indent))
             continue
@@ -761,6 +786,7 @@ def _is_phrase_boundary_sentence(text: str) -> bool:
             "Union ",
             "External ",
             "To ",
+            "Test ",
         )
     )
 
@@ -914,6 +940,48 @@ def _translate_to_sentence(text: str, line: int) -> str:
     return f"{phrase} gives {giving}:"
 
 
+def _translate_test_sentence(text: str, line: int) -> str:
+    name = text[len("Test ") :].strip()
+    if not name:
+        raise InscriptionError("malformed test declaration", line)
+    for word in name.split():
+        if not NAME_RE.fullmatch(word):
+            raise InscriptionError(f"invalid test word '{word}'", line)
+    return f"test {name}:"
+
+
+def _translate_expect_sentence(text: str, line: int, indent: int) -> list[str]:
+    expr = text[len("Expect ") :].strip()
+    if not expr:
+        raise InscriptionError("malformed expect", line)
+    return _translate_match_expression_line("expect " + expr, indent)
+
+
+def _translate_test_body_sentences(sentences: list[PunctuationSentence], *, indent: int) -> list[str]:
+    lines: list[str] = []
+    index = 0
+    while index < len(sentences):
+        sentence = sentences[index]
+        text = sentence.text
+        if text.startswith("Otherwise"):
+            raise InscriptionError("Otherwise cannot appear without a preceding When", sentence.line)
+        if text.startswith("When "):
+            if index + 1 >= len(sentences) or not sentences[index + 1].text.startswith("Otherwise"):
+                raise InscriptionError("When requires an immediately following Otherwise", sentence.line)
+            lines.extend(_translate_when_pair(text, sentences[index + 1].text, sentence.line, indent))
+            index += 2
+            continue
+        if text.startswith("Expect "):
+            lines.extend(_translate_expect_sentence(text, sentence.line, indent))
+            index += 1
+            continue
+        if text.startswith("Give "):
+            raise InscriptionError("Give is not valid inside a test", sentence.line)
+        lines.extend(_translate_step_sentence(text, sentence.line, indent))
+        index += 1
+    return lines
+
+
 def _translate_body_sentences(sentences: list[PunctuationSentence], *, is_gives: bool, indent: int) -> list[str]:
     lines: list[str] = []
     index = 0
@@ -982,6 +1050,10 @@ def _translate_step_sentence(text: str, line: int, indent: int) -> list[str]:
         if _contains_then_marker(text):
             raise InscriptionError("then may only resume a parent clause after nested control", line)
         return _translate_match_expression_line("require " + text[len("Require ") :].strip(), indent)
+    if text.startswith("Expect "):
+        if _contains_then_marker(text):
+            raise InscriptionError("then may only resume a parent clause after nested control", line)
+        return _translate_expect_sentence(text, line, indent)
     if text.startswith("Check "):
         if _contains_then_marker(text):
             raise InscriptionError("then may only resume a parent clause after nested control", line)
@@ -1408,6 +1480,7 @@ class Parser:
         constants: list[ConstantDecl] = []
         checks: list[CheckStmt] = []
         functions: list[Function] = []
+        tests: list[TestDecl] = []
         imports: list[ImportDecl] = []
         module_name: str | None = None
         module_declaration_documentation: str | None = None
@@ -1497,8 +1570,16 @@ class Parser:
                 continue
             if line.text.startswith("require "):
                 raise InscriptionError("require may only appear inside phrase bodies", line.number)
+            if line.text.startswith("expect "):
+                raise InscriptionError("Expect is only valid inside tests", line.number)
+            if line.indent == 0 and line.text.startswith("test "):
+                test, index = self._parse_test_decl(index)
+                if any(existing.display_name == test.display_name for existing in tests):
+                    raise InscriptionError(f"test `{test.display_name}` is already defined", test.line)
+                tests.append(test)
+                continue
             if not self._looks_like_phrase_header(line):
-                raise InscriptionError("expected phrase definition, record declaration, enum declaration, union declaration, type alias, constant declaration, check, extern, export, module, or import", line.number)
+                raise InscriptionError("expected phrase definition, test declaration, record declaration, enum declaration, union declaration, type alias, constant declaration, check, extern, export, module, or import", line.number)
             template, return_type = self._parse_phrase_header(line)
             body, index = self._parse_phrase_body(index + 1, template, line.number)
             functions.append(
@@ -1528,6 +1609,7 @@ class Parser:
             module_name,
             tuple(imports),
             self.module_documentation or module_declaration_documentation,
+            tuple(tests),
         )
 
     def _doc_for(self, line: Line) -> str | None:
@@ -1546,13 +1628,28 @@ class Parser:
     def _looks_like_union_header(self, line: Line) -> bool:
         return line.is_header and re.fullmatch(r"union [A-Za-z][A-Za-z0-9_]*", line.text) is not None
 
+    def _parse_test_decl(self, index: int) -> tuple[TestDecl, int]:
+        line = self.lines[index]
+        match = re.fullmatch(r"test (.+)", line.text)
+        if not line.is_header or match is None:
+            raise InscriptionError("malformed test declaration", line.number)
+        display_name = match.group(1).strip()
+        if not display_name:
+            raise InscriptionError("malformed test declaration", line.number)
+        words = display_name.split()
+        for word in words:
+            if not NAME_RE.fullmatch(word):
+                raise InscriptionError(f"invalid test word '{word}'", line.number)
+        body, next_index = self._parse_test_body(index + 1, line.number, display_name)
+        return TestDecl("_".join(words), display_name, tuple(body), line.number, self._doc_for(line)), next_index
+
     def _looks_like_top_level_item(self, line: Line) -> bool:
         return (
             self._looks_like_phrase_header(line)
             or self._looks_like_record_header(line)
             or self._looks_like_enum_header(line)
             or self._looks_like_union_header(line)
-            or (line.indent == 0 and (line.text.startswith("constant ") or line.text.startswith("check ") or line.text.startswith("extern ") or line.text.startswith("export ") or line.text.startswith("module ") or line.text.startswith("import ") or line.text.startswith("require ") or line.text.startswith("enum ") or line.text.startswith("union ") or line.text.startswith("type ")))
+            or (line.indent == 0 and (line.text.startswith("constant ") or line.text.startswith("check ") or line.text.startswith("extern ") or line.text.startswith("export ") or line.text.startswith("module ") or line.text.startswith("import ") or line.text.startswith("require ") or line.text.startswith("expect ") or line.text.startswith("test ") or line.text.startswith("enum ") or line.text.startswith("union ") or line.text.startswith("type ")))
         )
 
     def _parse_record_decl(self, index: int) -> tuple[RecordDecl, int]:
@@ -1722,6 +1819,20 @@ class Parser:
         expr, next_index = self._parse_match_expression(index, scrutinee_text=line.text[len("require match ") :])
         return RequireStmt(expr, line.number), next_index
 
+    def _parse_expect_stmt(self, line: Line) -> ExpectStmt:
+        if line.is_header:
+            raise InscriptionError("malformed expect", line.number)
+        if not line.text.startswith("expect "):
+            raise InscriptionError("malformed expect", line.number)
+        return ExpectStmt(self._parse_expression(line.text[len("expect ") :], line.number), line.number)
+
+    def _parse_expect_match_stmt(self, index: int) -> tuple[ExpectStmt, int]:
+        line = self.lines[index]
+        if not line.is_header or not line.text.startswith("expect match "):
+            raise InscriptionError("malformed expect", line.number)
+        expr, next_index = self._parse_match_expression(index, scrutinee_text=line.text[len("expect match ") :])
+        return ExpectStmt(expr, line.number), next_index
+
     def _looks_like_phrase_header(self, line: Line) -> bool:
         return line.is_header and re.fullmatch(r".+? (?:gives .+|does)", line.text) is not None
 
@@ -1836,6 +1947,28 @@ class Parser:
             return self._parse_does_body(index, line)
         return self._parse_gives_body(index, template.symbol, line)
 
+    def _parse_test_body(self, index: int, line: int, display_name: str) -> tuple[list[BodyStmt], int]:
+        body_items: list[BodyStmt] = []
+        while index < len(self.lines):
+            current = self.lines[index]
+            if self._looks_like_top_level_item(current):
+                break
+            if current.text.startswith("return "):
+                raise InscriptionError("Give is not valid inside a test", current.number)
+            if not self._is_body_item_start(current, include_phrase_calls=True):
+                if current.is_header:
+                    raise InscriptionError("unexpected ':' inside test body", current.number)
+                if self._parse_phrase_call_expr(current) is not None:
+                    item, index = self._parse_body_item(index, include_phrase_calls=True)
+                    body_items.append(item)
+                    continue
+                raise InscriptionError("test body only supports steps and Expect sentences", current.number)
+            item, index = self._parse_body_item(index, include_phrase_calls=True)
+            body_items.append(item)
+        if not body_items:
+            raise InscriptionError(f"test `{display_name}` must contain at least one Expect", line)
+        return body_items, index
+
     def _parse_does_body(self, index: int, line: int) -> tuple[list[BodyStmt | ReturnStmt], int]:
         body_items: list[BodyStmt] = []
         while index < len(self.lines):
@@ -1911,6 +2044,7 @@ class Parser:
         return (
             line.text.startswith("check ")
             or line.text.startswith("require ")
+            or line.text.startswith("expect ")
             or line.text.startswith("let ")
             or line.text.startswith("track ")
             or self._layout_write_match(line) is not None
@@ -1942,6 +2076,10 @@ class Parser:
                 if target is not None and target.return_type is None:
                     return CallStmt(call, current.number), index + 1
             return self._parse_require_stmt(current), index + 1
+        if current.text.startswith("expect "):
+            if current.is_header and current.text.startswith("expect match "):
+                return self._parse_expect_match_stmt(index)
+            return self._parse_expect_stmt(current), index + 1
         if current.text.startswith("let "):
             if current.is_header and " be match " in current.text:
                 return self._parse_let_match(index)

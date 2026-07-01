@@ -11,12 +11,12 @@ The full language guide now lives in **[The Inscription Book](book/src/title-pag
 
 ## Status
 
-This repository currently implements **Inscription v0.43: comments and documentation comments**. v0.43 adds ordinary `//` line comments, declaration documentation comments with `///`, module/file documentation comments with `//!`, interface JSON documentation metadata, and exported C header comments on top of owned buffer literal/copy initialization, pattern alternatives, integer ranges, match guards, exhaustive matches, and move-aware owned-buffer control flow. The mdBook documentation site remains the primary language guide.
+This repository currently implements **Inscription v0.44: first-class tests and test runner**. v0.44 adds top-level `Test ... .` declarations, test-only runtime `Expect ... .` assertions, and the `inscription test` command on top of comments, documentation comments, owned buffer literal/copy initialization, pattern alternatives, integer ranges, match guards, exhaustive matches, and move-aware owned-buffer control flow. The mdBook documentation site remains the primary language guide.
 
 The current language includes:
 
 - scalar integer, float, and boolean types
-- deterministic prose-punctuation syntax, `then` parent continuations, canonical formatter, ordinary comments, and documentation comments
+- deterministic prose-punctuation syntax, `then` parent continuations, canonical formatter, ordinary comments, documentation comments, first-class tests, and test-time `Expect` assertions
 - modules and imports
 - constants, checks, runtime `Require`, and optional `--runtime-checks`
 - phrases, extern declarations, and scalar exported phrases
@@ -62,6 +62,14 @@ Format source:
 ```sh
 PYTHONPATH=src python -m inscription format tests/fixtures/positive/phrase_max.ins --check
 PYTHONPATH=src python -m inscription format path/to/file.ins --in-place
+```
+
+Run source-level tests:
+
+```sh
+PYTHONPATH=src python -m inscription test tests/fixtures/positive/test_basic.ins
+PYTHONPATH=src python -m inscription test tests/fixtures/positive/test_basic.ins --list
+PYTHONPATH=src python -m inscription test tests/fixtures/positive/test_basic.ins --filter addition
 ```
 
 Emit artifacts:
@@ -186,14 +194,26 @@ Token.operator with symbol ignored and precedence as prec gives prec as i32;
 anything gives 0.
 ```
 
+Source-level tests are top-level declarations. They use normal Inscription steps plus test-only `Expect` sentences, do not require `main`, and are ignored by ordinary `run`, C headers, and interface JSON.
+
+```inscription
+To add left: i32 and right: i32, giving i32.
+Give left plus right.
+
+Test addition works.
+Expect add 20 and 22 is equal to 42.
+```
+
+Run them with `inscription test SOURCE`; use `--list` to list discovered tests and `--filter TEXT` to run matching test display names.
+
 ## Documentation map
 
 - [`book/src/SUMMARY.md`](book/src/SUMMARY.md): table of contents for The Inscription Book
 - [`book/tools/check_book_examples.py`](book/tools/check_book_examples.py): deterministic book example checker
 - [`book/tools/inscription_mdbook_preprocessor.py`](book/tools/inscription_mdbook_preprocessor.py): mdBook preprocessor that reuses Inscription's own highlighter
 - [`docs/github-pages.md`](docs/github-pages.md): GitHub Pages setup notes
-- [`docs/inscription-v0.43-spec.md`](docs/inscription-v0.43-spec.md): current language sprint spec
-- [`grammar/inscription-v0.43.ebnf`](grammar/inscription-v0.43.ebnf): current grammar mirror
+- [`docs/inscription-v0.44-spec.md`](docs/inscription-v0.44-spec.md): current language sprint spec
+- [`grammar/inscription-v0.44.ebnf`](grammar/inscription-v0.44.ebnf): current grammar mirror
 
 ## Testing
 

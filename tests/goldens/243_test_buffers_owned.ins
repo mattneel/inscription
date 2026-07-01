@@ -1,0 +1,11 @@
+Test buffer sum works.
+Let cells be array of 4 i32 containing 1, 2, 3, 4.
+Let total be 0.
+For each index i of cells: total becomes total plus cells at i.
+Expect total is equal to 10.
+
+Test owned buffer move works.
+Let cells be owned buffer of 4 i32 containing 1, 2, 3, 4.
+Let copy be owned buffer copied from cells.
+Expect length of copy is equal to 4.
+Expect copy at 0 is equal to 1.

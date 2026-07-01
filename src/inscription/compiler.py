@@ -24,6 +24,7 @@ from .ast import (
     ConstantDecl,
     EnumCase,
     EnumDecl,
+    ExpectStmt,
     Expr,
     FieldAccess,
     FieldAssignStmt,
@@ -64,6 +65,7 @@ from .ast import (
     StorageAliasBinding,
     StorageElement,
     Stmt,
+    TestDecl,
     TypeAliasDecl,
     Unary,
     UnionConstructor,
@@ -258,6 +260,7 @@ def combine_programs(modules: list[LoadedModule], entry: Program) -> Program:
     constants: list[ConstantDecl] = []
     checks: list[CheckStmt] = []
     functions: list[Function] = []
+    tests: list[TestDecl] = []
     for module in modules:
         records.extend(module.program.records)
         enums.extend(module.program.enums)
@@ -266,6 +269,7 @@ def combine_programs(modules: list[LoadedModule], entry: Program) -> Program:
         constants.extend(module.program.constants)
         checks.extend(module.program.checks)
         functions.extend(module.program.functions)
+        tests.extend(module.program.tests)
     records.extend(entry.records)
     enums.extend(entry.enums)
     unions.extend(entry.unions)
@@ -273,7 +277,8 @@ def combine_programs(modules: list[LoadedModule], entry: Program) -> Program:
     constants.extend(entry.constants)
     checks.extend(entry.checks)
     functions.extend(entry.functions)
-    return Program(tuple(records), tuple(enums), tuple(unions), tuple(type_aliases), tuple(constants), tuple(checks), tuple(functions), entry.module_name, entry.imports, entry.documentation)
+    tests.extend(entry.tests)
+    return Program(tuple(records), tuple(enums), tuple(unions), tuple(type_aliases), tuple(constants), tuple(checks), tuple(functions), entry.module_name, entry.imports, entry.documentation, tuple(tests))
 
 
 def qualify_imported_program(program: Program, module_name: str) -> Program:
@@ -290,7 +295,8 @@ def qualify_imported_program(program: Program, module_name: str) -> Program:
     constants = tuple(qualify_constant(constant, module_name, type_names, constant_names) for constant in program.constants)
     checks = tuple(qualify_stmt(check, module_name, type_names, constant_names) for check in program.checks)
     functions = tuple(qualify_function(function, module_name, type_names, constant_names) for function in program.functions)
-    return Program(records, enums, unions, type_aliases, constants, checks, functions, program.module_name, program.imports, program.documentation)
+    tests = tuple(qualify_test(test, module_name, type_names, constant_names) for test in program.tests)
+    return Program(records, enums, unions, type_aliases, constants, checks, functions, program.module_name, program.imports, program.documentation, tests)
 
 
 def qname(module_name: str, name: str) -> str:
@@ -387,6 +393,21 @@ def qualify_function(
     )
 
 
+def qualify_test(
+    test: TestDecl,
+    module_name: str,
+    record_names: set[str],
+    constant_names: set[str],
+) -> TestDecl:
+    return TestDecl(
+        qname(module_name, test.name),
+        test.display_name,
+        tuple(qualify_stmt(stmt, module_name, record_names, constant_names) for stmt in test.body),
+        test.line,
+        test.documentation,
+    )
+
+
 def qualify_type(type_name: ValueType, module_name: str, record_names: set[str], constant_names: set[str]) -> ValueType:
     if isinstance(type_name, BufferType):
         return BufferType(qualify_buffer_length(type_name.length, module_name, record_names, constant_names), qualify_type(type_name.element_type, module_name, record_names, constant_names))
@@ -424,6 +445,8 @@ def qualify_stmt(stmt: Stmt, module_name: str, record_names: set[str], constant_
         return CheckStmt(qualify_expr(stmt.expr, module_name, record_names, constant_names), stmt.line)
     if isinstance(stmt, RequireStmt):
         return RequireStmt(qualify_expr(stmt.expr, module_name, record_names, constant_names), stmt.line)
+    if isinstance(stmt, ExpectStmt):
+        return ExpectStmt(qualify_expr(stmt.expr, module_name, record_names, constant_names), stmt.line)
     if isinstance(stmt, SetStmt):
         type_name = qualify_type(stmt.type_name, module_name, record_names, constant_names) if stmt.type_name is not None else None
         return SetStmt(stmt.name, type_name, qualify_expr(stmt.expr, module_name, record_names, constant_names), stmt.line)

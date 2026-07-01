@@ -27,6 +27,7 @@ from .ast import (
     EnumCase,
     EnumDecl,
     EnumType,
+    ExpectStmt,
     Expr,
     FieldAccess,
     FieldAssignStmt,
@@ -64,6 +65,7 @@ from .ast import (
     SizeOfType,
     StorageAliasBinding,
     StorageElement,
+    TestDecl,
     TypeAliasDecl,
     TypeName,
     Unary,
@@ -335,6 +337,7 @@ def analyze(program: Program) -> None:
         raise InscriptionError("main must take no parameters", main.line)
     for fn in program.functions:
         _check_function(fn, functions, records, constants)
+    _check_tests(program.tests, functions, records, constants)
 
 
 def enum_table(program: Program) -> dict[str, EnumInfo]:
@@ -1010,6 +1013,68 @@ def _check_owned_buffer_element_type(element_type: ValueType, line: int, *, vers
         raise InscriptionError(f"owned buffer element type must be numeric or enum, got {format_type(element_type)}", line)
 
 
+def _contains_expect(statements: tuple[BodyStmt, ...]) -> bool:
+    for stmt in statements:
+        if isinstance(stmt, ExpectStmt):
+            return True
+        if isinstance(stmt, WhileStmt | ForStmt | ForEachStmt):
+            if _contains_expect(stmt.body):
+                return True
+        if isinstance(stmt, IfStmt):
+            if _contains_expect(stmt.then_body) or _contains_expect(stmt.else_body):
+                return True
+        if isinstance(stmt, MatchStep):
+            if any(_contains_expect(arm.body) for arm in stmt.arms):
+                return True
+            if stmt.otherwise_body is not None and _contains_expect(stmt.otherwise_body):
+                return True
+    return False
+
+
+def _check_tests(
+    tests: tuple[TestDecl, ...],
+    functions: dict[str, Function],
+    records: dict[str, RecordDecl],
+    constants: dict[str, ConstValue],
+) -> None:
+    seen: set[str] = set()
+    for test in tests:
+        if test.name in seen:
+            raise InscriptionError(f"test `{test.display_name}` is already defined", test.line)
+        seen.add(test.name)
+        _check_test(test, functions, records, constants)
+
+
+def _check_test(
+    test: TestDecl,
+    functions: dict[str, Function],
+    records: dict[str, RecordDecl],
+    constants: dict[str, ConstValue],
+) -> None:
+    if not _contains_expect(test.body):
+        raise InscriptionError(f"test `{test.display_name}` must contain at least one Expect", test.line)
+    bindings = _constant_bindings(constants)
+    for stmt in test.body:
+        if isinstance(stmt, ReturnStmt):
+            raise InscriptionError("Give is not valid inside a test", stmt.line)
+        _check_body_stmt(stmt, bindings, functions, records, constants, scope_depth=0, allow_expect=True)
+
+
+def _check_expect(
+    stmt: ExpectStmt,
+    bindings: dict[str, Binding],
+    functions: dict[str, Function],
+    records: dict[str, RecordDecl],
+    constants: dict[str, ConstValue],
+    *,
+    scope_depth: int,
+) -> None:
+    _check_expr_ownership(stmt.expr, bindings, functions, records, constants, scope_depth=scope_depth)
+    actual = infer_expr_type(stmt.expr, _env_types(bindings), functions, records, constants=constants)
+    if actual != "i1":
+        raise InscriptionError(f"Expect condition must have type i1, got {format_type(actual)}", stmt.line)
+
+
 def _check_body_stmt(
     stmt: BodyStmt,
     bindings: dict[str, Binding],
@@ -1018,6 +1083,7 @@ def _check_body_stmt(
     constants: dict[str, ConstValue],
     *,
     scope_depth: int = 0,
+    allow_expect: bool = False,
 ) -> None:
     if isinstance(stmt, CheckStmt):
         _check_expr_ownership(stmt.expr, bindings, functions, records, constants, scope_depth=scope_depth)
@@ -1026,6 +1092,11 @@ def _check_body_stmt(
     if isinstance(stmt, RequireStmt):
         _check_expr_ownership(stmt.expr, bindings, functions, records, constants, scope_depth=scope_depth)
         _check_require(stmt, _env_types(bindings), functions, records, constants)
+        return
+    if isinstance(stmt, ExpectStmt):
+        if not allow_expect:
+            raise InscriptionError("Expect is only valid inside tests", stmt.line)
+        _check_expect(stmt, bindings, functions, records, constants, scope_depth=scope_depth)
         return
     if isinstance(stmt, SetStmt):
         _declare_let(stmt, bindings, functions, records, constants, scope_depth=scope_depth)
@@ -1061,19 +1132,19 @@ def _check_body_stmt(
         _check_call_stmt(stmt, bindings, functions, records, constants, scope_depth=scope_depth)
         return
     if isinstance(stmt, WhileStmt):
-        _check_while(stmt, bindings, functions, records, constants, scope_depth=scope_depth)
+        _check_while(stmt, bindings, functions, records, constants, scope_depth=scope_depth, allow_expect=allow_expect)
         return
     if isinstance(stmt, ForStmt):
-        _check_for(stmt, bindings, functions, records, constants, scope_depth=scope_depth)
+        _check_for(stmt, bindings, functions, records, constants, scope_depth=scope_depth, allow_expect=allow_expect)
         return
     if isinstance(stmt, ForEachStmt):
-        _check_for_each(stmt, bindings, functions, records, constants, scope_depth=scope_depth)
+        _check_for_each(stmt, bindings, functions, records, constants, scope_depth=scope_depth, allow_expect=allow_expect)
         return
     if isinstance(stmt, IfStmt):
-        _check_if(stmt, bindings, functions, records, constants, scope_depth=scope_depth)
+        _check_if(stmt, bindings, functions, records, constants, scope_depth=scope_depth, allow_expect=allow_expect)
         return
     if isinstance(stmt, MatchStep):
-        _check_match_step(stmt, bindings, functions, records, constants, scope_depth=scope_depth)
+        _check_match_step(stmt, bindings, functions, records, constants, scope_depth=scope_depth, allow_expect=allow_expect)
         return
     raise AssertionError(stmt)  # pragma: no cover
 
@@ -1686,6 +1757,7 @@ def _check_while(
     constants: dict[str, ConstValue],
     *,
     scope_depth: int,
+    allow_expect: bool = False,
 ) -> None:
     _check_expr_ownership(stmt.condition, bindings, functions, records, constants, scope_depth=scope_depth)
     condition_type = infer_expr_type(stmt.condition, _env_types(bindings), functions, records)
@@ -1695,7 +1767,7 @@ def _check_while(
         raise InscriptionError("while loop requires at least one body step", stmt.line)
     scoped = dict(bindings)
     for body_stmt in stmt.body:
-        _check_body_stmt(body_stmt, scoped, functions, records, constants, scope_depth=scope_depth + 1)
+        _check_body_stmt(body_stmt, scoped, functions, records, constants, scope_depth=scope_depth + 1, allow_expect=allow_expect)
     _reject_loop_outer_moves(bindings, scoped, stmt.line)
 
 
@@ -1707,6 +1779,7 @@ def _check_for(
     constants: dict[str, ConstValue],
     *,
     scope_depth: int,
+    allow_expect: bool = False,
 ) -> None:
     _check_expr_ownership(stmt.start, bindings, functions, records, constants, scope_depth=scope_depth)
     _check_expr_ownership(stmt.end, bindings, functions, records, constants, scope_depth=scope_depth)
@@ -1729,7 +1802,7 @@ def _check_for(
     scoped = dict(bindings)
     scoped[stmt.name] = Binding(start_type, "index", stmt.line, writable=False, scope_depth=scope_depth + 1)
     for body_stmt in stmt.body:
-        _check_body_stmt(body_stmt, scoped, functions, records, constants, scope_depth=scope_depth + 1)
+        _check_body_stmt(body_stmt, scoped, functions, records, constants, scope_depth=scope_depth + 1, allow_expect=allow_expect)
     _reject_loop_outer_moves(bindings, scoped, stmt.line)
 
 
@@ -1741,6 +1814,7 @@ def _check_for_each(
     constants: dict[str, ConstValue],
     *,
     scope_depth: int,
+    allow_expect: bool = False,
 ) -> None:
     binding = _require_live_binding(stmt.buffer_name, stmt.line, bindings)
     if not isinstance(binding.type_name, BufferType | ArrayType | ViewType | OwnedBufferType):
@@ -1751,7 +1825,7 @@ def _check_for_each(
     scoped = dict(bindings)
     scoped[stmt.name] = Binding("i32", "index", stmt.line, writable=False, scope_depth=scope_depth + 1)
     for body_stmt in stmt.body:
-        _check_body_stmt(body_stmt, scoped, functions, records, constants, scope_depth=scope_depth + 1)
+        _check_body_stmt(body_stmt, scoped, functions, records, constants, scope_depth=scope_depth + 1, allow_expect=allow_expect)
     _reject_loop_outer_moves(bindings, scoped, stmt.line)
 
 
@@ -1809,6 +1883,7 @@ def _check_if(
     constants: dict[str, ConstValue],
     *,
     scope_depth: int,
+    allow_expect: bool = False,
 ) -> None:
     _check_expr_ownership(stmt.condition, bindings, functions, records, constants, scope_depth=scope_depth)
     condition_type = infer_expr_type(stmt.condition, _env_types(bindings), functions, records)
@@ -1821,11 +1896,11 @@ def _check_if(
 
     then_scope = dict(bindings)
     for body_stmt in stmt.then_body:
-        _check_body_stmt(body_stmt, then_scope, functions, records, constants, scope_depth=scope_depth + 1)
+        _check_body_stmt(body_stmt, then_scope, functions, records, constants, scope_depth=scope_depth + 1, allow_expect=allow_expect)
 
     else_scope = dict(bindings)
     for body_stmt in stmt.else_body:
-        _check_body_stmt(body_stmt, else_scope, functions, records, constants, scope_depth=scope_depth + 1)
+        _check_body_stmt(body_stmt, else_scope, functions, records, constants, scope_depth=scope_depth + 1, allow_expect=allow_expect)
     _merge_control_flow_owned_moves(bindings, (then_scope, else_scope), stmt.line, context="branches")
 
 
@@ -1837,6 +1912,7 @@ def _check_match_step(
     constants: dict[str, ConstValue],
     *,
     scope_depth: int,
+    allow_expect: bool = False,
 ) -> None:
     env = {**_constant_env_types(constants), **_env_types(bindings)}
     _check_expr_ownership(stmt.scrutinee, bindings, functions, records, constants, scope_depth=scope_depth)
@@ -1863,7 +1939,7 @@ def _check_match_step(
         if arm.guard is not None:
             _check_expr_ownership(arm.guard, arm_scope, functions, records, constants, scope_depth=scope_depth + 1)
         for body_stmt in arm.body:
-            _check_body_stmt(body_stmt, arm_scope, functions, records, constants, scope_depth=scope_depth + 1)
+            _check_body_stmt(body_stmt, arm_scope, functions, records, constants, scope_depth=scope_depth + 1, allow_expect=allow_expect)
         branch_scopes.append(arm_scope)
 
     if stmt.otherwise_body is not None:
@@ -1871,7 +1947,7 @@ def _check_match_step(
             raise InscriptionError("match arm must contain at least one step", stmt.line)
         otherwise_scope = dict(bindings)
         for body_stmt in stmt.otherwise_body:
-            _check_body_stmt(body_stmt, otherwise_scope, functions, records, constants, scope_depth=scope_depth + 1)
+            _check_body_stmt(body_stmt, otherwise_scope, functions, records, constants, scope_depth=scope_depth + 1, allow_expect=allow_expect)
         branch_scopes.append(otherwise_scope)
     _merge_control_flow_owned_moves(bindings, tuple(branch_scopes), stmt.line, context="match arms")
 

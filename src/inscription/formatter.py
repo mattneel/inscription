@@ -26,6 +26,7 @@ _TOP_LEVEL_PREFIXES = (
     "Union ",
     "External ",
     "To ",
+    "Test ",
 )
 
 _KEYWORD_CASE_REPLACEMENTS: tuple[tuple[re.Pattern[str], str], ...] = tuple(
@@ -44,8 +45,10 @@ _KEYWORD_CASE_REPLACEMENTS: tuple[tuple[re.Pattern[str], str], ...] = tuple(
         (r"^external\b", "External"),
         (r"^extern\b", "External"),
         (r"^to\b", "To"),
+        (r"^test\b", "Test"),
         (r"^let\b", "Let"),
         (r"^require\b", "Require"),
+        (r"^expect\b", "Expect"),
         (r"^write\b", "Write"),
         (r"^give\b", "Give"),
         (r"^when\b", "When"),
@@ -102,14 +105,14 @@ def format_source(source: str) -> str:
                     pass
                 else:
                     _ensure_blank_line(out)
-            in_phrase = first_line.startswith("To ")
+            in_phrase = first_line.startswith(("To ", "Test "))
             previous_was_import = first_line.startswith("Import ")
         else:
             previous_was_import = False
         out.extend(sentence.splitlines())
-        if first_line.startswith("To "):
+        if first_line.startswith(("To ", "Test ")):
             in_phrase = True
-        elif phrase_boundary and not first_line.startswith("To "):
+        elif phrase_boundary and not first_line.startswith(("To ", "Test ")):
             in_phrase = False
     while comment_index < len(standalone_comments):
         _append_comment(out, standalone_comments[comment_index])
@@ -156,7 +159,7 @@ def _format_sentence(text: str) -> str:
             return control
     if text.startswith("Match "):
         return _format_match_step_sentence(text)
-    if not text.startswith(("To ", "External ", "Import ", "Module ", "Record ", "Layout record ", "Packed layout record ", "Enum ", "Union ", "Type ")):
+    if not text.startswith(("To ", "Test ", "External ", "Import ", "Module ", "Record ", "Layout record ", "Packed layout record ", "Enum ", "Union ", "Type ")):
         match_index = _find_keyword(text, "match")
         if match_index != -1:
             maybe = _format_match_expression_sentence(text, match_index)

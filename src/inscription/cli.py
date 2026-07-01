@@ -20,6 +20,7 @@ from .runner import (
     selected_artifact,
     validate_executable_main,
 )
+from .tester import list_tests, run_tests
 
 
 def _add_optimization_args(command: argparse.ArgumentParser) -> None:
@@ -94,6 +95,15 @@ def main(argv: list[str] | None = None) -> int:
         help="directory for saved source MLIR, optimized MLIR when enabled, lowered MLIR, and LLVM IR intermediates",
     )
     _add_optimization_args(run_p)
+
+    test_p = sub.add_parser("test", help="compile and run source-level Inscription tests")
+    test_p.add_argument("source", type=Path)
+    test_p.add_argument("--module-root", type=Path, help="root directory for resolving imported modules")
+    test_p.add_argument("--runtime-checks", action="store_true", help="emit runtime assertions for dynamic storage bounds")
+    test_p.add_argument("--save-temps", type=Path, help="directory for per-test source MLIR, lowered MLIR, and LLVM IR intermediates")
+    test_p.add_argument("--filter", help="run only tests whose display name contains TEXT")
+    test_p.add_argument("--list", action="store_true", help="list discovered tests without running them")
+    _add_optimization_args(test_p)
 
     format_p = sub.add_parser("format", help="format an Inscription source file")
     format_p.add_argument("source", type=Path)
@@ -200,6 +210,39 @@ def main(argv: list[str] | None = None) -> int:
                 opt_level=_resolve_opt_level(args),
             )
             return result.exit_status
+        if args.command == "test":
+            opt_level = _resolve_opt_level(args)
+            if args.list:
+                tests = list_tests(args.source, module_root=args.module_root, filter_text=args.filter)
+                if not tests:
+                    if args.filter is None:
+                        print("no tests found")
+                    else:
+                        print(f"no tests matched filter `{args.filter}`")
+                    return 0
+                for display in tests:
+                    print(f"test {display}")
+                return 0
+            summary = run_tests(
+                args.source,
+                module_root=args.module_root,
+                runtime_checks=args.runtime_checks,
+                opt_level=opt_level,
+                save_temps=args.save_temps,
+                filter_text=args.filter,
+            )
+            if isinstance(summary, str):
+                print(summary)
+                return 0
+            for result in summary.results:
+                status = "ok" if result.passed else "FAILED"
+                print(f"test {result.display_name} ... {status}")
+            print()
+            if summary.failed:
+                print(f"test result: FAILED. {summary.passed} passed; {summary.failed} failed.")
+            else:
+                print(f"test result: ok. {summary.passed} passed; 0 failed.")
+            return summary.exit_status
         if args.command == "format":
             if args.in_place and args.output is not None:
                 raise InscriptionError("--in-place cannot be used with -o")

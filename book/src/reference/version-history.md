@@ -22,3 +22,4 @@ Recent milestones:
 - v0.41: pattern alternatives with `or` and inclusive integer range patterns with `through`.
 - v0.42: owned buffer `containing`, owned byte-string buffers, and explicit `owned buffer copied from source` initialization.
 - v0.43: ordinary `//` comments, `///` declaration docs, `//!` module docs, interface JSON docs, and exported C header comments.
+- v0.44: first-class `Test ... .` declarations, test-only `Expect ... .` assertions, and the `inscription test` runner.

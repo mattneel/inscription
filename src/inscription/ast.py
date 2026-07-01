@@ -42,6 +42,7 @@ class Program:
     module_name: str | None = None
     imports: tuple[ImportDecl, ...] = ()
     documentation: str | None = None
+    tests: tuple["TestDecl", ...] = ()
 
 
 @dataclass(frozen=True)
@@ -131,6 +132,15 @@ class Function:
     display_name: str
     extern_symbol: str | None = None
     implementation: FunctionImplementation = "normal"
+    documentation: str | None = None
+
+
+@dataclass(frozen=True)
+class TestDecl:
+    name: str
+    display_name: str
+    body: tuple["BodyStmt", ...]
+    line: int
     documentation: str | None = None
 
 
@@ -555,6 +565,12 @@ class RequireStmt:
 
 
 @dataclass(frozen=True)
+class ExpectStmt:
+    expr: Expr
+    line: int
+
+
+@dataclass(frozen=True)
 class CallStmt:
     call: Call
     line: int
@@ -618,6 +634,7 @@ class ReturnStmt:
 BodyStmt = (
     CheckStmt
     | RequireStmt
+    | ExpectStmt
     | SetStmt
     | BufferBinding
     | ArrayBinding
