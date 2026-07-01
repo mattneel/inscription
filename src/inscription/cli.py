@@ -8,7 +8,7 @@ from pathlib import Path
 from .buildscript import build_step_display, load_build_plan, run_build_script
 from .package import PackageTestSummary
 from .compiler import compile_file, load_program
-from .diagnostics import InscriptionError
+from .diagnostics import InscriptionError, render_exception
 from .doctor import run_doctor
 from .formatter import format_file
 from .interface import emit_c_header, emit_interface_json, load_interface_context
@@ -87,6 +87,18 @@ def _display_relative(path: Path, root: Path) -> str:
         return path.resolve().relative_to(root.resolve()).as_posix()
     except ValueError:
         return path.as_posix()
+
+
+def _attach_cli_source_context(args: argparse.Namespace, exc: InscriptionError) -> InscriptionError:
+    if exc.source is not None or exc.line is None:
+        return exc
+    source_path = getattr(args, "source", None)
+    if not isinstance(source_path, Path) or not source_path.exists() or not source_path.is_file():
+        return exc
+    try:
+        return exc.attach_source(source_path.read_text(), source_path)
+    except OSError:
+        return exc
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -680,7 +692,11 @@ def main(argv: list[str] | None = None) -> int:
                 print("static library emission: llvm-ar rcsD output.a output.o")
             return 0
     except (InscriptionError, ToolchainError, OSError) as exc:
-        print(f"error: {exc}", file=sys.stderr)
+        if isinstance(exc, InscriptionError):
+            _attach_cli_source_context(args, exc)
+            print(render_exception(exc), file=sys.stderr)
+        else:
+            print(f"error: {exc}", file=sys.stderr)
         return 2
     raise AssertionError(args.command)  # pragma: no cover
 

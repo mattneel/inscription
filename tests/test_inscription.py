@@ -20,7 +20,7 @@ sys.path.insert(0, str(SRC))
 
 from inscription.buildscript import parse_build_script
 from inscription.compiler import compile_file as _compile_file, compile_source as _compile_source, load_program
-from inscription.diagnostics import InscriptionError
+from inscription.diagnostics import Diagnostic, InscriptionError, SourceSpan, render_diagnostic
 from inscription.formatter import format_source
 from inscription.interpreter import FloatValue, IntValue, Interpreter, InterpreterError
 from inscription.package import format_manifest_source, parse_manifest
@@ -10001,6 +10001,108 @@ Give result plus seen.
                 metadata["inscription"],
                 {"version": INSCRIPTION_VERSION, "language_version": LANGUAGE_VERSION},
             )
+
+    def test_v062_diagnostic_renderer_and_cli_spans(self):
+        rendered = render_diagnostic(
+            Diagnostic("unknown binding missing", SourceSpan("example.ins", 2, 6, end_column=13)),
+            source="To main, giving i32.\nGive missing.\n",
+        )
+        self.assertIn("error: unknown binding missing", rendered)
+        self.assertIn("--> example.ins:2:6", rendered)
+        self.assertIn("2 | Give missing.", rendered)
+        self.assertIn("^^^^^^^", rendered)
+
+        env = {**os.environ, "PYTHONPATH": str(SRC)}
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            bad_source = tmp_path / "bad.ins"
+            bad_source.write_text("To main, giving i32.\nGive missing.\n")
+            proc = subprocess.run(
+                [sys.executable, "-m", "inscription", "compile", str(bad_source)],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(proc.returncode, 2)
+            self.assertIn("unknown binding missing", proc.stderr)
+            self.assertIn(f"{bad_source}:2", proc.stderr)
+            self.assertIn("Give missing.", proc.stderr)
+            self.assertIn("^^^^^^^", proc.stderr)
+
+            bad_period = tmp_path / "bad_period.ins"
+            bad_period.write_text("To main, giving i32.\nGive 42\n")
+            period_proc = subprocess.run(
+                [sys.executable, "-m", "inscription", "compile", str(bad_period)],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(period_proc.returncode, 2)
+            self.assertIn("missing period at end of sentence", period_proc.stderr)
+            self.assertIn(f"{bad_period}:2", period_proc.stderr)
+            self.assertIn("Give 42", period_proc.stderr)
+            self.assertIn("^", period_proc.stderr)
+
+            package_root = tmp_path / "badpkg"
+            package_root.mkdir()
+            (package_root / "package.ins").write_text(
+                "Package Bad.\n\n"
+                "Sources are in \"src\".\n"
+                "Sources are in \"source\".\n\n"
+                "Root module is Bad.\n"
+            )
+            package_proc = subprocess.run(
+                [sys.executable, "-m", "inscription", "package", "check", str(package_root)],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(package_proc.returncode, 2)
+            self.assertIn("package manifest declares sources more than once", package_proc.stderr)
+            self.assertIn("package.ins:4", package_proc.stderr)
+            self.assertIn("Sources are in \"source\".", package_proc.stderr)
+            self.assertIn("^", package_proc.stderr)
+
+            package_root2 = tmp_path / "badbuildpkg"
+            (package_root2 / "src").mkdir(parents=True)
+            (package_root2 / "package.ins").write_text(
+                "Package BadBuild.\n\n"
+                "Sources are in \"src\".\n\n"
+                "Root module is BadBuild.\n"
+                "Expose module BadBuild.\n"
+            )
+            (package_root2 / "src" / "BadBuild.ins").write_text(
+                "Module BadBuild.\n\nTo add left: i32 and right: i32, giving i32, exported as ins_add.\nGive left plus right.\n"
+            )
+            (package_root2 / "build.ins").write_text(
+                "Import Build.\n\n"
+                "To build package package: Build.Package.\n"
+                "Build.static library named \"library\".\n"
+                "Build.c header named \"library\".\n"
+            )
+            build_proc = subprocess.run(
+                [sys.executable, "-m", "inscription", "build", str(package_root2), "--list"],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(build_proc.returncode, 2)
+            self.assertIn("build step library is already defined", build_proc.stderr)
+            self.assertIn("build.ins:5", build_proc.stderr)
+            self.assertIn("Build.c header named \"library\".", build_proc.stderr)
+            self.assertIn("^^^^^^^", build_proc.stderr)
 
 
 class FormatterTests(unittest.TestCase):

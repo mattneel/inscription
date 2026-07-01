@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from .diagnostics import InscriptionError
 from .parser import (
     _find_top_level_char,
     _is_phrase_boundary_sentence,
@@ -62,11 +63,14 @@ _KEYWORD_CASE_REPLACEMENTS: tuple[tuple[re.Pattern[str], str], ...] = tuple(
 
 def format_file(path: Path) -> str:
     source = path.read_text()
-    if path.name == "package.ins":
-        from .package import format_manifest_source
+    try:
+        if path.name == "package.ins":
+            from .package import format_manifest_source
 
-        return format_manifest_source(source)
-    return format_source(source)
+            return format_manifest_source(source)
+        return format_source(source)
+    except InscriptionError as exc:
+        raise exc.attach_source(source, path) from exc
 
 
 def format_source(source: str) -> str:

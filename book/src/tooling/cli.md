@@ -34,6 +34,8 @@ PYTHONPATH=src python -m inscription test SOURCE --save-temps /tmp/inscription-t
 
 `test` exits 0 when all selected tests pass, exits 1 when any selected test fails at runtime, and exits 2 for compiler/tooling diagnostics.
 
+Compiler, package, build-script, and formatter diagnostics render source excerpts when a source span is available. Output is deterministic and color-free by default.
+
 
 Useful package commands:
 

@@ -39,4 +39,5 @@ Recent milestones:
 - v0.58: package clean command and `Build.clean` steps for deterministic build artifact hygiene.
 - v0.59: deterministic package release bundles and `Build.release package.` bundle steps.
 - v0.60: deterministic release `.tar.gz` archives, checksum manifests, and `Build.release archive package.` steps.
+- v0.62: centralized diagnostic rendering with file/line/column spans and source excerpts for common compiler, package, build-script, and formatter errors.
 - v0.61: centralized version metadata, `inscription version`, `inscription doctor`, package health checks, and compiler/language release metadata.

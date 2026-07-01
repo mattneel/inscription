@@ -57,8 +57,12 @@ class InterfaceContext:
 
 def load_interface_context(source_path: Path, *, module_root: Path | None = None) -> InterfaceContext:
     source_path = source_path.resolve()
-    compilation = load_compilation(source_path.read_text(), source_path=source_path, module_root=module_root)
-    return make_interface_context(compilation, root_dir=compilation.module_root)
+    source = source_path.read_text()
+    try:
+        compilation = load_compilation(source, source_path=source_path, module_root=module_root)
+        return make_interface_context(compilation, root_dir=compilation.module_root)
+    except InscriptionError as exc:
+        raise exc.attach_source(source, source_path) from exc
 
 
 def make_interface_context(compilation: LoadedCompilation, *, root_dir: Path | None = None) -> InterfaceContext:

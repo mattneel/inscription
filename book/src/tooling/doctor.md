@@ -1,6 +1,6 @@
 # Doctor and Version
 
-Inscription v0.61 adds deterministic version reporting and health checks.
+Inscription v0.61 added deterministic version reporting and health checks. v0.62 adds source-span diagnostic excerpts across common compiler/package/build errors.
 
 Print the short tool version:
 

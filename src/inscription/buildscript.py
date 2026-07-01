@@ -129,7 +129,11 @@ def load_build_script(package_root: Path) -> BuildScript:
     path = root / BUILD_SCRIPT_NAME
     if not path.exists():
         raise InscriptionError(f"build script not found at {BUILD_SCRIPT_NAME}")
-    return parse_build_script(path.read_text(), path=path)
+    source = path.read_text()
+    try:
+        return parse_build_script(source, path=path)
+    except InscriptionError as exc:
+        raise exc.attach_source(source, path) from exc
 
 
 def parse_build_script(source: str, *, path: Path | None = None) -> BuildScript:

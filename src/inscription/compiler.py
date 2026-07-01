@@ -91,6 +91,11 @@ from .parser import Parser, PhrasePart, PhraseTemplate, parse_source, scan_punct
 MODULE_RE = re.compile(r"[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z][A-Za-z0-9_]*)*")
 
 
+def _attach_source_context(exc: InscriptionError, source: str, path: Path | None) -> InscriptionError:
+    exc.attach_source(source, path)
+    return exc
+
+
 def compile_source(
     source: str,
     *,
@@ -98,7 +103,10 @@ def compile_source(
     module_root: Path | None = None,
     runtime_checks: bool = False,
 ) -> str:
-    return emit_mlir(load_program(source, source_path=source_path, module_root=module_root), runtime_checks=runtime_checks)
+    try:
+        return emit_mlir(load_program(source, source_path=source_path, module_root=module_root), runtime_checks=runtime_checks)
+    except InscriptionError as exc:
+        raise _attach_source_context(exc, source, source_path) from exc
 
 
 def load_program(
@@ -109,7 +117,10 @@ def load_program(
     module_path_resolver: Callable[[str, tuple[str, ...]], Path] | None = None,
 ) -> Program:
     if module_path_resolver is None and source_path is None and module_root is None and not _source_has_imports(source):
-        return parse_source(source)
+        try:
+            return parse_source(source)
+        except InscriptionError as exc:
+            raise _attach_source_context(exc, source, source_path) from exc
     resolver = ModuleResolver(
         module_root or (source_path.parent if source_path is not None else None),
         module_path_resolver=module_path_resolver,
@@ -157,12 +168,18 @@ class ModuleResolver:
         return self.load_entry_compilation(source, source_path=source_path).program
 
     def load_entry_compilation(self, source: str, *, source_path: Path | None = None) -> LoadedCompilation:
-        module_name, imports = scan_module_header(source)
+        try:
+            module_name, imports = scan_module_header(source)
+        except InscriptionError as exc:
+            raise _attach_source_context(exc, source, source_path) from exc
         if imports and self.module_root is None and self.module_path_resolver is None:
-            raise InscriptionError("imports require a source path or --module-root", imports[0].line)
+            raise _attach_source_context(InscriptionError("imports require a source path or --module-root", imports[0].line), source, source_path)
         dependencies = [self.load_module(import_decl.module, stack=()) for import_decl in imports]
         external_templates = tuple(template for dep in dependencies for template in dep.exported_templates)
-        entry = Parser(source, external_phrases=external_templates).parse_program()
+        try:
+            entry = Parser(source, external_phrases=external_templates).parse_program()
+        except InscriptionError as exc:
+            raise _attach_source_context(exc, source, source_path) from exc
         if entry.module_name != module_name:
             raise AssertionError("module scan and parser disagree")  # pragma: no cover
         modules = [self.cache[name] for name in self.order]
@@ -186,7 +203,10 @@ class ModuleResolver:
         if not path.exists():
             raise InscriptionError(f"module {name} not found at {path}")
         source = path.read_text()
-        declared_module, imports = scan_module_header(source)
+        try:
+            declared_module, imports = scan_module_header(source)
+        except InscriptionError as exc:
+            raise _attach_source_context(exc, source, path) from exc
         if declared_module is None:
             raise InscriptionError(f"imported file {path} must declare module {name}")
         if declared_module != name:
@@ -194,8 +214,11 @@ class ModuleResolver:
         dependencies = [self.load_module(import_decl.module, stack=(*stack, name)) for import_decl in imports]
         external_templates = tuple(template for dep in dependencies for template in dep.exported_templates)
         symbol_prefix = module_symbol(name)
-        parser = Parser(source, external_phrases=external_templates, symbol_prefix=symbol_prefix)
-        parsed = parser.parse_program()
+        try:
+            parser = Parser(source, external_phrases=external_templates, symbol_prefix=symbol_prefix)
+            parsed = parser.parse_program()
+        except InscriptionError as exc:
+            raise _attach_source_context(exc, source, path) from exc
         if parsed.module_name != name:
             raise InscriptionError(f"module declaration {parsed.module_name} does not match import {name}")
         program = qualify_imported_program(parsed, name)

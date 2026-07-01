@@ -162,7 +162,11 @@ def load_package_context(root: Path) -> PackageContext:
     manifest_path = root / MANIFEST_NAME
     if not manifest_path.exists():
         raise InscriptionError(f"package manifest not found at {MANIFEST_NAME}")
-    manifest = parse_manifest(manifest_path.read_text())
+    source = manifest_path.read_text()
+    try:
+        manifest = parse_manifest(source)
+    except InscriptionError as exc:
+        raise exc.attach_source(source, manifest_path) from exc
     return PackageContext(root, manifest_path, manifest)
 
 
@@ -656,12 +660,16 @@ def _check_module(
             raise InscriptionError(f"root module {module} not found at {relative}")
         raise InscriptionError(f"exposed module {module} not found at {relative}")
     resolver = PackageModuleResolver(graph, context)
-    program = load_program(path.read_text(), source_path=path, module_root=context.sources_dir, module_path_resolver=resolver)
+    source = path.read_text()
+    program = load_program(source, source_path=path, module_root=context.sources_dir, module_path_resolver=resolver)
     if program.module_name != module:
         if kind == "root":
             raise InscriptionError(f"root module {module} resolved to module {program.module_name}; expected {module}")
         raise InscriptionError(f"exposed module {module} resolved to module {program.module_name}; expected {module}")
-    analyze(program)
+    try:
+        analyze(program)
+    except InscriptionError as exc:
+        raise exc.attach_source(source, path) from exc
     if verify:
         mlir = emit_mlir(program)
         build_artifacts(mlir, emit="mlir", verify=True, toolchain=toolchain, stem=path.stem)
@@ -984,6 +992,8 @@ def format_package(
             try:
                 formatted = format_file(path)
             except InscriptionError as exc:
+                if exc.source is not None:
+                    raise exc
                 raise InscriptionError(f"{_relative_for_message(path, context.root)}: {exc}") from exc
             formatted_by_path[path] = formatted
             if formatted != original:
