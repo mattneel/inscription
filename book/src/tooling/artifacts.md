@@ -21,3 +21,14 @@ PYTHONPATH=src python -m inscription package build path/to/package --emit static
 ```
 
 For package builds, library-like emits include the root module and exposed modules from the manifest. `inscription build` reads `build.ins` and routes named Build API steps through the same package artifact emit modes, using deterministic outputs under the package `build/` directory.
+
+## Release bundles
+
+`inscription package release` assembles the common integration artifacts into a deterministic directory:
+
+```sh
+PYTHONPATH=src python -m inscription package release path/to/package
+PYTHONPATH=src python -m inscription package release path/to/package --include-executable --clean
+```
+
+The bundle always includes `package.ins`, `release.json`, `interface.json`, `include/<Package>.h`, and `lib/lib<Package>.a`. `--include-executable` adds `bin/<Package>` when the root module has a runnable `main`; `--include-book` adds mdBook output under `docs/` when `book/book.toml` exists. The metadata uses relative paths only and intentionally omits timestamps, hostnames, git hashes, signatures, checksums, and upload/publishing data in v0.59.

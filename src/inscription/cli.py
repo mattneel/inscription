@@ -18,6 +18,7 @@ from .package import (
     init_package,
     list_package_tests,
     new_package,
+    release_package,
     run_package_tests,
 )
 from .mlir import emit_mlir
@@ -175,6 +176,17 @@ def main(argv: list[str] | None = None) -> int:
     package_clean_p.add_argument("root", nargs="?", type=Path, default=Path("."), help="package root containing package.ins")
     package_clean_p.add_argument("--include-dependencies", action="store_true", help="also clean local path dependency packages")
     package_clean_p.add_argument("--dry-run", action="store_true", help="print what would be removed without deleting files")
+    package_release_p = package_sub.add_parser("release", help="create a deterministic package release bundle")
+    package_release_p.add_argument("root", nargs="?", type=Path, default=Path("."), help="package root containing package.ins")
+    package_release_p.add_argument("-o", "--output-dir", type=Path, help="release output directory")
+    package_release_p.add_argument("--name", help="release directory basename when -o is not supplied")
+    package_release_p.add_argument("--include-executable", action="store_true", help="include root executable artifact in bin/")
+    package_release_p.add_argument("--include-book", action="store_true", help="include mdBook output in docs/")
+    package_release_p.add_argument("--runtime-checks", action="store_true", help="emit runtime assertions for generated code artifacts")
+    package_release_p.add_argument("--verify", action="store_true", help="verify emitted artifacts with the LLVM/MLIR 22 toolchain")
+    package_release_p.add_argument("--clean", action="store_true", help="replace an existing release output directory")
+    package_release_p.add_argument("--dry-run", action="store_true", help="print planned release contents without writing")
+    _add_optimization_args(package_release_p)
     package_build_p = package_sub.add_parser("build", help="build package artifacts")
     package_build_p.add_argument("root", nargs="?", type=Path, default=Path("."), help="package root containing package.ins")
     package_build_p.add_argument(
@@ -446,6 +458,39 @@ def main(argv: list[str] | None = None) -> int:
                             print(f"package clean: {action} build")
                         else:
                             print(f"package clean: {action}")
+                return 0
+            if args.package_command == "release":
+                result = release_package(
+                    args.root,
+                    output_dir=args.output_dir,
+                    name=args.name,
+                    include_executable=args.include_executable,
+                    include_book=args.include_book,
+                    runtime_checks=args.runtime_checks,
+                    opt_level=_resolve_opt_level(args),
+                    verify=args.verify,
+                    clean=args.clean,
+                    dry_run=args.dry_run,
+                )
+                root = args.root.resolve()
+                output = _display_relative(result.output_dir, root)
+                if args.dry_run:
+                    print(f"release output: {output}")
+                    for artifact in result.artifacts:
+                        if artifact.kind == "static-library":
+                            print(f"would build static library: {artifact.path}")
+                        elif artifact.kind == "c-header":
+                            print(f"would build C header: {artifact.path}")
+                        elif artifact.kind == "interface-json":
+                            print(f"would build interface JSON: {artifact.path}")
+                        elif artifact.kind == "executable":
+                            print(f"would build executable: {artifact.path}")
+                        elif artifact.kind == "book":
+                            print("would build book: docs/")
+                    print("would copy package manifest: package.ins")
+                    print("would write release metadata: release.json")
+                else:
+                    print(f"package {result.package_name}: released to {output}")
                 return 0
             if args.package_command == "build":
                 result = build_package_artifact(

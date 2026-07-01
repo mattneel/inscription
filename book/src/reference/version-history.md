@@ -37,3 +37,4 @@ Recent milestones:
 - v0.56: package `init`/`new` commands that generate formatter-clean package, build, source, test, and optional book skeletons.
 - v0.57: package-wide formatting with `inscription package format`, Build format steps, and standard workflow format checks.
 - v0.58: package clean command and `Build.clean` steps for deterministic build artifact hygiene.
+- v0.59: deterministic package release bundles and `Build.release package.` bundle steps.

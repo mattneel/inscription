@@ -17,7 +17,7 @@ PYTHONPATH=src python -m inscription highlight SOURCE
 PYTHONPATH=src python -m inscription check-tools --show-pipeline
 ```
 
-`compile` emits artifacts without executing the program. `run` lowers through LLVM 22 and executes `main` with `lli`. `test` discovers top-level `Test ... .` declarations, compiles each selected test through the MLIR/LLVM pipeline, and reports a deterministic summary. `package new` and `package init` generate formatter-clean package skeletons. `package format` checks or rewrites package-owned `.ins` files. `package clean` removes generated package `build/` artifacts. `package check` validates `package.ins` manifests, dependency graphs, and package source layout. `package test` discovers test files from the manifest test directory and runs them with the package source directory plus direct dependency exposed modules as import roots. `package build` emits package-aware artifacts through the existing compile pipeline. `build` interprets `build.ins` and dispatches named clean, format, check, test, artifact, documentation, and group steps through the package machinery. `format` is parse-only and does not need LLVM tools. `highlight` uses the same Inscription lexer used by this book.
+`compile` emits artifacts without executing the program. `run` lowers through LLVM 22 and executes `main` with `lli`. `test` discovers top-level `Test ... .` declarations, compiles each selected test through the MLIR/LLVM pipeline, and reports a deterministic summary. `package new` and `package init` generate formatter-clean package skeletons. `package format` checks or rewrites package-owned `.ins` files. `package clean` removes generated package `build/` artifacts. `package check` validates `package.ins` manifests, dependency graphs, and package source layout. `package test` discovers test files from the manifest test directory and runs them with the package source directory plus direct dependency exposed modules as import roots. `package build` emits package-aware artifacts through the existing compile pipeline. `package release` assembles deterministic release bundle directories. `build` interprets `build.ins` and dispatches named release, clean, format, check, test, artifact, documentation, and group steps through the package machinery. `format` is parse-only and does not need LLVM tools. `highlight` uses the same Inscription lexer used by this book.
 
 Useful test options:
 
@@ -52,11 +52,14 @@ PYTHONPATH=src python -m inscription package build .
 PYTHONPATH=src python -m inscription package build . --emit c-header -o build/package.h
 PYTHONPATH=src python -m inscription package build . --emit interface-json -o build/package.json
 PYTHONPATH=src python -m inscription package build . --emit executable -o build/app
+PYTHONPATH=src python -m inscription package release .
+PYTHONPATH=src python -m inscription package release . --include-executable --clean
+PYTHONPATH=src python -m inscription package release . --dry-run
 ```
 
 `package init` initializes an existing directory, creating it if needed. `package new` creates and initializes a package directory. Both commands default to a library template, accept `--executable`, can add a minimal mdBook with `--with-book`, and protect existing generated files unless `--force` is supplied. `package format` requires `--check` or `--in-place`; `--include-dependencies` includes local path dependencies and `--include-book` runs package book example checks when present. `package clean` removes only `build/`, supports `--dry-run`, and cleans local path dependencies only with `--include-dependencies`.
 
-`package check` exits 0 on a valid manifest/layout/dependency graph and exits 2 for manifest, package, compiler, or tool diagnostics. `package test` exits 0 when all selected tests pass, exits 1 for runtime test failures, and exits 2 for package/compiler/tool diagnostics. `package build` exits 0 on success and exits 2 for package/compiler/tool diagnostics; its default output is `build/lib<Package>.a`.
+`package check` exits 0 on a valid manifest/layout/dependency graph and exits 2 for manifest, package, compiler, or tool diagnostics. `package test` exits 0 when all selected tests pass, exits 1 for runtime test failures, and exits 2 for package/compiler/tool diagnostics. `package build` exits 0 on success and exits 2 for package/compiler/tool diagnostics; its default output is `build/lib<Package>.a`. `package release` exits 0 on success and exits 2 for package/compiler/tool/filesystem diagnostics; by default it writes `build/release/<Package>-<version>` or `build/release/<Package>`.
 
 
 Useful build script commands:

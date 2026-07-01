@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 import shutil
 import subprocess
@@ -115,6 +116,20 @@ class PackageCleanResult:
     target: Path
     removed: bool
     dry_run: bool
+
+
+@dataclass(frozen=True)
+class PackageReleaseArtifact:
+    kind: str
+    path: str
+
+
+@dataclass(frozen=True)
+class PackageReleaseResult:
+    package_name: str
+    output_dir: Path
+    artifacts: tuple[PackageReleaseArtifact, ...]
+    dry_run: bool = False
 
 
 @dataclass(frozen=True)
@@ -1044,6 +1059,185 @@ def _clean_package_build_dir(context: PackageContext, target: Path, *, dry_run: 
         return True
     shutil.rmtree(target)
     return True
+
+
+def release_package(
+    root: Path,
+    *,
+    output_dir: Path | None = None,
+    name: str | None = None,
+    include_executable: bool = False,
+    include_book: bool = False,
+    runtime_checks: bool = False,
+    opt_level: str = "none",
+    verify: bool = False,
+    clean: bool = False,
+    dry_run: bool = False,
+    save_temps: Path | None = None,
+    toolchain: Toolchain | None = None,
+) -> PackageReleaseResult:
+    graph = checked_package_graph(root, verify=False, toolchain=toolchain)
+    context = graph.root
+    stem = package_stem(context.manifest)
+    release_dir = _release_output_dir(context, output_dir=output_dir, name=name)
+    artifacts = _release_artifacts(stem, include_executable=include_executable, include_book=include_book)
+
+    if include_book and not (context.root / "book" / "book.toml").exists():
+        raise InscriptionError("release with book requires book/book.toml")
+    if dry_run:
+        return PackageReleaseResult(context.manifest.package_name, release_dir, artifacts, dry_run=True)
+
+    _prepare_release_output_dir(release_dir, clean=clean)
+    (release_dir / "lib").mkdir(parents=True, exist_ok=True)
+    (release_dir / "include").mkdir(parents=True, exist_ok=True)
+
+    build_package_artifact(
+        context.root,
+        emit="static-library",
+        output=release_dir / "lib" / f"lib{stem}.a",
+        runtime_checks=runtime_checks,
+        opt_level=opt_level,
+        save_temps=_release_save_temps(save_temps, "static-library"),
+        verify=verify,
+        toolchain=toolchain,
+    )
+    header = build_package_artifact(
+        context.root,
+        emit="c-header",
+        output=release_dir / "include" / f"{stem}.h",
+        runtime_checks=runtime_checks,
+        opt_level=opt_level,
+        save_temps=_release_save_temps(save_temps, "c-header"),
+        verify=verify,
+        toolchain=toolchain,
+    )
+    assert header.text is not None
+    (release_dir / "include" / f"{stem}.h").write_text(header.text)
+    interface = build_package_artifact(
+        context.root,
+        emit="interface-json",
+        output=release_dir / "interface.json",
+        runtime_checks=runtime_checks,
+        opt_level=opt_level,
+        save_temps=_release_save_temps(save_temps, "interface-json"),
+        verify=verify,
+        toolchain=toolchain,
+    )
+    assert interface.text is not None
+    (release_dir / "interface.json").write_text(interface.text)
+
+    if include_executable:
+        (release_dir / "bin").mkdir(parents=True, exist_ok=True)
+        build_package_artifact(
+            context.root,
+            emit="executable",
+            output=release_dir / "bin" / stem,
+            runtime_checks=runtime_checks,
+            opt_level=opt_level,
+            save_temps=_release_save_temps(save_temps, "executable"),
+            verify=verify,
+            toolchain=toolchain,
+        )
+
+    if include_book:
+        _build_release_book(context, release_dir / "docs")
+
+    shutil.copyfile(context.manifest_path, release_dir / MANIFEST_NAME)
+    (release_dir / "release.json").write_text(_release_metadata(context.manifest, artifacts))
+    return PackageReleaseResult(context.manifest.package_name, release_dir, artifacts)
+
+
+def _release_output_dir(context: PackageContext, *, output_dir: Path | None, name: str | None) -> Path:
+    if output_dir is not None:
+        return output_dir.resolve()
+    if name is not None:
+        _validate_release_name(name)
+    basename = name or _default_release_basename(context.manifest)
+    return context.root / "build" / "release" / basename
+
+
+def _validate_release_name(name: str) -> None:
+    if not name:
+        raise InscriptionError("release name must not be empty")
+    if "/" in name or "\\" in name or name in {".", ".."}:
+        raise InscriptionError("release name must not contain path separators")
+
+
+def _default_release_basename(manifest: PackageManifest) -> str:
+    stem = package_stem(manifest)
+    if manifest.version is None:
+        return stem
+    return f"{stem}-{manifest.version}"
+
+
+def _release_artifacts(stem: str, *, include_executable: bool, include_book: bool) -> tuple[PackageReleaseArtifact, ...]:
+    artifacts = [
+        PackageReleaseArtifact("static-library", f"lib/lib{stem}.a"),
+        PackageReleaseArtifact("c-header", f"include/{stem}.h"),
+        PackageReleaseArtifact("interface-json", "interface.json"),
+    ]
+    if include_executable:
+        artifacts.append(PackageReleaseArtifact("executable", f"bin/{stem}"))
+    if include_book:
+        artifacts.append(PackageReleaseArtifact("book", "docs/index.html"))
+    return tuple(artifacts)
+
+
+def _prepare_release_output_dir(output: Path, *, clean: bool) -> None:
+    if output.is_symlink():
+        raise InscriptionError("release output path must not be a symlink")
+    if output.exists() and not output.is_dir():
+        raise InscriptionError("release output path exists and is not a directory")
+    if output.exists() and any(output.iterdir()):
+        if not clean:
+            raise InscriptionError("release output directory already exists; use --clean to replace it")
+        resolved = output.resolve()
+        if resolved.parent == resolved:
+            raise InscriptionError("release output path is not safe to clean")
+        shutil.rmtree(output)
+    output.mkdir(parents=True, exist_ok=True)
+
+
+def _release_save_temps(save_temps: Path | None, name: str) -> Path | None:
+    if save_temps is None:
+        return None
+    return save_temps / name
+
+
+def _build_release_book(context: PackageContext, output: Path) -> None:
+    mdbook = shutil.which("mdbook")
+    if mdbook is None:
+        raise InscriptionError("release with book requires mdbook, but mdbook was not found")
+    if output.exists():
+        if output.is_symlink():
+            raise InscriptionError("release docs output path must not be a symlink")
+        if output.is_dir():
+            shutil.rmtree(output)
+        else:
+            output.unlink()
+    output.parent.mkdir(parents=True, exist_ok=True)
+    completed = subprocess.run(
+        [mdbook, "build", str(context.root / "book"), "--dest-dir", str(output)],
+        cwd=context.root,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        check=False,
+    )
+    if completed.returncode != 0:
+        raise InscriptionError("release book build failed")
+
+
+def _release_metadata(manifest: PackageManifest, artifacts: tuple[PackageReleaseArtifact, ...]) -> str:
+    payload = {
+        "format": "inscription-release-v1",
+        "package": {
+            "name": manifest.package_name,
+            "version": manifest.version,
+        },
+        "artifacts": [{"kind": artifact.kind, "path": artifact.path} for artifact in artifacts],
+    }
+    return json.dumps(payload, indent=2) + "\n"
 
 
 def init_package(

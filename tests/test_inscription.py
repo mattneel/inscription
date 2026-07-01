@@ -9637,6 +9637,136 @@ Give result plus seen.
             self.assertIn("build step release ... ok", fresh_proc.stdout)
             self.assertTrue((package / "build" / "libCleanPkg.a").exists())
 
+    def test_v059_package_release_cli_outputs_and_diagnostics(self):
+        env = {**os.environ, "PYTHONPATH": str(SRC)}
+
+        def run_cli(*args: str | Path) -> subprocess.CompletedProcess[str]:
+            return subprocess.run(
+                [sys.executable, "-m", "inscription", *(str(arg) for arg in args)],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            package = Path(tmp) / "release_package"
+            shutil.copytree(ROOT / "tests" / "fixtures" / "packages" / "release_package", package)
+            release_dir = package / "build" / "release" / "ReleasePkg-0.1.0"
+
+            dry_run = run_cli("package", "release", package, "--dry-run")
+            self.assertEqual(dry_run.returncode, 0, dry_run.stderr)
+            self.assertIn("release output: build/release/ReleasePkg-0.1.0\n", dry_run.stdout)
+            self.assertIn("would build static library: lib/libReleasePkg.a\n", dry_run.stdout)
+            self.assertIn("would build C header: include/ReleasePkg.h\n", dry_run.stdout)
+            self.assertIn("would build interface JSON: interface.json\n", dry_run.stdout)
+            self.assertFalse(release_dir.exists())
+
+            release = run_cli("package", "release", package)
+            self.assertEqual(release.returncode, 0, release.stderr)
+            self.assertTrue((release_dir / "package.ins").exists())
+            self.assertTrue((release_dir / "interface.json").exists())
+            self.assertTrue((release_dir / "include" / "ReleasePkg.h").exists())
+            self.assertTrue((release_dir / "lib" / "libReleasePkg.a").exists())
+            metadata_path = release_dir / "release.json"
+            self.assertTrue(metadata_path.exists())
+            metadata = json.loads(metadata_path.read_text())
+            self.assertEqual(metadata["format"], "inscription-release-v1")
+            self.assertEqual(metadata["package"], {"name": "ReleasePkg", "version": "0.1.0"})
+            self.assertEqual(
+                metadata["artifacts"],
+                [
+                    {"kind": "static-library", "path": "lib/libReleasePkg.a"},
+                    {"kind": "c-header", "path": "include/ReleasePkg.h"},
+                    {"kind": "interface-json", "path": "interface.json"},
+                ],
+            )
+
+            exists = run_cli("package", "release", package)
+            self.assertEqual(exists.returncode, 2)
+            self.assertIn("release output directory already exists; use --clean to replace it", exists.stderr)
+
+            executable = run_cli("package", "release", package, "--include-executable", "--clean")
+            self.assertEqual(executable.returncode, 0, executable.stderr)
+            exe_path = release_dir / "bin" / "ReleasePkg"
+            self.assertTrue(exe_path.exists())
+            exe_run = subprocess.run([str(exe_path)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False)
+            self.assertEqual(exe_run.returncode, 42, exe_run.stderr)
+            metadata = json.loads(metadata_path.read_text())
+            self.assertIn({"kind": "executable", "path": "bin/ReleasePkg"}, metadata["artifacts"])
+
+            custom = Path(tmp) / "custom-release"
+            custom_proc = run_cli("package", "release", package, "-o", custom)
+            self.assertEqual(custom_proc.returncode, 0, custom_proc.stderr)
+            self.assertTrue((custom / "release.json").exists())
+
+            no_version = Path(tmp) / "no_version"
+            shutil.copytree(ROOT / "tests" / "fixtures" / "packages" / "release_package", no_version)
+            manifest = no_version / "package.ins"
+            manifest.write_text(manifest.read_text().replace('Version "0.1.0".\n\n', ""))
+            no_version_proc = run_cli("package", "release", no_version)
+            self.assertEqual(no_version_proc.returncode, 0, no_version_proc.stderr)
+            self.assertTrue((no_version / "build" / "release" / "ReleasePkg" / "release.json").exists())
+
+            if shutil.which("mdbook") is not None:
+                book_package = Path(tmp) / "book_release"
+                shutil.copytree(ROOT / "tests" / "fixtures" / "packages" / "release_package", book_package)
+                book_proc = run_cli("package", "release", book_package, "--include-book")
+                self.assertEqual(book_proc.returncode, 0, book_proc.stderr)
+                self.assertTrue((book_package / "build" / "release" / "ReleasePkg-0.1.0" / "docs" / "index.html").exists())
+
+    def test_v059_build_release_bundle_step(self):
+        env = {**os.environ, "PYTHONPATH": str(SRC)}
+
+        def run_cli(*args: str | Path) -> subprocess.CompletedProcess[str]:
+            return subprocess.run(
+                [sys.executable, "-m", "inscription", *(str(arg) for arg in args)],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+
+        duplicate = (
+            "Import Build.\n\n"
+            "To build package package: Build.Package.\n"
+            "Build.release package.\n"
+            'Build.static library named "bundle".\n'
+        )
+        with self.assertRaises(InscriptionError) as ctx:
+            parse_build_script(duplicate)
+        self.assertIn("build step bundle is already defined", str(ctx.exception))
+
+        parsed = parse_build_script(
+            "Import Build.\n\n"
+            "To build package package: Build.Package.\n"
+            "Build.release package.\n"
+            'Build.release package named "dist".\n'
+        )
+        self.assertEqual([(step.name, step.emit) for step in parsed.steps], [
+            ("bundle", "package-release"),
+            ("dist", "package-release"),
+        ])
+
+        with tempfile.TemporaryDirectory() as tmp:
+            package = Path(tmp) / "release_package"
+            shutil.copytree(ROOT / "tests" / "fixtures" / "packages" / "release_package", package)
+            list_proc = run_cli("build", package, "--list")
+            self.assertEqual(list_proc.returncode, 0, list_proc.stderr)
+            self.assertIn("build step bundle: release package\n", list_proc.stdout)
+
+            bundle_proc = run_cli("build", package, "bundle")
+            self.assertEqual(bundle_proc.returncode, 0, bundle_proc.stderr)
+            self.assertTrue((package / "build" / "release" / "ReleasePkg-0.1.0" / "release.json").exists())
+
+            rerun_bundle = run_cli("build", package, "bundle")
+            self.assertEqual(rerun_bundle.returncode, 0, rerun_bundle.stderr)
+            self.assertTrue((package / "build" / "release" / "ReleasePkg-0.1.0" / "release.json").exists())
+
 
 class FormatterTests(unittest.TestCase):
     def cli(self, *args: str, cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
