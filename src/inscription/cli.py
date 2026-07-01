@@ -186,6 +186,8 @@ def main(argv: list[str] | None = None) -> int:
     package_release_p.add_argument("--verify", action="store_true", help="verify emitted artifacts with the LLVM/MLIR 22 toolchain")
     package_release_p.add_argument("--clean", action="store_true", help="replace an existing release output directory")
     package_release_p.add_argument("--dry-run", action="store_true", help="print planned release contents without writing")
+    package_release_p.add_argument("--archive", action="store_true", help="also create a deterministic .tar.gz release archive")
+    package_release_p.add_argument("--checksum", action="store_true", help="write deterministic SHA-256 checksum manifests")
     _add_optimization_args(package_release_p)
     package_build_p = package_sub.add_parser("build", help="build package artifacts")
     package_build_p.add_argument("root", nargs="?", type=Path, default=Path("."), help="package root containing package.ins")
@@ -471,6 +473,8 @@ def main(argv: list[str] | None = None) -> int:
                     verify=args.verify,
                     clean=args.clean,
                     dry_run=args.dry_run,
+                    archive=args.archive,
+                    checksum=args.checksum,
                 )
                 root = args.root.resolve()
                 output = _display_relative(result.output_dir, root)
@@ -489,6 +493,12 @@ def main(argv: list[str] | None = None) -> int:
                             print("would build book: docs/")
                     print("would copy package manifest: package.ins")
                     print("would write release metadata: release.json")
+                    if result.checksum_path is not None:
+                        print(f"would write release checksums: {_display_relative(result.checksum_path, root)}")
+                    if result.archive_path is not None:
+                        print(f"would create release archive: {_display_relative(result.archive_path, root)}")
+                    if result.archive_checksum_path is not None:
+                        print(f"would write archive checksum: {_display_relative(result.archive_checksum_path, root)}")
                 else:
                     print(f"package {result.package_name}: released to {output}")
                 return 0

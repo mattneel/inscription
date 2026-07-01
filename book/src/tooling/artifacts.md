@@ -29,6 +29,9 @@ For package builds, library-like emits include the root module and exposed modul
 ```sh
 PYTHONPATH=src python -m inscription package release path/to/package
 PYTHONPATH=src python -m inscription package release path/to/package --include-executable --clean
+PYTHONPATH=src python -m inscription package release path/to/package --archive --checksum
 ```
 
-The bundle always includes `package.ins`, `release.json`, `interface.json`, `include/<Package>.h`, and `lib/lib<Package>.a`. `--include-executable` adds `bin/<Package>` when the root module has a runnable `main`; `--include-book` adds mdBook output under `docs/` when `book/book.toml` exists. The metadata uses relative paths only and intentionally omits timestamps, hostnames, git hashes, signatures, checksums, and upload/publishing data in v0.59.
+The bundle always includes `package.ins`, `release.json`, `interface.json`, `include/<Package>.h`, and `lib/lib<Package>.a`. `--include-executable` adds `bin/<Package>` when the root module has a runnable `main`; `--include-book` adds mdBook output under `docs/` when `book/book.toml` exists.
+
+`--archive` writes a deterministic `.tar.gz` beside the release directory. `--checksum` writes `checksums.sha256` inside the release directory; combined with `--archive`, it also writes `<release>.tar.gz.sha256`. The metadata uses relative paths only and intentionally omits timestamps, hostnames, git hashes, signatures, and upload/publishing data in v0.60.

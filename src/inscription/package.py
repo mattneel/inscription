@@ -1,10 +1,15 @@
 from __future__ import annotations
 
+import gzip
+import hashlib
+import io
 import json
+import os
 import re
 import shutil
 import subprocess
 import sys
+import tarfile
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
@@ -129,6 +134,9 @@ class PackageReleaseResult:
     package_name: str
     output_dir: Path
     artifacts: tuple[PackageReleaseArtifact, ...]
+    archive_path: Path | None = None
+    checksum_path: Path | None = None
+    archive_checksum_path: Path | None = None
     dry_run: bool = False
 
 
@@ -1073,6 +1081,8 @@ def release_package(
     verify: bool = False,
     clean: bool = False,
     dry_run: bool = False,
+    archive: bool = False,
+    checksum: bool = False,
     save_temps: Path | None = None,
     toolchain: Toolchain | None = None,
 ) -> PackageReleaseResult:
@@ -1081,11 +1091,24 @@ def release_package(
     stem = package_stem(context.manifest)
     release_dir = _release_output_dir(context, output_dir=output_dir, name=name)
     artifacts = _release_artifacts(stem, include_executable=include_executable, include_book=include_book)
+    archive_path = _release_archive_path(release_dir) if archive else None
+    checksum_path = release_dir / "checksums.sha256" if checksum else None
+    archive_checksum_path = (
+        archive_path.with_suffix(archive_path.suffix + ".sha256") if archive_path is not None and checksum else None
+    )
 
     if include_book and not (context.root / "book" / "book.toml").exists():
         raise InscriptionError("release with book requires book/book.toml")
     if dry_run:
-        return PackageReleaseResult(context.manifest.package_name, release_dir, artifacts, dry_run=True)
+        return PackageReleaseResult(
+            context.manifest.package_name,
+            release_dir,
+            artifacts,
+            archive_path=archive_path,
+            checksum_path=checksum_path,
+            archive_checksum_path=archive_checksum_path,
+            dry_run=True,
+        )
 
     _prepare_release_output_dir(release_dir, clean=clean)
     (release_dir / "lib").mkdir(parents=True, exist_ok=True)
@@ -1143,8 +1166,29 @@ def release_package(
         _build_release_book(context, release_dir / "docs")
 
     shutil.copyfile(context.manifest_path, release_dir / MANIFEST_NAME)
-    (release_dir / "release.json").write_text(_release_metadata(context.manifest, artifacts))
-    return PackageReleaseResult(context.manifest.package_name, release_dir, artifacts)
+    (release_dir / "release.json").write_text(
+        _release_metadata(
+            context.manifest,
+            artifacts,
+            checksums=checksum,
+            archive_path=archive_path,
+            release_dir=release_dir,
+        )
+    )
+    if checksum_path is not None:
+        _write_release_checksums(release_dir, checksum_path)
+    if archive_path is not None:
+        _create_release_archive(release_dir, archive_path)
+    if archive_path is not None and archive_checksum_path is not None:
+        _write_archive_checksum(archive_path, archive_checksum_path)
+    return PackageReleaseResult(
+        context.manifest.package_name,
+        release_dir,
+        artifacts,
+        archive_path=archive_path,
+        checksum_path=checksum_path,
+        archive_checksum_path=archive_checksum_path,
+    )
 
 
 def _release_output_dir(context: PackageContext, *, output_dir: Path | None, name: str | None) -> Path:
@@ -1204,6 +1248,110 @@ def _release_save_temps(save_temps: Path | None, name: str) -> Path | None:
     return save_temps / name
 
 
+def _release_archive_path(release_dir: Path) -> Path:
+    return release_dir.with_name(release_dir.name + ".tar.gz")
+
+
+def _write_release_checksums(release_dir: Path, checksum_path: Path) -> None:
+    lines: list[str] = []
+    for path in _release_checksum_files(release_dir):
+        relative = path.relative_to(release_dir).as_posix()
+        lines.append(f"{_sha256_file(path)}  {relative}")
+    try:
+        checksum_path.write_text("\n".join(lines) + "\n")
+    except OSError as exc:
+        raise InscriptionError("failed to write checksum file checksums.sha256") from exc
+
+
+def _release_checksum_files(release_dir: Path) -> tuple[Path, ...]:
+    files: list[Path] = []
+    for path in sorted(release_dir.rglob("*"), key=lambda candidate: candidate.relative_to(release_dir).as_posix()):
+        if path.is_symlink():
+            relative = path.relative_to(release_dir).as_posix()
+            raise InscriptionError(f"release checksums cannot include symlink {relative}")
+        if not path.is_file():
+            continue
+        if path.relative_to(release_dir).as_posix() == "checksums.sha256":
+            continue
+        files.append(path)
+    return tuple(files)
+
+
+def _write_archive_checksum(archive_path: Path, checksum_path: Path) -> None:
+    try:
+        checksum_path.write_text(f"{_sha256_file(archive_path)}  {archive_path.name}\n")
+    except OSError as exc:
+        raise InscriptionError(f"failed to write checksum file {checksum_path.name}") from exc
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _create_release_archive(release_dir: Path, archive_path: Path) -> None:
+    if archive_path.is_dir():
+        raise InscriptionError("release archive path exists and is a directory")
+    if archive_path.is_symlink():
+        raise InscriptionError("release archive path must not be a symlink")
+    archive_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with archive_path.open("wb") as raw:
+            with gzip.GzipFile(filename="", mode="wb", fileobj=raw, mtime=0) as gzip_file:
+                with tarfile.open(mode="w", fileobj=gzip_file, format=tarfile.USTAR_FORMAT) as archive:
+                    _add_release_archive_directory(archive, release_dir.name)
+                    for path in _release_archive_paths(release_dir):
+                        relative = path.relative_to(release_dir).as_posix()
+                        archive_name = f"{release_dir.name}/{relative}"
+                        if path.is_dir():
+                            _add_release_archive_directory(archive, archive_name)
+                        elif path.is_file():
+                            _add_release_archive_file(archive, path, archive_name, relative)
+        return
+    except OSError as exc:
+        raise InscriptionError(f"failed to create release archive {archive_path}") from exc
+    except tarfile.TarError as exc:
+        raise InscriptionError(f"failed to create release archive {archive_path}") from exc
+
+
+def _release_archive_paths(release_dir: Path) -> tuple[Path, ...]:
+    paths: list[Path] = []
+    for path in sorted(release_dir.rglob("*"), key=lambda candidate: candidate.relative_to(release_dir).as_posix()):
+        if path.is_symlink():
+            relative = path.relative_to(release_dir).as_posix()
+            raise InscriptionError(f"release archive cannot include symlink {relative}")
+        paths.append(path)
+    return tuple(paths)
+
+
+def _add_release_archive_directory(archive: tarfile.TarFile, name: str) -> None:
+    info = tarfile.TarInfo(name)
+    info.type = tarfile.DIRTYPE
+    info.mode = 0o755
+    _normalize_tar_info(info)
+    archive.addfile(info)
+
+
+def _add_release_archive_file(archive: tarfile.TarFile, path: Path, name: str, relative: str) -> None:
+    data = path.read_bytes()
+    info = tarfile.TarInfo(name)
+    info.size = len(data)
+    info.mode = 0o755 if relative.startswith("bin/") else 0o644
+    _normalize_tar_info(info)
+    archive.addfile(info, io.BytesIO(data))
+
+
+def _normalize_tar_info(info: tarfile.TarInfo) -> None:
+    info.mtime = 0
+    info.uid = 0
+    info.gid = 0
+    info.uname = ""
+    info.gname = ""
+
+
 def _build_release_book(context: PackageContext, output: Path) -> None:
     mdbook = shutil.which("mdbook")
     if mdbook is None:
@@ -1228,7 +1376,14 @@ def _build_release_book(context: PackageContext, output: Path) -> None:
         raise InscriptionError("release book build failed")
 
 
-def _release_metadata(manifest: PackageManifest, artifacts: tuple[PackageReleaseArtifact, ...]) -> str:
+def _release_metadata(
+    manifest: PackageManifest,
+    artifacts: tuple[PackageReleaseArtifact, ...],
+    *,
+    checksums: bool,
+    archive_path: Path | None,
+    release_dir: Path,
+) -> str:
     payload = {
         "format": "inscription-release-v1",
         "package": {
@@ -1237,6 +1392,11 @@ def _release_metadata(manifest: PackageManifest, artifacts: tuple[PackageRelease
         },
         "artifacts": [{"kind": artifact.kind, "path": artifact.path} for artifact in artifacts],
     }
+    if checksums:
+        payload["checksums"] = "checksums.sha256"
+    if archive_path is not None:
+        archive_relative = Path(os.path.relpath(archive_path, release_dir)).as_posix()
+        payload["archive"] = {"path": archive_relative}
     return json.dumps(payload, indent=2) + "\n"
 
 

@@ -31,6 +31,7 @@ _BUILD_STEP_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_-]*")
 _STANDARD_WORKFLOW_PHRASE = "Build.standard package workflow"
 _BUILD_CALLS: dict[str, str] = {
     "Build.clean package named": "package-clean",
+    "Build.release archive package named": "package-release-archive",
     "Build.release package named": "package-release",
     "Build.format check named": "package-format-check",
     "Build.format package named": "package-format-in-place",
@@ -50,6 +51,7 @@ _BUILD_CALLS: dict[str, str] = {
 }
 _PACKAGE_DEFAULT_CALLS: dict[str, tuple[str, str]] = {
     "Build.clean package": ("clean", "package-clean"),
+    "Build.release archive package": ("archive", "package-release-archive"),
     "Build.release package": ("bundle", "package-release"),
     "Build.static library for package": ("library", "static-library"),
     "Build.executable for package": ("app", "executable"),
@@ -75,6 +77,7 @@ _OUTPUT_SUFFIXES: dict[str, tuple[str, str]] = {
 _ARTIFACT_EMITS = frozenset(_OUTPUT_SUFFIXES)
 _STEP_DISPLAY: dict[str, str] = {
     "package-clean": "clean package",
+    "package-release-archive": "release archive",
     "package-release": "release package",
     "package-format-check": "format check",
     "package-format-in-place": "format package",
@@ -584,6 +587,20 @@ def _run_step(
         )
         executed.add(step.name)
         results.append(BuildExecutionResult(step, release.output_dir))
+        return False
+    if step.emit == "package-release-archive":
+        release = release_package(
+            root,
+            runtime_checks=runtime_checks,
+            opt_level=opt_level,
+            verify=verify,
+            save_temps=step_save_temps,
+            clean=True,
+            archive=True,
+            checksum=True,
+        )
+        executed.add(step.name)
+        results.append(BuildExecutionResult(step, release.archive_path or release.output_dir))
         return False
     if step.emit in {"package-tests", "package-tests-with-dependencies"}:
         summary = run_package_tests(

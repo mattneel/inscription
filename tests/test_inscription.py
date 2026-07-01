@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import difflib
+import hashlib
 import importlib.util
 import json
 import os
@@ -8,6 +9,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tarfile
 import tempfile
 import unittest
 from pathlib import Path
@@ -9766,6 +9768,158 @@ Give result plus seen.
             rerun_bundle = run_cli("build", package, "bundle")
             self.assertEqual(rerun_bundle.returncode, 0, rerun_bundle.stderr)
             self.assertTrue((package / "build" / "release" / "ReleasePkg-0.1.0" / "release.json").exists())
+
+    def test_v060_release_archives_checksums_and_reproducibility(self):
+        env = {**os.environ, "PYTHONPATH": str(SRC)}
+
+        def run_cli(*args: str | Path) -> subprocess.CompletedProcess[str]:
+            return subprocess.run(
+                [sys.executable, "-m", "inscription", *(str(arg) for arg in args)],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+
+        def sha256(path: Path) -> str:
+            return hashlib.sha256(path.read_bytes()).hexdigest()
+
+        def copy_fixture(target: Path) -> None:
+            shutil.copytree(ROOT / "tests" / "fixtures" / "packages" / "release_package", target)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            package = Path(tmp) / "release_package"
+            copy_fixture(package)
+            release_dir = package / "build" / "release" / "ReleasePkg-0.1.0"
+            archive_path = package / "build" / "release" / "ReleasePkg-0.1.0.tar.gz"
+
+            dry_run = run_cli("package", "release", package, "--archive", "--checksum", "--dry-run")
+            self.assertEqual(dry_run.returncode, 0, dry_run.stderr)
+            self.assertIn("would write release checksums: build/release/ReleasePkg-0.1.0/checksums.sha256\n", dry_run.stdout)
+            self.assertIn("would create release archive: build/release/ReleasePkg-0.1.0.tar.gz\n", dry_run.stdout)
+            self.assertIn("would write archive checksum: build/release/ReleasePkg-0.1.0.tar.gz.sha256\n", dry_run.stdout)
+            self.assertFalse(release_dir.exists())
+            self.assertFalse(archive_path.exists())
+
+            release = run_cli("package", "release", package, "--archive", "--checksum")
+            self.assertEqual(release.returncode, 0, release.stderr)
+            checksum_path = release_dir / "checksums.sha256"
+            archive_checksum_path = archive_path.with_suffix(archive_path.suffix + ".sha256")
+            self.assertTrue(archive_path.exists())
+            self.assertTrue(checksum_path.exists())
+            self.assertTrue(archive_checksum_path.exists())
+
+            metadata = json.loads((release_dir / "release.json").read_text())
+            self.assertEqual(metadata["checksums"], "checksums.sha256")
+            self.assertEqual(metadata["archive"], {"path": "../ReleasePkg-0.1.0.tar.gz"})
+
+            checksum_entries = [
+                tuple(line.split("  ", 1)) for line in checksum_path.read_text().strip().splitlines()
+            ]
+            self.assertEqual(
+                [relative for _, relative in checksum_entries],
+                [
+                    "include/ReleasePkg.h",
+                    "interface.json",
+                    "lib/libReleasePkg.a",
+                    "package.ins",
+                    "release.json",
+                ],
+            )
+            for digest, relative in checksum_entries:
+                self.assertEqual(digest, sha256(release_dir / relative))
+            self.assertEqual(archive_checksum_path.read_text(), f"{sha256(archive_path)}  ReleasePkg-0.1.0.tar.gz\n")
+
+            with tarfile.open(archive_path, "r:gz") as archive:
+                members = archive.getmembers()
+            self.assertEqual(
+                [member.name for member in members],
+                [
+                    "ReleasePkg-0.1.0",
+                    "ReleasePkg-0.1.0/checksums.sha256",
+                    "ReleasePkg-0.1.0/include",
+                    "ReleasePkg-0.1.0/include/ReleasePkg.h",
+                    "ReleasePkg-0.1.0/interface.json",
+                    "ReleasePkg-0.1.0/lib",
+                    "ReleasePkg-0.1.0/lib/libReleasePkg.a",
+                    "ReleasePkg-0.1.0/package.ins",
+                    "ReleasePkg-0.1.0/release.json",
+                ],
+            )
+            for member in members:
+                self.assertEqual(member.mtime, 0)
+                self.assertEqual(member.uid, 0)
+                self.assertEqual(member.gid, 0)
+                self.assertEqual(member.uname, "")
+                self.assertEqual(member.gname, "")
+                self.assertEqual(member.mode, 0o755 if member.isdir() else 0o644)
+
+            first_archive_hash = sha256(archive_path)
+            second_package = Path(tmp) / "release_package_again"
+            copy_fixture(second_package)
+            second = run_cli("package", "release", second_package, "--archive", "--checksum")
+            self.assertEqual(second.returncode, 0, second.stderr)
+            second_archive = second_package / "build" / "release" / "ReleasePkg-0.1.0.tar.gz"
+            self.assertEqual(first_archive_hash, sha256(second_archive))
+
+            archive_dir_conflict = Path(tmp) / "archive_dir_conflict"
+            copy_fixture(archive_dir_conflict)
+            conflict_archive = archive_dir_conflict / "build" / "release" / "ReleasePkg-0.1.0.tar.gz"
+            conflict_archive.mkdir(parents=True)
+            conflict = run_cli("package", "release", archive_dir_conflict, "--archive")
+            self.assertEqual(conflict.returncode, 2)
+            self.assertIn("release archive path exists and is a directory", conflict.stderr)
+
+    def test_v060_build_release_archive_step(self):
+        env = {**os.environ, "PYTHONPATH": str(SRC)}
+
+        def run_cli(*args: str | Path) -> subprocess.CompletedProcess[str]:
+            return subprocess.run(
+                [sys.executable, "-m", "inscription", *(str(arg) for arg in args)],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+
+        duplicate = (
+            "Import Build.\n\n"
+            "To build package package: Build.Package.\n"
+            "Build.release archive package.\n"
+            'Build.static library named "archive".\n'
+        )
+        with self.assertRaises(InscriptionError) as ctx:
+            parse_build_script(duplicate)
+        self.assertIn("build step archive is already defined", str(ctx.exception))
+
+        parsed = parse_build_script(
+            "Import Build.\n\n"
+            "To build package package: Build.Package.\n"
+            "Build.release archive package.\n"
+            'Build.release archive package named "dist".\n'
+        )
+        self.assertEqual([(step.name, step.emit) for step in parsed.steps], [
+            ("archive", "package-release-archive"),
+            ("dist", "package-release-archive"),
+        ])
+
+        with tempfile.TemporaryDirectory() as tmp:
+            package = Path(tmp) / "release_package"
+            shutil.copytree(ROOT / "tests" / "fixtures" / "packages" / "release_package", package)
+            list_proc = run_cli("build", package, "--list")
+            self.assertEqual(list_proc.returncode, 0, list_proc.stderr)
+            self.assertIn("build step archive: release archive\n", list_proc.stdout)
+
+            archive_proc = run_cli("build", package, "archive")
+            self.assertEqual(archive_proc.returncode, 0, archive_proc.stderr)
+            release_root = package / "build" / "release"
+            self.assertTrue((release_root / "ReleasePkg-0.1.0" / "checksums.sha256").exists())
+            self.assertTrue((release_root / "ReleasePkg-0.1.0.tar.gz").exists())
+            self.assertTrue((release_root / "ReleasePkg-0.1.0.tar.gz.sha256").exists())
 
 
 class FormatterTests(unittest.TestCase):
