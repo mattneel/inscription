@@ -8873,7 +8873,7 @@ Give result plus seen.
             "renamed package parameter": (
                 "Import Build.\n\nTo build package pkg: Build.Package.\n"
                 "Build.static library for package.\n",
-                "build phrase parameter must be named package in v0.54",
+                "build phrase parameter must be named package in v0.55",
             ),
         }
         for name, (case_source, contains) in cases.items():
@@ -8989,6 +8989,208 @@ Give result plus seen.
             )
             self.assertEqual(book_proc.returncode, 0, book_proc.stderr)
             self.assertTrue((package / "build" / "book-check" / "index.html").exists())
+
+    def test_v055_standard_package_workflow_parser_and_diagnostics(self):
+        source = (
+            "Import Build.\n\n"
+            "To build package package: Build.Package.\n"
+            "Build.standard package workflow.\n"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            no_book_root = Path(tmp) / "no_book"
+            no_book_root.mkdir()
+            no_book_script = parse_build_script(source, path=no_book_root / "build.ins")
+            self.assertEqual(no_book_script.default_step, "ci")
+            self.assertEqual([(step.name, step.emit, step.dependencies, step.package_default) for step in no_book_script.steps], [
+                ("check", "package-check", (), False),
+                ("tests", "package-tests", (), False),
+                ("library", "static-library", (), True),
+                ("header", "c-header", (), True),
+                ("interface", "interface-json", (), True),
+                ("ci", "group", ("check", "tests"), False),
+                ("release", "group", ("ci", "library", "header", "interface"), False),
+            ])
+
+            book_root = Path(tmp) / "with_book"
+            (book_root / "book").mkdir(parents=True)
+            (book_root / "book" / "book.toml").write_text("[book]\ntitle = \"Fixture\"\n")
+            book_script = parse_build_script(source, path=book_root / "build.ins")
+            self.assertEqual([(step.name, step.emit, step.dependencies, step.package_default) for step in book_script.steps], [
+                ("check", "package-check", (), False),
+                ("tests", "package-tests", (), False),
+                ("library", "static-library", (), True),
+                ("header", "c-header", (), True),
+                ("interface", "interface-json", (), True),
+                ("book-check", "book-check", (), True),
+                ("ci", "group", ("check", "tests", "book-check"), False),
+                ("release", "group", ("ci", "library", "header", "interface"), False),
+            ])
+
+        formatted = format_source(source)
+        self.assertEqual(format_source(formatted), formatted)
+
+        cases = {
+            "duplicate tests": (
+                "Import Build.\n\nTo build package package: Build.Package.\n"
+                "Build.standard package workflow.\nBuild.tests named \"tests\".\n",
+                "build step tests is already defined",
+            ),
+            "duplicate group": (
+                "Import Build.\n\nTo build package package: Build.Package.\n"
+                "Build.standard package workflow.\nBuild.group named \"ci\" with steps \"check\" and \"tests\".\n",
+                "build step ci is already defined",
+            ),
+            "duplicate default": (
+                "Import Build.\n\nTo build package package: Build.Package.\n"
+                "Build.standard package workflow.\nBuild.default step is \"release\".\n",
+                "build script declares default step more than once",
+            ),
+            "duplicate package-aware artifact": (
+                "Import Build.\n\nTo build package package: Build.Package.\n"
+                "Build.standard package workflow.\nBuild.static library for package.\n",
+                "build step library is already defined",
+            ),
+            "renamed package parameter": (
+                "Import Build.\n\nTo build package pkg: Build.Package.\n"
+                "Build.standard package workflow.\n",
+                "build phrase parameter must be named package in v0.55",
+            ),
+            "unknown workflow": (
+                "Import Build.\n\nTo build package package: Build.Package.\n"
+                "Build.default package workflow.\n",
+                "unknown Build API phrase `Build.default package workflow`",
+            ),
+        }
+        for name, (case_source, contains) in cases.items():
+            with self.subTest(name=name):
+                with self.assertRaises(InscriptionError) as ctx:
+                    parse_build_script(case_source)
+                self.assertIn(contains, str(ctx.exception))
+
+    def test_v055_standard_package_workflow_builds_with_book(self):
+        env = {**os.environ, "PYTHONPATH": str(SRC)}
+        fixture = ROOT / "tests" / "fixtures" / "packages" / "build_script_standard_package"
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            package = tmp_path / "build_script_standard_package"
+            shutil.copytree(fixture, package)
+
+            list_proc = subprocess.run(
+                [sys.executable, "-m", "inscription", "build", str(package), "--list"],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(list_proc.returncode, 0, list_proc.stderr)
+            self.assertIn("build step book-check: book checked\n", list_proc.stdout)
+            self.assertIn("build step ci: group -> check, tests, book-check\n", list_proc.stdout)
+            self.assertIn("build step release: group -> ci, library, header, interface\n", list_proc.stdout)
+            self.assertIn("build default: ci\n", list_proc.stdout)
+
+            if shutil.which("mdbook") is None:
+                self.skipTest("mdBook is not installed")
+
+            default_proc = subprocess.run(
+                [sys.executable, "-m", "inscription", "build", str(package)],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(default_proc.returncode, 0, default_proc.stderr)
+            self.assertIn("build step check ... ok", default_proc.stdout)
+            self.assertIn("build step tests ... ok", default_proc.stdout)
+            self.assertIn("build step book-check ... ok", default_proc.stdout)
+            self.assertIn("build step ci ... ok", default_proc.stdout)
+
+            temps = tmp_path / "temps"
+            release_proc = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "inscription",
+                    "build",
+                    str(package),
+                    "release",
+                    "--save-temps",
+                    str(temps),
+                ],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(release_proc.returncode, 0, release_proc.stderr)
+            self.assertTrue((package / "build" / "libStandardPkg.a").exists())
+            self.assertTrue((package / "build" / "StandardPkg.h").exists())
+            self.assertTrue((package / "build" / "StandardPkg.json").exists())
+            self.assertTrue((temps / "library" / "StandardPkg.mlir").exists())
+            self.assertTrue(any((temps / "tests").glob("*.ll")))
+
+            book_proc = subprocess.run(
+                [sys.executable, "-m", "inscription", "build", str(package), "book-check"],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(book_proc.returncode, 0, book_proc.stderr)
+            self.assertTrue((package / "build" / "book-check" / "index.html").exists())
+
+    def test_v055_standard_package_workflow_no_book(self):
+        env = {**os.environ, "PYTHONPATH": str(SRC)}
+        fixture = ROOT / "tests" / "fixtures" / "packages" / "build_script_standard_no_book_package"
+        with tempfile.TemporaryDirectory() as tmp:
+            package = Path(tmp) / "build_script_standard_no_book_package"
+            shutil.copytree(fixture, package)
+
+            list_proc = subprocess.run(
+                [sys.executable, "-m", "inscription", "build", str(package), "--list"],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(list_proc.returncode, 0, list_proc.stderr)
+            self.assertNotIn("book-check", list_proc.stdout)
+            self.assertIn("build step ci: group -> check, tests\n", list_proc.stdout)
+
+            default_proc = subprocess.run(
+                [sys.executable, "-m", "inscription", "build", str(package)],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(default_proc.returncode, 0, default_proc.stderr)
+            self.assertIn("build step ci ... ok", default_proc.stdout)
+
+            release_proc = subprocess.run(
+                [sys.executable, "-m", "inscription", "build", str(package), "release"],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(release_proc.returncode, 0, release_proc.stderr)
+            self.assertTrue((package / "build" / "libStandardNoBook.a").exists())
+            self.assertTrue((package / "build" / "StandardNoBook.h").exists())
+            self.assertTrue((package / "build" / "StandardNoBook.json").exists())
 
 
 class FormatterTests(unittest.TestCase):

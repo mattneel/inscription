@@ -25,6 +25,7 @@ from .parser import (
 
 BUILD_SCRIPT_NAME = "build.ins"
 _BUILD_STEP_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_-]*")
+_STANDARD_WORKFLOW_PHRASE = "Build.standard package workflow"
 _BUILD_CALLS: dict[str, str] = {
     "Build.check package named": "package-check",
     "Build.tests including dependencies named": "package-tests-with-dependencies",
@@ -161,6 +162,7 @@ def parse_build_script(source: str, *, path: Path | None = None) -> BuildScript:
     steps: list[BuildStep] = []
     seen: set[str] = set()
     default_step: str | None = None
+    package_root = path.parent if path is not None else None
     body_sentences = sentences[build_sentence_index + 1 :]
     for sentence in body_sentences:
         text = sentence.text
@@ -176,6 +178,13 @@ def parse_build_script(source: str, *, path: Path | None = None) -> BuildScript:
             # v0.50 accepts pure setup statements syntactically, but artifact names
             # intentionally remain string literals in Build API calls.
             continue
+        if text == _STANDARD_WORKFLOW_PHRASE:
+            for standard_step in _standard_workflow_steps(sentence.line, package_root=package_root):
+                _append_build_step(steps, seen, standard_step, sentence.line)
+            if default_step is not None:
+                raise InscriptionError("build script declares default step more than once", sentence.line)
+            default_step = "ci"
+            continue
         default_name = _parse_default_step(text, sentence.line)
         if default_name is not None:
             if default_step is not None:
@@ -185,13 +194,38 @@ def parse_build_script(source: str, *, path: Path | None = None) -> BuildScript:
         step = _parse_build_call(text, sentence.line)
         if step is None:
             raise InscriptionError("build script body supports only Build artifact requests in v0.50", sentence.line)
-        if step.name in seen:
-            raise InscriptionError(f"build step {step.name} is already defined", sentence.line)
-        seen.add(step.name)
-        steps.append(step)
+        _append_build_step(steps, seen, step, sentence.line)
     script = BuildScript(path or Path(BUILD_SCRIPT_NAME), tuple(steps), comments.comments, default_step)
     _validate_build_script_graph(script)
     return script
+
+
+def _append_build_step(steps: list[BuildStep], seen: set[str], step: BuildStep, line: int) -> None:
+    if step.name in seen:
+        raise InscriptionError(f"build step {step.name} is already defined", line)
+    seen.add(step.name)
+    steps.append(step)
+
+
+def _standard_workflow_steps(line: int, *, package_root: Path | None) -> tuple[BuildStep, ...]:
+    steps = [
+        BuildStep("check", "package-check", line),
+        BuildStep("tests", "package-tests", line),
+        BuildStep("library", "static-library", line, package_default=True),
+        BuildStep("header", "c-header", line, package_default=True),
+        BuildStep("interface", "interface-json", line, package_default=True),
+    ]
+    ci_dependencies = ["check", "tests"]
+    if _standard_workflow_has_book(package_root):
+        steps.append(BuildStep("book-check", "book-check", line, package_default=True))
+        ci_dependencies.append("book-check")
+    steps.append(BuildStep("ci", "group", line, tuple(ci_dependencies)))
+    steps.append(BuildStep("release", "group", line, ("ci", "library", "header", "interface")))
+    return tuple(steps)
+
+
+def _standard_workflow_has_book(package_root: Path | None) -> bool:
+    return package_root is not None and (package_root / "book" / "book.toml").exists()
 
 
 def _is_source_top_level(text: str) -> bool:
@@ -223,7 +257,7 @@ def _validate_build_phrase(text: str, line: int) -> None:
         raise InscriptionError("build phrase must not return a value", line)
     if text != "To build package package: Build.Package":
         if text.startswith("To build package ") and text.endswith(": Build.Package"):
-            raise InscriptionError("build phrase parameter must be named package in v0.54", line)
+            raise InscriptionError("build phrase parameter must be named package in v0.55", line)
         if text.startswith("To build package"):
             raise InscriptionError("build phrase parameter must have type Build.Package", line)
         raise InscriptionError("build script must define `To build package package: Build.Package.`", line)
@@ -249,6 +283,8 @@ def _parse_build_call(text: str, line: int) -> BuildStep | None:
         raise InscriptionError("package-aware build steps must use `for package`", line)
     if text.startswith("Build.") and " named " in text:
         raise InscriptionError(f"unknown Build API phrase `{_build_phrase_signature(text)}`", line)
+    if text.startswith("Build.") and text.endswith(" workflow"):
+        raise InscriptionError(f"unknown Build API phrase `{text}`", line)
     if text.startswith("Build."):
         raise InscriptionError("malformed Build artifact request", line)
     return None

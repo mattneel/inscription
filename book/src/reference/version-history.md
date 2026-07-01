@@ -33,3 +33,4 @@ Recent milestones:
 - v0.52: build script group steps, deterministic group dependencies, and an optional default step.
 - v0.53: build script mdBook documentation steps with optional package-local example checking.
 - v0.54: package-aware `build.ins` defaults for artifact and documentation steps.
+- v0.55: standard `Build.standard package workflow.` shortcuts for conventional package CI/release workflows.
