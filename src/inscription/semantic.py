@@ -37,6 +37,7 @@ from .ast import (
     IfStmt,
     Integer,
     AlignmentOfType,
+    AlternativePattern,
     AnythingPattern,
     LengthOf,
     LengthOfBytes,
@@ -56,6 +57,7 @@ from .ast import (
     RecordConstructor,
     RecordDecl,
     RecordType,
+    RangePattern,
     RequireStmt,
     ReturnStmt,
     SetStmt,
@@ -121,6 +123,17 @@ class Binding:
     root: str | None = None
     scope_depth: int = 0
     moved: bool = False
+
+
+@dataclass(frozen=True)
+class MatchPatternItem:
+    kind: str
+    label: str
+    line: int | None
+    key: tuple[str, int | bool] | None = None
+    type_name: TypeName | None = None
+    lower: int | None = None
+    upper: int | None = None
 
 
 @dataclass(frozen=True)
@@ -2536,16 +2549,7 @@ def evaluate_const_expr(
         result_type = type_name
         for arm in expr.arms:
             arm_env = _env_with_match_payload(arm.pattern, scrutinee_type, env, constants)
-            if isinstance(arm.pattern, AnythingPattern):
-                if arm.guard is not None:
-                    guard = evaluate_const_expr(arm.guard, arm_env, functions, records, constants, expected="i1")
-                    if not bool(guard.value):
-                        continue
-                return evaluate_const_expr(arm.expr, arm_env, functions, records, constants, expected=result_type)
-            if isinstance(arm.pattern, UnionPattern):
-                raise CompileTimeEvaluationError("union value is not compile-time evaluable", arm.line)
-            pattern = evaluate_const_expr(arm.pattern, env, functions, records, constants, expected=scrutinee_type)
-            if _const_values_equal(scrutinee, pattern):
+            if _const_match_pattern_matches(arm.pattern, scrutinee, scrutinee_type, env, functions, records, constants):
                 if arm.guard is not None:
                     guard = evaluate_const_expr(arm.guard, arm_env, functions, records, constants, expected="i1")
                     if not bool(guard.value):
@@ -2556,6 +2560,29 @@ def evaluate_const_expr(
         if expr.arms:
             return evaluate_const_expr(expr.arms[-1].expr, env, functions, records, constants, expected=result_type)
     raise CompileTimeEvaluationError("expression is not compile-time evaluable", getattr(expr, "line", None))
+
+
+def _const_match_pattern_matches(
+    pattern: Expr | UnionPattern | AnythingPattern | RangePattern | AlternativePattern,
+    scrutinee: ConstValue,
+    scrutinee_type: ValueType,
+    env: dict[str, ValueType],
+    functions: dict[str, Function],
+    records: dict[str, RecordDecl],
+    constants: dict[str, ConstValue],
+) -> bool:
+    if isinstance(pattern, AnythingPattern):
+        return True
+    if isinstance(pattern, AlternativePattern):
+        return any(_const_match_pattern_matches(alternative, scrutinee, scrutinee_type, env, functions, records, constants) for alternative in pattern.alternatives)
+    if isinstance(pattern, RangePattern):
+        lower, upper, type_name = _evaluate_range_pattern(pattern, scrutinee_type, env, functions, records, constants)
+        value = _integer_compare_value(int(scrutinee.value), type_name)
+        return _integer_compare_value(lower, type_name) <= value <= _integer_compare_value(upper, type_name)
+    if isinstance(pattern, UnionPattern):
+        raise CompileTimeEvaluationError("union value is not compile-time evaluable", pattern.line)
+    pattern_value = evaluate_const_expr(pattern, env, functions, records, constants, expected=scrutinee_type)
+    return _const_values_equal(scrutinee, pattern_value)
 
 
 def _const_values_equal(left: ConstValue, right: ConstValue) -> bool:
@@ -3016,6 +3043,7 @@ def _check_match_patterns(
     match_line: int,
 ) -> None:
     seen: dict[tuple[str, int | bool], tuple[str, bool]] = {}
+    seen_ranges: list[tuple[TypeName, int, int, str, bool]] = []
     has_anything = False
     for index, arm in enumerate(arms):
         pattern = arm.pattern
@@ -3040,20 +3068,38 @@ def _check_match_patterns(
             guard_type = infer_expr_type(guard, guard_env, functions, records, constants=constants)
             if guard_type != "i1":
                 raise InscriptionError(f"match guard must have type i1, got {format_type(guard_type)}", getattr(guard, "line", None))
-        if isinstance(scrutinee_type, UnionType):
-            union = _union_info(scrutinee_type.name, getattr(pattern, "line", 0) or 0)
-            variant = _match_union_variant(pattern, union)
-            key = (union.name, variant.tag)
-            label = f"{union.name}.{variant.name}"
-            _record_match_pattern_seen(seen, key, label, guard is None, getattr(pattern, "line", None))
-            continue
-        try:
-            value = evaluate_const_expr(pattern, env, functions, records, constants, expected=scrutinee_type)
-        except CompileTimeEvaluationError as exc:
-            raise InscriptionError("match pattern must be compile-time evaluable", exc.line or getattr(pattern, "line", None)) from exc
-        key = _match_pattern_key(value)
-        label = _match_pattern_label(pattern, value)
-        _record_match_pattern_seen(seen, key, label, guard is None, getattr(pattern, "line", None))
+        items = _match_pattern_items(pattern, scrutinee_type, env, functions, records, constants)
+        local_keys: set[tuple[str, int | bool]] = set()
+        local_ranges: list[tuple[TypeName, int, int, str]] = []
+        for item in items:
+            if item.kind == "range":
+                assert item.type_name is not None and item.lower is not None and item.upper is not None
+                for type_name, low, high, label in local_ranges:
+                    if type_name == item.type_name and _ranges_overlap(low, high, item.lower, item.upper):
+                        raise InscriptionError(f"match range {item.label} overlaps earlier range {label}", item.line)
+                for key in local_keys:
+                    if key[0] == item.type_name and _integer_value_in_range(int(key[1]), item.lower, item.upper, item.type_name):
+                        raise InscriptionError(f"match range {item.label} overlaps earlier pattern {key[1]}", item.line)
+                for type_name, low, high, label, previous_unguarded in seen_ranges:
+                    if previous_unguarded and type_name == item.type_name and _ranges_overlap(low, high, item.lower, item.upper):
+                        raise InscriptionError(f"match range {item.label} overlaps earlier range {label}", item.line)
+                for key, (label, previous_unguarded) in seen.items():
+                    if previous_unguarded and key[0] == item.type_name and _integer_value_in_range(int(key[1]), item.lower, item.upper, item.type_name):
+                        raise InscriptionError(f"match range {item.label} overlaps earlier pattern {label}", item.line)
+                local_ranges.append((item.type_name, item.lower, item.upper, item.label))
+                seen_ranges.append((item.type_name, item.lower, item.upper, item.label, guard is None))
+                continue
+            assert item.key is not None
+            if item.key in local_keys:
+                raise InscriptionError(f"match has duplicate pattern {item.label}", item.line)
+            for type_name, low, high, label in local_ranges:
+                if item.key[0] == type_name and _integer_value_in_range(int(item.key[1]), low, high, type_name):
+                    raise InscriptionError(f"match pattern {item.label} is unreachable because an earlier range already matches it", item.line)
+            for type_name, low, high, _label, previous_unguarded in seen_ranges:
+                if previous_unguarded and item.key[0] == type_name and _integer_value_in_range(int(item.key[1]), low, high, type_name):
+                    raise InscriptionError(f"match pattern {item.label} is unreachable because an earlier range already matches it", item.line)
+            _record_match_pattern_seen(seen, item.key, item.label, guard is None, item.line)
+            local_keys.add(item.key)
     if not has_otherwise and not has_anything:
         _check_match_exhaustive_without_catchall(arms, scrutinee_type, match_line)
 
@@ -3086,11 +3132,10 @@ def _check_match_exhaustive_without_catchall(
     line: int,
 ) -> None:
     if scrutinee_type == "i1":
-        covered = {
-            bool(arm.pattern.value)
-            for arm in arms
-            if arm.guard is None and isinstance(arm.pattern, Boolean)
-        }
+        covered: set[bool] = set()
+        for arm in arms:
+            if arm.guard is None:
+                covered.update(_direct_bool_pattern_values(arm.pattern))
         missing = [label for value, label in ((True, "true"), (False, "false")) if value not in covered]
         if missing:
             _raise_missing_match_cases("i1", "case", "cases", missing, line)
@@ -3100,11 +3145,10 @@ def _check_match_exhaustive_without_catchall(
         info = ACTIVE_ENUMS.get(scrutinee_type.name)
         if info is None:
             raise InscriptionError(f"unknown type {scrutinee_type.name}", line)
-        covered = {
-            case_name
-            for arm in arms
-            if arm.guard is None and (case_name := _direct_enum_case_pattern_name(arm.pattern, scrutinee_type)) is not None
-        }
+        covered: set[str] = set()
+        for arm in arms:
+            if arm.guard is None:
+                covered.update(_direct_enum_case_pattern_names(arm.pattern, scrutinee_type))
         missing = [f"{info.name}.{case_name}" for case_name in info.case_order if case_name not in covered]
         if missing:
             _raise_missing_match_cases(info.name, "case", "cases", missing, line)
@@ -3112,17 +3156,132 @@ def _check_match_exhaustive_without_catchall(
 
     if isinstance(scrutinee_type, UnionType):
         union = _union_info(scrutinee_type.name, line)
-        covered = {
-            variant.name
-            for arm in arms
-            if arm.guard is None and (variant := _direct_union_variant_pattern(arm.pattern, union)) is not None
-        }
+        covered: set[str] = set()
+        for arm in arms:
+            if arm.guard is None:
+                covered.update(variant.name for variant in _direct_union_variant_patterns(arm.pattern, union))
         missing = [f"{union.name}.{variant_name}" for variant_name in union.variant_order if variant_name not in covered]
         if missing:
             _raise_missing_match_cases(union.name, "variant", "variants", missing, line)
         return
 
     raise InscriptionError(f"match over {format_type(scrutinee_type)} requires otherwise or anything", line)
+
+
+def _pattern_alternatives(pattern: Expr | UnionPattern | AnythingPattern | RangePattern | AlternativePattern) -> tuple[Expr | UnionPattern | AnythingPattern | RangePattern, ...]:
+    if isinstance(pattern, AlternativePattern):
+        return pattern.alternatives
+    return (pattern,)
+
+
+def _match_pattern_items(
+    pattern: Expr | UnionPattern | AnythingPattern | RangePattern | AlternativePattern,
+    scrutinee_type: ValueType,
+    env: dict[str, ValueType],
+    functions: dict[str, Function],
+    records: dict[str, RecordDecl],
+    constants: dict[str, ConstValue],
+) -> list[MatchPatternItem]:
+    items: list[MatchPatternItem] = []
+    for alternative in _pattern_alternatives(pattern):
+        if isinstance(alternative, RangePattern):
+            lower, upper, type_name = _evaluate_range_pattern(alternative, scrutinee_type, env, functions, records, constants)
+            items.append(MatchPatternItem("range", f"{lower} through {upper}", alternative.line, type_name=type_name, lower=lower, upper=upper))
+            continue
+        if isinstance(scrutinee_type, UnionType):
+            union = _union_info(scrutinee_type.name, getattr(alternative, "line", 0) or 0)
+            variant = _match_union_variant(alternative, union)
+            items.append(MatchPatternItem("key", f"{union.name}.{variant.name}", getattr(alternative, "line", None), key=(union.name, variant.tag)))
+            continue
+        try:
+            value = evaluate_const_expr(alternative, env, functions, records, constants, expected=scrutinee_type)
+        except CompileTimeEvaluationError as exc:
+            raise InscriptionError("match pattern must be compile-time evaluable", exc.line or getattr(alternative, "line", None)) from exc
+        items.append(MatchPatternItem("key", _match_pattern_label(alternative, value), getattr(alternative, "line", None), key=_match_pattern_key(value)))
+    return items
+
+
+def _evaluate_range_pattern(
+    pattern: RangePattern,
+    scrutinee_type: ValueType,
+    env: dict[str, ValueType],
+    functions: dict[str, Function],
+    records: dict[str, RecordDecl],
+    constants: dict[str, ConstValue],
+) -> tuple[int, int, TypeName]:
+    if not is_integer_type(scrutinee_type) or scrutinee_type == "i1":
+        raise InscriptionError(f"range patterns require integer scalar scrutinee, got {format_type(scrutinee_type)}", pattern.line)
+    assert isinstance(scrutinee_type, str)
+    lower_type = _infer_range_endpoint_type(pattern.lower, scrutinee_type, env, functions, records, constants)
+    if lower_type != scrutinee_type:
+        raise InscriptionError(f"range endpoint must have type {format_type(scrutinee_type)}, got {format_type(lower_type)}", getattr(pattern.lower, "line", pattern.line))
+    upper_type = _infer_range_endpoint_type(pattern.upper, scrutinee_type, env, functions, records, constants)
+    if upper_type != scrutinee_type:
+        raise InscriptionError(f"range endpoint must have type {format_type(scrutinee_type)}, got {format_type(upper_type)}", getattr(pattern.upper, "line", pattern.line))
+    try:
+        lower_value = evaluate_const_expr(pattern.lower, env, functions, records, constants, expected=scrutinee_type)
+        upper_value = evaluate_const_expr(pattern.upper, env, functions, records, constants, expected=scrutinee_type)
+    except CompileTimeEvaluationError as exc:
+        raise InscriptionError("range endpoints must be compile-time evaluable", exc.line or pattern.line) from exc
+    lower = int(lower_value.value)
+    upper = int(upper_value.value)
+    lower_cmp = _integer_compare_value(lower, scrutinee_type)
+    upper_cmp = _integer_compare_value(upper, scrutinee_type)
+    if lower_cmp > upper_cmp:
+        raise InscriptionError(f"range pattern lower bound {lower} is greater than upper bound {upper}", pattern.line)
+    return lower, upper, scrutinee_type
+
+
+def _infer_range_endpoint_type(
+    expr: Expr,
+    expected: TypeName,
+    env: dict[str, ValueType],
+    functions: dict[str, Function],
+    records: dict[str, RecordDecl],
+    constants: dict[str, ConstValue],
+) -> ValueType:
+    if isinstance(expr, Integer | ByteLiteral):
+        return infer_expr_type(expr, env, functions, records, expected=expected, constants=constants)
+    return infer_expr_type(expr, env, functions, records, constants=constants)
+
+
+def _integer_compare_value(value: int, type_name: TypeName) -> int:
+    return value if is_signed_type(type_name) else to_bits(value, type_name)
+
+
+def _integer_value_in_range(value: int, lower: int, upper: int, type_name: TypeName) -> bool:
+    cmp_value = _integer_compare_value(value, type_name)
+    return _integer_compare_value(lower, type_name) <= cmp_value <= _integer_compare_value(upper, type_name)
+
+
+def _ranges_overlap(left_low: int, left_high: int, right_low: int, right_high: int) -> bool:
+    return max(left_low, right_low) <= min(left_high, right_high)
+
+
+def _direct_bool_pattern_values(pattern: Expr | UnionPattern | AnythingPattern | RangePattern | AlternativePattern) -> set[bool]:
+    values: set[bool] = set()
+    for alternative in _pattern_alternatives(pattern):
+        if isinstance(alternative, Boolean):
+            values.add(bool(alternative.value))
+    return values
+
+
+def _direct_enum_case_pattern_names(pattern: Expr | UnionPattern | AnythingPattern | RangePattern | AlternativePattern, scrutinee_type: EnumType) -> set[str]:
+    names: set[str] = set()
+    for alternative in _pattern_alternatives(pattern):
+        name = _direct_enum_case_pattern_name(alternative, scrutinee_type)
+        if name is not None:
+            names.add(name)
+    return names
+
+
+def _direct_union_variant_patterns(pattern: Expr | UnionPattern | AnythingPattern | RangePattern | AlternativePattern, union: UnionInfo) -> list[UnionVariantInfo]:
+    variants: list[UnionVariantInfo] = []
+    for alternative in _pattern_alternatives(pattern):
+        variant = _direct_union_variant_pattern(alternative, union)
+        if variant is not None:
+            variants.append(variant)
+    return variants
 
 
 def _raise_missing_match_cases(
@@ -3173,7 +3332,7 @@ def _direct_union_variant_pattern(pattern: Expr | UnionPattern | AnythingPattern
 
 
 def _infer_match_pattern_type(
-    pattern: Expr | UnionPattern | AnythingPattern,
+    pattern: Expr | UnionPattern | AnythingPattern | RangePattern | AlternativePattern,
     scrutinee_type: ValueType,
     env: dict[str, ValueType],
     functions: dict[str, Function],
@@ -3181,6 +3340,22 @@ def _infer_match_pattern_type(
     constants: dict[str, ConstValue],
 ) -> ValueType:
     if isinstance(pattern, AnythingPattern):
+        return scrutinee_type
+    if isinstance(pattern, AlternativePattern):
+        for alternative in pattern.alternatives:
+            if isinstance(alternative, AnythingPattern):
+                raise InscriptionError("anything cannot be used in a pattern alternative", alternative.line)
+            if isinstance(alternative, UnionPattern) and alternative.bindings:
+                raise InscriptionError("pattern alternatives cannot bind union payloads in v0.41", alternative.line)
+            alternative_type = _infer_match_pattern_type(alternative, scrutinee_type, env, functions, records, constants)
+            if alternative_type != scrutinee_type:
+                raise InscriptionError(
+                    f"match pattern must have type {format_type(scrutinee_type)}, got {format_type(alternative_type)}",
+                    getattr(alternative, "line", pattern.line),
+                )
+        return scrutinee_type
+    if isinstance(pattern, RangePattern):
+        _evaluate_range_pattern(pattern, scrutinee_type, env, functions, records, constants)
         return scrutinee_type
     if isinstance(pattern, UnionPattern):
         union = _union_info(pattern.type_name, pattern.line)
@@ -3245,7 +3420,7 @@ def _match_union_variant(pattern: Expr | UnionPattern, union: UnionInfo) -> Unio
 
 
 def _env_with_match_payload(
-    pattern: Expr | UnionPattern,
+    pattern: Expr | UnionPattern | AnythingPattern | RangePattern | AlternativePattern,
     scrutinee_type: ValueType,
     env: dict[str, ValueType],
     constants: dict[str, ConstValue],
@@ -3274,7 +3449,7 @@ def _env_with_match_payload(
 
 
 def _bindings_with_match_payload(
-    pattern: Expr | UnionPattern,
+    pattern: Expr | UnionPattern | AnythingPattern | RangePattern | AlternativePattern,
     scrutinee_type: ValueType,
     bindings: dict[str, Binding],
     constants: dict[str, ConstValue],

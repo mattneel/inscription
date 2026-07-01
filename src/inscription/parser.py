@@ -36,6 +36,7 @@ from .ast import (
     ImportDecl,
     Integer,
     AlignmentOfType,
+    AlternativePattern,
     AnythingPattern,
     LengthOf,
     LengthOfBytes,
@@ -56,6 +57,7 @@ from .ast import (
     RecordFieldDecl,
     RecordFieldInit,
     RecordType,
+    RangePattern,
     RequireStmt,
     ReturnType,
     ReturnStmt,
@@ -94,7 +96,7 @@ RESERVED = {
     "check", "constant", "containing", "divided", "do", "does", "each", "else", "equal", "export", "extern", "false", "filled", "float", "for", "from",
     "enum", "function", "gives", "greater", "f32", "f64", "i1", "i32", "i64", "if", "in", "index", "input", "into", "import",
     "i8", "i16", "is", "layout", "length", "less", "let", "match", "memref", "minus", "module", "move", "no", "not", "or", "otherwise", "output", "packed", "parameters",
-    "pointer", "plus", "print", "read", "remainder", "require", "return", "set", "shifted", "size", "takes", "than", "then", "times", "to",
+    "pointer", "plus", "print", "read", "remainder", "require", "return", "set", "shifted", "size", "takes", "than", "then", "through", "times", "to",
     "track", "true", "type", "u8", "u16", "u32", "u64", "union", "up", "record", "view", "when", "while", "with", "write", "xor", "zero",
 }
 TYPE_NAMES: set[str] = {"i1", "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "f32", "f64"}
@@ -1062,11 +1064,64 @@ def _split_match_step_arms(arms_text: str) -> list[str]:
 
 
 def _looks_like_match_arm_start(text: str) -> bool:
-    if re.match(r"(?:otherwise|anything|true|false)(?:\s+when\b[^:]*)?:", text):
+    colon = _find_top_level_char(text, ":")
+    if colon == -1:
+        return False
+    prefix = text[:colon].strip()
+    if not prefix:
+        return False
+    first = prefix.split()[0]
+    if first in {"otherwise", "anything", "true", "false", "byte"}:
         return True
-    if re.match(r"-?\d+(?:\s+when\b[^:]*)?\s*:", text):
+    if re.fullmatch(r"-?\d+", first):
         return True
-    return re.match(r"[A-Z][A-Za-z0-9_.]*(?:(?:\s+with\b[^:]*)|(?:\s+when\b[^:]*))?\s*:", text) is not None
+    return re.match(r"[A-Z][A-Za-z0-9_.]*", first) is not None
+
+
+def _split_top_level_keyword(text: str, keyword: str) -> list[str]:
+    parts: list[str] = []
+    start = 0
+    index = 0
+    depth = 0
+    in_string = False
+    escaped = False
+    while index < len(text):
+        char = text[index]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            index += 1
+            continue
+        if char == '"':
+            in_string = True
+            index += 1
+            continue
+        if char == "(":
+            depth += 1
+            index += 1
+            continue
+        if char == ")":
+            depth -= 1
+            index += 1
+            continue
+        if depth == 0 and text.startswith(keyword, index):
+            before = text[index - 1] if index > 0 else " "
+            after_index = index + len(keyword)
+            after = text[after_index] if after_index < len(text) else " "
+            if not (before.isalnum() or before == "_") and not (after.isalnum() or after == "_"):
+                parts.append(text[start:index].strip())
+                start = after_index
+                index = after_index
+                continue
+        index += 1
+    if not parts:
+        return [text.strip()]
+    parts.append(text[start:].strip())
+    return parts
 
 
 class Parser:
@@ -2226,9 +2281,26 @@ class Parser:
         )
 
     def _parse_pattern(self, text: str, line: int):
-        if text.strip() == "anything":
+        text = text.strip()
+        alternatives = _split_top_level_keyword(text, "or")
+        if len(alternatives) > 1:
+            return AlternativePattern(tuple(self._parse_pattern_atom(part, line) for part in alternatives), line)
+        return self._parse_pattern_atom(text, line)
+
+    def _parse_pattern_atom(self, text: str, line: int):
+        text = text.strip()
+        if text == "anything":
             return AnythingPattern(line)
-        match = re.fullmatch(r"((?:[A-Za-z][A-Za-z0-9_]*\.)*[A-Z][A-Za-z0-9_]*)\.([a-z][a-z0-9_]*)(?: with (.+))?", text.strip())
+        range_parts = _split_top_level_keyword(text, "through")
+        if len(range_parts) == 2:
+            return RangePattern(
+                self._parse_expression(range_parts[0], line),
+                self._parse_expression(range_parts[1], line),
+                line,
+            )
+        if len(range_parts) > 2:
+            raise InscriptionError("malformed range pattern", line)
+        match = re.fullmatch(r"((?:[A-Za-z][A-Za-z0-9_]*\.)*[A-Z][A-Za-z0-9_]*)\.([a-z][a-z0-9_]*)(?: with (.+))?", text)
         if match is not None and match.group(3) is not None:
             bindings: list[UnionPatternBinding] = []
             for binding_text in match.group(3).split(" and "):

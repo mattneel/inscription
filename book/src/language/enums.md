@@ -27,3 +27,19 @@ Give code for mode Mode.active.
 ```
 
 Use `anything` or `otherwise` when matching externally sourced enum values that may have invalid underlying representations.
+
+Enum match arms can use `or` alternatives. Unguarded alternatives count toward exhaustiveness:
+
+```inscription,check
+Enum Mode backed by u8 has idle be 0; active be 1; failed be 2.
+
+To code for mode mode: Mode, giving i32.
+Give match mode:
+Mode.idle or Mode.failed gives 0;
+Mode.active gives 7.
+
+To main, giving i32.
+Give code for mode Mode.active.
+```
+
+Enum ranges are not supported; ranges are only for integer scalar scrutinees.

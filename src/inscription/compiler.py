@@ -35,6 +35,7 @@ from .ast import (
     ImportDecl,
     Integer,
     AlignmentOfType,
+    AlternativePattern,
     AnythingPattern,
     LengthOf,
     LengthOfBytes,
@@ -55,6 +56,7 @@ from .ast import (
     RecordFieldDecl,
     RecordFieldInit,
     RecordType,
+    RangePattern,
     RequireStmt,
     ReturnStmt,
     SetStmt,
@@ -511,6 +513,17 @@ def qualify_stmt(stmt: Stmt, module_name: str, record_names: set[str], constant_
 def qualify_pattern(pattern, module_name: str, record_names: set[str], constant_names: set[str]):
     if isinstance(pattern, AnythingPattern):
         return pattern
+    if isinstance(pattern, RangePattern):
+        return RangePattern(
+            qualify_expr(pattern.lower, module_name, record_names, constant_names),
+            qualify_expr(pattern.upper, module_name, record_names, constant_names),
+            pattern.line,
+        )
+    if isinstance(pattern, AlternativePattern):
+        return AlternativePattern(
+            tuple(qualify_pattern(alt, module_name, record_names, constant_names) for alt in pattern.alternatives),
+            pattern.line,
+        )
     if isinstance(pattern, UnionPattern):
         return UnionPattern(
             qname(module_name, pattern.type_name) if pattern.type_name in record_names else pattern.type_name,

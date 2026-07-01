@@ -41,7 +41,7 @@ def _make_lexer():
                 (r"\b(Layout|layout)(\s+)(record)(\s+)([A-Z][A-Za-z0-9_]*)", bygroups(Keyword.Declaration, Text.Whitespace, Keyword.Declaration, Text.Whitespace, Name.Class)),
                 (r"\b(Record|record)(\s+)([A-Z][A-Za-z0-9_]*)", bygroups(Keyword.Declaration, Text.Whitespace, Name.Class)),
                 (r"\b(i1|i8|i16|i32|i64|u8|u16|u32|u64|f32|f64)\b", Keyword.Type),
-                (r"\b(Module|Import|Type|Constant|Check|Record|Layout|Packed|Enum|Union|External|To|Let|Require|Give|When|Otherwise|While|For|Match|be|has|backed|by|giving|exported|as|from|for|of|with|and|into|at|each|index|up|to|otherwise|anything|zero|buffer|array|view|filled|containing|does|gives|length|record|layout|packed|size|alignment|offset|in|read|write|constant|check|require|module|import|extern|export|enum|union|match|type|byte|bytes|owned|then|move|when|ignored)\b", Keyword),
+                (r"\b(Module|Import|Type|Constant|Check|Record|Layout|Packed|Enum|Union|External|To|Let|Require|Give|When|Otherwise|While|For|Match|be|has|backed|by|giving|exported|as|from|for|of|with|and|into|at|each|index|up|to|otherwise|anything|zero|buffer|array|view|filled|containing|does|gives|length|record|layout|packed|size|alignment|offset|in|read|write|constant|check|require|module|import|extern|export|enum|union|match|type|byte|bytes|owned|then|move|when|through|ignored)\b", Keyword),
                 (r"\b(true|false)\b", Keyword.Constant),
                 (r"\b(becomes|plus|minus|times|divided|by|remainder|and|or|not|as|bitwise|shifted|left|right|xor)\b", Operator.Word),
                 (r"\b(is|equal|less|greater|than)\b", Operator.Word),

@@ -11,7 +11,7 @@ The full language guide now lives in **[The Inscription Book](book/src/title-pag
 
 ## Status
 
-This repository currently implements **Inscription v0.40: match guards and ignored union payload fields**. v0.40 adds lowercase `when` match arm guards and `field ignored` union payload patterns on top of exhaustive enum/union/bool matches and the `anything` wildcard. Guarded arms do not count toward exhaustiveness; integer matches still require `otherwise` or `anything`. The mdBook documentation site remains the primary language guide.
+This repository currently implements **Inscription v0.41: pattern alternatives and integer ranges**. v0.41 adds `or` pattern alternatives and inclusive integer `through` ranges on top of match guards, ignored union payload fields, exhaustive enum/union/bool matches, and the `anything` wildcard. Integer matches still require `otherwise` or `anything`, even when ranges appear to cover the domain. The mdBook documentation site remains the primary language guide.
 
 The current language includes:
 
@@ -20,7 +20,7 @@ The current language includes:
 - modules and imports
 - constants, checks, runtime `Require`, and optional `--runtime-checks`
 - phrases, extern declarations, and scalar exported phrases
-- records, layout records, nominal enums, tagged unions, exhaustive matches, wildcard `anything` patterns, match guards, and ignored union payload fields
+- records, layout records, nominal enums, tagged unions, exhaustive matches, wildcard `anything` patterns, match guards, pattern alternatives, integer ranges, and ignored union payload fields
 - buffers, arrays, borrowed views, byte literals, and byte-string storage initialization
 - owned dynamic buffers with lexical cleanup, owned-buffer returns, explicit consuming `move` calls, owned temporary moves, and move-aware branch/match control flow
 - MLIR, LLVM IR, object, executable, static-library, interface JSON, and C header emission
@@ -135,21 +135,19 @@ Otherwise, result becomes consume cells move cells.
 Give result.
 ```
 
-Enum, union, and boolean matches can be written without `otherwise` when every case is covered. Use `anything` as an explicit wildcard catch-all. Match arms may also use lowercase `when` guards; guarded arms are tested in source order and do not count toward exhaustiveness:
+Enum, union, and boolean matches can be written without `otherwise` when every case is covered. Use `anything` as an explicit wildcard catch-all. Match arms may also use lowercase `when` guards; guarded arms are tested in source order and do not count toward exhaustiveness. Direct enum cases, booleans, integer literals, byte literals, and payload-free union variants can be combined with `or`, and integer scalar matches can use inclusive `through` ranges:
 
 ```inscription
 Enum Mode backed by u8 has idle be 0; active be 1; failed be 2.
 
 To code for mode mode: Mode, giving i32.
 Give match mode:
-Mode.idle gives 0;
-Mode.active gives 7;
-Mode.failed gives 255.
+Mode.idle or Mode.failed gives 0;
+Mode.active gives 7.
 
-To guarded code mode: Mode and enabled: i1, giving i32.
-Give match mode:
-Mode.active when enabled gives 7;
-Mode.active gives 3;
+To classify byte b: u8 and enabled: i1, giving i32.
+Give match b:
+byte "0" through byte "9" or byte "A" through byte "F" when enabled gives 7;
 anything gives 1.
 ```
 
@@ -170,8 +168,8 @@ anything gives 0.
 - [`book/tools/check_book_examples.py`](book/tools/check_book_examples.py): deterministic book example checker
 - [`book/tools/inscription_mdbook_preprocessor.py`](book/tools/inscription_mdbook_preprocessor.py): mdBook preprocessor that reuses Inscription's own highlighter
 - [`docs/github-pages.md`](docs/github-pages.md): GitHub Pages setup notes
-- [`docs/inscription-v0.40-spec.md`](docs/inscription-v0.40-spec.md): current language sprint spec
-- [`grammar/inscription-v0.40.ebnf`](grammar/inscription-v0.40.ebnf): current grammar mirror
+- [`docs/inscription-v0.41-spec.md`](docs/inscription-v0.41-spec.md): current language sprint spec
+- [`grammar/inscription-v0.41.ebnf`](grammar/inscription-v0.41.ebnf): current grammar mirror
 
 ## Testing
 

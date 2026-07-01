@@ -311,7 +311,20 @@ class AnythingPattern:
     line: int
 
 
-Pattern = "Expr | UnionPattern | AnythingPattern"
+@dataclass(frozen=True)
+class RangePattern:
+    lower: "Expr"
+    upper: "Expr"
+    line: int
+
+
+@dataclass(frozen=True)
+class AlternativePattern:
+    alternatives: tuple["Pattern", ...]
+    line: int
+
+
+Pattern = "Expr | UnionPattern | AnythingPattern | RangePattern | AlternativePattern"
 
 
 @dataclass(frozen=True)

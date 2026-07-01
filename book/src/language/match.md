@@ -137,3 +137,80 @@ Give choose maybe MaybeI32.some with value be 5.
 ```
 
 Step-match ownership merging still applies across all possible guarded and unguarded paths.
+
+## Pattern alternatives
+
+Use lowercase `or` to share one result/body across several non-binding patterns:
+
+```inscription,check
+Enum Mode backed by u8 has idle be 0; active be 1; failed be 2.
+
+To code for mode mode: Mode, giving i32.
+Give match mode:
+Mode.idle or Mode.failed gives 0;
+Mode.active gives 7.
+
+To main, giving i32.
+Give code for mode Mode.active.
+```
+
+Alternatives can cover enum cases, booleans, integer literals, byte literals, integer ranges, and payload-free union variants. A guard after alternatives applies to the whole group.
+
+Alternatives do not bind payloads in v0.41. Use separate arms for payload variants:
+
+```inscription,check
+Union Door has open; closed; locked code: u8.
+
+To door code door: Door, giving i32.
+Give match door:
+Door.open or Door.closed gives 1;
+Door.locked with code gives code as i32.
+
+To main, giving i32.
+Give door code Door.closed.
+```
+
+`anything` remains a standalone final catch-all and cannot appear inside an `or` group.
+
+## Integer ranges
+
+Use lowercase `through` for inclusive integer scalar ranges:
+
+```inscription,check
+To classify x: i32, giving i32.
+Give match x:
+0 through 9 gives 1;
+10 through 19 gives 2;
+anything gives 3.
+
+To main, giving i32.
+Give classify 12.
+```
+
+Byte ranges are `u8` ranges:
+
+```inscription,check
+To classify byte b: u8, giving i32.
+Give match b:
+byte "0" through byte "9" gives 1;
+byte "A" through byte "F" gives 2;
+byte "a" through byte "f" gives 2;
+anything gives 0.
+
+To main, giving i32.
+Give classify byte byte "C".
+```
+
+Ranges can be alternatives and can be guarded:
+
+```inscription,check
+To classify byte b: u8 and enabled: i1, giving i32.
+Give match b:
+byte "0" through byte "9" or byte "A" through byte "F" when enabled gives 7;
+anything gives 1.
+
+To main, giving i32.
+Give classify byte byte "8" and true.
+```
+
+Range endpoints must be compile-time evaluable and have the scrutinee type. Integer ranges do not make integer matches exhaustive; keep `anything` or `otherwise` for integer scrutinees.

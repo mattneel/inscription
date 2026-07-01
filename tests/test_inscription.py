@@ -2224,6 +2224,7 @@ class CompilerTests(unittest.TestCase):
                 "To highlight then, giving i32.\nFor i from 0 up to 1: For j from 0 up to 1: i becomes i; then i becomes i.\nGive 0.\n",
                 "To highlight anything flag: i1, giving i32.\nGive match flag:\ntrue gives 1;\nanything gives 0.\n",
                 "Union HighlightGuard has none; some value: i32 and marker: i32.\n\nTo highlight guard maybe: HighlightGuard, giving i32.\nGive match maybe:\nHighlightGuard.some with value ignored and marker as mark when mark is greater than zero gives mark;\nanything gives 0.\n",
+                "To highlight range b: u8, giving i32.\nGive match b:\nbyte \"0\" through byte \"9\" or byte \"A\" gives 1;\nanything gives 0.\n",
             ]
         )
         html = highlight_source(source, output_format="html")
@@ -4698,6 +4699,167 @@ Give result plus seen.
             "Give result.\n",
             "owned buffer cells is moved in some match arms but not all",
         )
+
+    def test_v041_pattern_alternatives_and_integer_ranges(self):
+        enum_alternatives = compile_source(self.fixture("match_enum_alternatives.ins"))
+        self.assertIn("func.func @code_for_mode", enum_alternatives)
+        self.assertIn("arith.ori", enum_alternatives)
+
+        bool_alternatives = compile_source(self.fixture("match_bool_alternatives.ins"))
+        self.assertIn("func.func @bool_code", bool_alternatives)
+
+        integer_ranges = compile_source(self.fixture("match_integer_ranges.ins"))
+        self.assertIn("func.func @classify", integer_ranges)
+        self.assertIn("arith.andi", integer_ranges)
+
+        byte_ranges = compile_source(self.fixture("match_byte_ranges.ins"))
+        self.assertIn("func.func @classify_byte", byte_ranges)
+        self.assertIn("arith.cmpi uge", byte_ranges)
+
+        range_guard = compile_source(self.fixture("match_range_alternatives_guard.ins"))
+        self.assertIn("func.func @classify_byte", range_guard)
+        self.assertIn("arith.ori", range_guard)
+
+        union_alternatives = compile_source(self.fixture("match_union_payload_free_alternatives.ins"))
+        self.assertIn("func.func @door_code", union_alternatives)
+        self.assertIn("arith.ori", union_alternatives)
+
+        compile_time = compile_source(self.fixture("match_range_compile_time.ins"))
+        self.assertIn("arith.constant 42 : i32", compile_time)
+
+        self.assertCompileError(
+            "Enum Mode backed by u8 has idle be 0; active be 1.\n\n"
+            "To bad mode: Mode, giving i32.\n"
+            "Give match mode:\n"
+            "anything or Mode.active gives 1.\n",
+            "anything cannot be used in a pattern alternative",
+        )
+        self.assertCompileError(
+            "Union MaybeI32 has none; some value: i32.\n\n"
+            "To bad maybe: MaybeI32, giving i32.\n"
+            "Give match maybe:\n"
+            "MaybeI32.some with value or MaybeI32.none gives 1;\n"
+            "anything gives 0.\n",
+            "pattern alternatives cannot bind union payloads in v0.41",
+        )
+        self.assertCompileError(
+            "Enum Mode backed by u8 has idle be 0; failed be 2.\n\n"
+            "To bad mode: Mode, giving i32.\n"
+            "Give match mode:\n"
+            "Mode.idle through Mode.failed gives 1;\n"
+            "anything gives 0.\n",
+            "range patterns require integer scalar scrutinee, got Mode",
+        )
+        self.assertCompileError(
+            "To bad x: i32, giving i32.\n"
+            "Give match x:\n"
+            "10 through 0 gives 1;\n"
+            "anything gives 0.\n",
+            "range pattern lower bound 10 is greater than upper bound 0",
+        )
+        self.assertCompileError(
+            "To bad x: i32, giving i32.\n"
+            "Give match x:\n"
+            "1 or 1 gives 1;\n"
+            "anything gives 0.\n",
+            "match has duplicate pattern 1",
+        )
+        self.assertCompileError(
+            "To bad x: i32, giving i32.\n"
+            "Give match x:\n"
+            "0 through 9 gives 1;\n"
+            "5 gives 2;\n"
+            "anything gives 0.\n",
+            "match pattern 5 is unreachable because an earlier range already matches it",
+        )
+        self.assertCompileError(
+            "To bad x: i32, giving i32.\n"
+            "Give match x:\n"
+            "0 through 9 gives 1;\n"
+            "5 through 15 gives 2;\n"
+            "anything gives 0.\n",
+            "match range 5 through 15 overlaps earlier range 0 through 9",
+        )
+        self.assertCompileError(
+            "To bad b: u8, giving i32.\n"
+            "Give match b:\n"
+            "0 through 255 gives 1.\n",
+            "match over u8 requires otherwise or anything",
+        )
+        self.assertCompileError(
+            "Enum Mode backed by u8 has idle be 0; active be 1.\n\n"
+            "To bad mode: Mode, giving i32.\n"
+            "Give match mode:\n"
+            "Mode.idle or 1 gives 0;\n"
+            "anything gives 1.\n",
+            "match pattern must have type Mode, got u8",
+        )
+        self.assertCompileError(
+            "Constant high: i64 be 9.\n\n"
+            "To bad x: i32, giving i32.\n"
+            "Give match x:\n"
+            "0 through high gives 1;\n"
+            "anything gives 0.\n",
+            "range endpoint must have type i32, got i64",
+        )
+
+    def test_v041_pattern_range_artifacts(self):
+        try:
+            resolve_toolchain()
+        except ToolchainError:
+            return
+
+        env = {**os.environ, "PYTHONPATH": str(SRC)}
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            llvm_ir = tmp_path / "match_byte_ranges.ll"
+            llvm_proc = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "inscription",
+                    "compile",
+                    str(FIXTURES / "match_byte_ranges.ins"),
+                    "--emit",
+                    "llvm-ir",
+                    "--verify",
+                    "-o",
+                    str(llvm_ir),
+                ],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(llvm_proc.returncode, 0, llvm_proc.stderr)
+            self.assertIn("define i32 @main", llvm_ir.read_text())
+
+            exe = tmp_path / "match_byte_ranges"
+            exe_proc = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "inscription",
+                    "compile",
+                    str(FIXTURES / "match_byte_ranges.ins"),
+                    "--emit",
+                    "executable",
+                    "-o",
+                    str(exe),
+                ],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(exe_proc.returncode, 0, exe_proc.stderr)
+            run_proc = subprocess.run([str(exe)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False)
+            self.assertEqual(run_proc.returncode, 2, run_proc.stderr)
+            self.assertEqual(run_proc.stdout, "")
 
     def test_v040_match_guard_artifacts(self):
         try:

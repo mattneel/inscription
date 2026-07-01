@@ -32,6 +32,7 @@ from .ast import (
     IfStmt,
     Integer,
     AlignmentOfType,
+    AlternativePattern,
     AnythingPattern,
     LengthOf,
     LengthOfBytes,
@@ -46,6 +47,7 @@ from .ast import (
     Program,
     RecordConstructor,
     RecordType,
+    RangePattern,
     RequireStmt,
     ReturnStmt,
     SetStmt,
@@ -1975,13 +1977,37 @@ class MlirEmitter:
         self,
         scrutinee: Value | UnionStorage,
         scrutinee_type: ValueType,
-        pattern: Expr | UnionPattern | AnythingPattern,
+        pattern: Expr | UnionPattern | AnythingPattern | RangePattern | AlternativePattern,
         env: dict[str, EnvValue],
         lines: list[str],
         indent: str,
     ) -> Value:
         if isinstance(pattern, AnythingPattern):  # pragma: no cover - semantic analysis requires final catch-all arms
             raise AssertionError("anything catch-all should be lowered as a fallback arm")
+        if isinstance(pattern, AlternativePattern):
+            conditions = [self.emit_match_condition(scrutinee, scrutinee_type, alternative, env, lines, indent) for alternative in pattern.alternatives]
+            assert conditions
+            current = conditions[0]
+            for condition in conditions[1:]:
+                out = Value(self.fresh(), "i1")
+                lines.append(f"{indent}{out.name} = arith.ori {current.name}, {condition.name} : i1")
+                current = out
+            return current
+        if isinstance(pattern, RangePattern):
+            assert isinstance(scrutinee, Value)
+            assert isinstance(scrutinee_type, str)
+            lower = self.emit_expr(pattern.lower, env, lines, indent, expected=scrutinee_type)
+            upper = self.emit_expr(pattern.upper, env, lines, indent, expected=scrutinee_type)
+            lower_ok = Value(self.fresh(), "i1")
+            upper_ok = Value(self.fresh(), "i1")
+            out = Value(self.fresh(), "i1")
+            lower_pred = "sge" if is_signed_type(scrutinee_type) else "uge"
+            upper_pred = "sle" if is_signed_type(scrutinee_type) else "ule"
+            ty = mlir_type(scrutinee_type)
+            lines.append(f"{indent}{lower_ok.name} = arith.cmpi {lower_pred}, {scrutinee.name}, {lower.name} : {ty}")
+            lines.append(f"{indent}{upper_ok.name} = arith.cmpi {upper_pred}, {scrutinee.name}, {upper.name} : {ty}")
+            lines.append(f"{indent}{out.name} = arith.andi {lower_ok.name}, {upper_ok.name} : i1")
+            return out
         if isinstance(scrutinee_type, UnionType):
             assert isinstance(scrutinee, UnionStorage)
             union = self.unions[scrutinee_type.name]
