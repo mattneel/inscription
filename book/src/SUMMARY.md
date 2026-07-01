@@ -45,6 +45,7 @@
 - [Formatter](tooling/formatter.md)
 - [Testing](tooling/testing.md)
 - [Packages](tooling/packages.md)
+- [Build Scripts](tooling/build-scripts.md)
 - [Artifacts](tooling/artifacts.md)
 - [Optimization](tooling/optimization.md)
 - [Interface JSON](tooling/interface-json.md)

@@ -9,12 +9,13 @@ PYTHONPATH=src python -m inscription test SOURCE
 PYTHONPATH=src python -m inscription package check PACKAGE_ROOT
 PYTHONPATH=src python -m inscription package test PACKAGE_ROOT
 PYTHONPATH=src python -m inscription package build PACKAGE_ROOT
+PYTHONPATH=src python -m inscription build PACKAGE_ROOT
 PYTHONPATH=src python -m inscription format SOURCE --check
 PYTHONPATH=src python -m inscription highlight SOURCE
 PYTHONPATH=src python -m inscription check-tools --show-pipeline
 ```
 
-`compile` emits artifacts without executing the program. `run` lowers through LLVM 22 and executes `main` with `lli`. `test` discovers top-level `Test ... .` declarations, compiles each selected test through the MLIR/LLVM pipeline, and reports a deterministic summary. `package check` validates `package.ins` manifests, dependency graphs, and package source layout. `package test` discovers test files from the manifest test directory and runs them with the package source directory plus direct dependency exposed modules as import roots. `package build` emits package-aware artifacts through the existing compile pipeline. `format` is parse-only and does not need LLVM tools. `highlight` uses the same Inscription lexer used by this book.
+`compile` emits artifacts without executing the program. `run` lowers through LLVM 22 and executes `main` with `lli`. `test` discovers top-level `Test ... .` declarations, compiles each selected test through the MLIR/LLVM pipeline, and reports a deterministic summary. `package check` validates `package.ins` manifests, dependency graphs, and package source layout. `package test` discovers test files from the manifest test directory and runs them with the package source directory plus direct dependency exposed modules as import roots. `package build` emits package-aware artifacts through the existing compile pipeline. `build` interprets `build.ins` and dispatches its named artifact steps through that same package build pipeline. `format` is parse-only and does not need LLVM tools. `highlight` uses the same Inscription lexer used by this book.
 
 Useful test options:
 
@@ -44,3 +45,15 @@ PYTHONPATH=src python -m inscription package build . --emit executable -o build/
 ```
 
 `package check` exits 0 on a valid manifest/layout/dependency graph and exits 2 for manifest, package, compiler, or tool diagnostics. `package test` exits 0 when all selected tests pass, exits 1 for runtime test failures, and exits 2 for package/compiler/tool diagnostics. `package build` exits 0 on success and exits 2 for package/compiler/tool diagnostics; its default output is `build/lib<Package>.a`.
+
+
+Useful build script commands:
+
+```sh
+PYTHONPATH=src python -m inscription build . --list
+PYTHONPATH=src python -m inscription build . library
+PYTHONPATH=src python -m inscription build .
+PYTHONPATH=src python -m inscription build . library --save-temps build/temps
+```
+
+`build` exits 0 on success and exits 2 for package, build-script, compiler, or tool diagnostics. Without a step name, it builds every step recorded by `build.ins`; with a step name, it builds only that step.

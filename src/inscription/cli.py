@@ -4,6 +4,7 @@ import argparse
 import sys
 from pathlib import Path
 
+from .buildscript import list_build_steps, run_build_script
 from .compiler import compile_file, load_program
 from .diagnostics import InscriptionError
 from .formatter import format_file
@@ -51,6 +52,27 @@ def _format_preset(passes: tuple[str, ...]) -> str:
     if not passes:
         return "<none>"
     return ", ".join(pass_name.removeprefix("--") for pass_name in passes)
+
+
+def _resolve_build_positionals(values: list[str]) -> tuple[Path, str | None]:
+    if len(values) > 2:
+        raise InscriptionError("build accepts at most PACKAGE_ROOT and STEP")
+    if not values:
+        return Path("."), None
+    if len(values) == 2:
+        return Path(values[0]), values[1]
+    only = values[0]
+    candidate = Path(only)
+    if (candidate / "package.ins").exists() or candidate.is_dir():
+        return candidate, None
+    return Path("."), only
+
+
+def _display_relative(path: Path, root: Path) -> str:
+    try:
+        return path.resolve().relative_to(root.resolve()).as_posix()
+    except ValueError:
+        return path.as_posix()
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -146,6 +168,18 @@ def main(argv: list[str] | None = None) -> int:
     )
     package_build_p.add_argument("--verify", action="store_true", help="verify emitted artifacts with the LLVM/MLIR 22 toolchain")
     _add_optimization_args(package_build_p)
+
+    build_p = sub.add_parser("build", help="interpret build.ins and build requested package artifacts")
+    build_p.add_argument("build_args", nargs="*", help="optional PACKAGE_ROOT and optional STEP name")
+    build_p.add_argument("--runtime-checks", action="store_true", help="emit runtime assertions for dynamic storage bounds")
+    build_p.add_argument(
+        "--save-temps",
+        type=Path,
+        help="directory for per-step source MLIR, optimized MLIR when enabled, lowered MLIR, LLVM IR, and object intermediates",
+    )
+    build_p.add_argument("--list", action="store_true", help="list build.ins steps without building")
+    build_p.add_argument("--verify", action="store_true", help="verify emitted artifacts with the LLVM/MLIR 22 toolchain")
+    _add_optimization_args(build_p)
 
     format_p = sub.add_parser("format", help="format an Inscription source file")
     format_p.add_argument("source", type=Path)
@@ -344,6 +378,24 @@ def main(argv: list[str] | None = None) -> int:
                     else:
                         sys.stdout.write(result.text)
                 return 0
+        if args.command == "build":
+            root, step_name = _resolve_build_positionals(args.build_args)
+            if args.list:
+                steps = list_build_steps(root)
+                for step in steps:
+                    print(f"build step {step.name}: {step.emit}")
+                return 0
+            results = run_build_script(
+                root,
+                step_name=step_name,
+                runtime_checks=args.runtime_checks,
+                opt_level=_resolve_opt_level(args),
+                save_temps=args.save_temps,
+                verify=args.verify,
+            )
+            for result in results:
+                print(f"built {result.step.name}: {_display_relative(result.output_path, root)}")
+            return 0
         if args.command == "format":
             if args.in_place and args.output is not None:
                 raise InscriptionError("--in-place cannot be used with -o")

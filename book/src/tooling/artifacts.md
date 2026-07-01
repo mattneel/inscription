@@ -20,4 +20,4 @@ PYTHONPATH=src python -m inscription package build path/to/package --emit llvm-i
 PYTHONPATH=src python -m inscription package build path/to/package --emit static-library -o libPackage.a
 ```
 
-For package builds, library-like emits include the root module and exposed modules from the manifest.
+For package builds, library-like emits include the root module and exposed modules from the manifest. `inscription build` reads `build.ins` and routes named Build API steps through the same package artifact emit modes, using deterministic outputs under the package `build/` directory.

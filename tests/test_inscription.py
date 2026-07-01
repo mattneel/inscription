@@ -16,6 +16,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
 sys.path.insert(0, str(SRC))
 
+from inscription.buildscript import parse_build_script
 from inscription.compiler import compile_file as _compile_file, compile_source as _compile_source, load_program
 from inscription.diagnostics import InscriptionError
 from inscription.formatter import format_source
@@ -8081,6 +8082,242 @@ Give result plus seen.
             )
             self.assertEqual(duplicate_proc.returncode, 2)
             self.assertIn("dependency path ../shared is declared for both A and B", duplicate_proc.stderr)
+
+    def test_v050_build_script_parser_formatter_and_diagnostics(self):
+        source = (
+            "Import Build.\n\n"
+            "/// Fixture build steps.\n"
+            "To build package package: Build.Package.\n"
+            "Build.static library named \"library\".\n"
+            "Build.c header named \"header\".\n"
+            "Build.interface json named \"interface\".\n"
+            "Build.executable named \"app\".\n"
+        )
+        script = parse_build_script(source)
+        self.assertEqual([(step.name, step.emit) for step in script.steps], [
+            ("library", "static-library"),
+            ("header", "c-header"),
+            ("interface", "interface-json"),
+            ("app", "executable"),
+        ])
+        formatted = format_source(source)
+        self.assertEqual(format_source(formatted), formatted)
+
+        cases = {
+            "missing import": (
+                "To build package package: Build.Package.\nBuild.static library named \"library\".\n",
+                "build scripts must import Build",
+            ),
+            "wrong phrase": (
+                "Import Build.\n\nTo make package package: Build.Package.\nBuild.static library named \"library\".\n",
+                "build script must define `To build package package: Build.Package.`",
+            ),
+            "wrong parameter": (
+                "Import Build.\n\nTo build package package: i32.\nBuild.static library named \"library\".\n",
+                "build phrase parameter must have type Build.Package",
+            ),
+            "returning phrase": (
+                "Import Build.\n\nTo build package package: Build.Package, giving i32.\nGive 0.\n",
+                "build phrase must not return a value",
+            ),
+            "unsupported import": (
+                "Import Build.\nImport Math.\n\nTo build package package: Build.Package.\nBuild.static library named \"library\".\n",
+                "build scripts may only import Build in v0.50",
+            ),
+            "external": (
+                "Import Build.\n\nExternal host value, giving i32, as host_value.\n\n"
+                "To build package package: Build.Package.\nBuild.static library named \"library\".\n",
+                "build scripts do not support external phrase declarations",
+            ),
+            "duplicate": (
+                "Import Build.\n\nTo build package package: Build.Package.\n"
+                "Build.static library named \"library\".\nBuild.c header named \"library\".\n",
+                "build step library is already defined",
+            ),
+            "bad name": (
+                "Import Build.\n\nTo build package package: Build.Package.\nBuild.static library named \"../library\".\n",
+                "build step name must not contain path separators",
+            ),
+            "non literal name": (
+                "Import Build.\n\nTo build package package: Build.Package.\n"
+                "Let name be 1.\nBuild.static library named name.\n",
+                "build artifact names must be string literals in v0.50",
+            ),
+        }
+        for name, (case_source, contains) in cases.items():
+            with self.subTest(name=name):
+                with self.assertRaises(InscriptionError) as ctx:
+                    parse_build_script(case_source)
+                self.assertIn(contains, str(ctx.exception))
+
+    def test_v050_build_command_list_header_interface_and_diagnostics(self):
+        env = {**os.environ, "PYTHONPATH": str(SRC)}
+        fixture = ROOT / "tests" / "fixtures" / "packages" / "build_script_package"
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            package = tmp_path / "build_script_package"
+            shutil.copytree(fixture, package)
+
+            list_proc = subprocess.run(
+                [sys.executable, "-m", "inscription", "build", str(package), "--list"],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(list_proc.returncode, 0, list_proc.stderr)
+            self.assertIn("build step library: static-library\n", list_proc.stdout)
+            self.assertIn("build step app: executable\n", list_proc.stdout)
+
+            header_proc = subprocess.run(
+                [sys.executable, "-m", "inscription", "build", str(package), "header"],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(header_proc.returncode, 0, header_proc.stderr)
+            header = package / "build" / "header.h"
+            self.assertTrue(header.exists())
+            self.assertIn("int32_t ins_add(int32_t arg0, int32_t arg1);", header.read_text())
+            self.assertIn("built header: build/header.h", header_proc.stdout)
+
+            interface_proc = subprocess.run(
+                [sys.executable, "-m", "inscription", "build", str(package), "interface"],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(interface_proc.returncode, 0, interface_proc.stderr)
+            payload = json.loads((package / "build" / "interface.json").read_text())
+            self.assertEqual(payload["package"]["name"], "BuildScriptPkg")
+            self.assertEqual(payload["package"]["root_module"], "BuildScriptPkg")
+
+            missing = tmp_path / "missing-build"
+            shutil.copytree(fixture, missing)
+            (missing / "build.ins").unlink()
+            missing_proc = subprocess.run(
+                [sys.executable, "-m", "inscription", "build", str(missing), "--list"],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(missing_proc.returncode, 2)
+            self.assertIn("build script not found at build.ins", missing_proc.stderr)
+
+            no_steps = tmp_path / "no-steps"
+            shutil.copytree(fixture, no_steps)
+            (no_steps / "build.ins").write_text("Import Build.\n\nTo build package package: Build.Package.\nLet x be 1.\n")
+            no_steps_proc = subprocess.run(
+                [sys.executable, "-m", "inscription", "build", str(no_steps), "--list"],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(no_steps_proc.returncode, 2)
+            self.assertIn("build script did not declare any build steps", no_steps_proc.stderr)
+
+            missing_step_proc = subprocess.run(
+                [sys.executable, "-m", "inscription", "build", str(package), "missing"],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(missing_step_proc.returncode, 2)
+            self.assertIn("build step missing is not defined", missing_step_proc.stderr)
+
+    def test_v050_build_command_binary_outputs_and_save_temps(self):
+        try:
+            resolve_toolchain(require_static_library=True, require_executable=True)
+        except ToolchainError as exc:
+            self.skipTest(str(exc))
+        env = {**os.environ, "PYTHONPATH": str(SRC)}
+        fixture = ROOT / "tests" / "fixtures" / "packages" / "build_script_package"
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            package = tmp_path / "build_script_package"
+            shutil.copytree(fixture, package)
+
+            library_proc = subprocess.run(
+                [sys.executable, "-m", "inscription", "build", str(package), "library"],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(library_proc.returncode, 0, library_proc.stderr)
+            self.assertGreater((package / "build" / "liblibrary.a").stat().st_size, 0)
+
+            app_proc = subprocess.run(
+                [sys.executable, "-m", "inscription", "build", str(package), "app"],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(app_proc.returncode, 0, app_proc.stderr)
+            run_proc = subprocess.run([str(package / "build" / "app")], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False)
+            self.assertEqual(run_proc.returncode, 42, run_proc.stderr)
+
+            temps = tmp_path / "temps"
+            temps_proc = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "inscription",
+                    "build",
+                    str(package),
+                    "library",
+                    "--save-temps",
+                    str(temps),
+                ],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(temps_proc.returncode, 0, temps_proc.stderr)
+            self.assertTrue((temps / "library" / "BuildScriptPkg.mlir").exists())
+            self.assertTrue((temps / "library" / "BuildScriptPkg.lowered.mlir").exists())
+            self.assertTrue((temps / "library" / "BuildScriptPkg.ll").exists())
+            self.assertTrue((temps / "library" / "BuildScriptPkg.o").exists())
+
+            all_proc = subprocess.run(
+                [sys.executable, "-m", "inscription", "build", str(package)],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(all_proc.returncode, 0, all_proc.stderr)
+            self.assertTrue((package / "build" / "liblibrary.a").exists())
+            self.assertTrue((package / "build" / "header.h").exists())
+            self.assertTrue((package / "build" / "interface.json").exists())
+            self.assertTrue((package / "build" / "app").exists())
 
 
 class FormatterTests(unittest.TestCase):
