@@ -9,6 +9,7 @@ PYTHONPATH=src python -m inscription doctor --json
 PYTHONPATH=src python -m inscription explain INS-SEM-0001
 PYTHONPATH=src python -m inscription explain --list
 PYTHONPATH=src python -m inscription compile SOURCE --verify
+PYTHONPATH=src python -m inscription compile SOURCE --diagnostic-format json
 PYTHONPATH=src python -m inscription run SOURCE
 PYTHONPATH=src python -m inscription test SOURCE
 PYTHONPATH=src python -m inscription package new PATH --name PackageName
@@ -36,7 +37,7 @@ PYTHONPATH=src python -m inscription test SOURCE --save-temps /tmp/inscription-t
 
 `test` exits 0 when all selected tests pass, exits 1 when any selected test fails at runtime, and exits 2 for compiler/tooling diagnostics.
 
-Compiler, package, build-script, formatter, and common test diagnostics render source excerpts when a source span is available. v0.63 diagnostics may include stable codes such as `error[INS-SEM-0001]: ...`; use `inscription explain CODE` for details. Output is deterministic and color-free by default.
+Compiler, package, build-script, formatter, release, and common test diagnostics render source excerpts when a source span is available. v0.63 diagnostics may include stable codes such as `error[INS-SEM-0001]: ...`; use `inscription explain CODE` for details. v0.64 adds `--diagnostic-format text|json` for machine-readable failures on stderr. Text remains the default, output is deterministic and color-free, and successful artifact output remains unchanged.
 
 
 Useful package commands:
@@ -64,6 +65,7 @@ PYTHONPATH=src python -m inscription package release .
 PYTHONPATH=src python -m inscription package release . --include-executable --clean
 PYTHONPATH=src python -m inscription package release . --archive --checksum
 PYTHONPATH=src python -m inscription package release . --dry-run
+PYTHONPATH=src python -m inscription package check . --diagnostic-format json
 ```
 
 `package init` initializes an existing directory, creating it if needed. `package new` creates and initializes a package directory. Both commands default to a library template, accept `--executable`, can add a minimal mdBook with `--with-book`, and protect existing generated files unless `--force` is supplied. `package format` requires `--check` or `--in-place`; `--include-dependencies` includes local path dependencies and `--include-book` runs package book example checks when present. `package clean` removes only `build/`, supports `--dry-run`, and cleans local path dependencies only with `--include-dependencies`.
@@ -80,6 +82,7 @@ PYTHONPATH=src python -m inscription build . library
 PYTHONPATH=src python -m inscription build . book
 PYTHONPATH=src python -m inscription build .
 PYTHONPATH=src python -m inscription build . ci --save-temps build/temps
+PYTHONPATH=src python -m inscription build . ci --diagnostic-format json
 ```
 
 `build` exits 0 on success, exits 1 when a test step fails, and exits 2 for package, build-script, compiler, or tool diagnostics. With a step name, it runs that step; group steps run dependencies once in declaration order. Without a step name, it runs the declared default step when present, otherwise it runs all ordinary non-group steps in source order. Documentation steps write to `build/<step-name>/` and require mdBook only when executed.

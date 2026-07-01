@@ -21,7 +21,7 @@ sys.path.insert(0, str(SRC))
 from inscription.buildscript import parse_build_script
 from inscription.compiler import compile_file as _compile_file, compile_source as _compile_source, load_program
 from inscription.diagnostic_codes import CODE_RE, DIAGNOSTIC_CODES, diagnostic_catalog_payload, sorted_diagnostic_codes
-from inscription.diagnostics import Diagnostic, InscriptionError, SourceSpan, render_diagnostic
+from inscription.diagnostics import Diagnostic, DiagnosticNote, InscriptionError, SourceSpan, render_diagnostic, render_diagnostics_json
 from inscription.formatter import format_source
 from inscription.interpreter import FloatValue, IntValue, Interpreter, InterpreterError
 from inscription.package import format_manifest_source, parse_manifest
@@ -10250,6 +10250,153 @@ Give result plus seen.
             owned_proc = run_cli("compile", owned)
             self.assertEqual(owned_proc.returncode, 2)
             self.assertIn("error[INS-OWN-0001]", owned_proc.stderr)
+
+
+    def test_v064_json_diagnostic_renderer(self):
+        plain = render_diagnostics_json((Diagnostic("plain failure"),))
+        plain_payload = json.loads(plain)
+        self.assertEqual(
+            plain_payload,
+            {
+                "ok": False,
+                "diagnostics": [
+                    {
+                        "severity": "error",
+                        "code": None,
+                        "message": "plain failure",
+                        "span": None,
+                        "notes": [],
+                    }
+                ],
+            },
+        )
+
+        diagnostic = Diagnostic(
+            "unknown binding missing",
+            SourceSpan("bad.ins", 2, 6, end_column=13),
+            code="INS-SEM-0001",
+            notes=(DiagnosticNote("first use is here", SourceSpan("bad.ins", 1, 1, end_column=8)),),
+        )
+        rendered = render_diagnostics_json((diagnostic,))
+        self.assertEqual(rendered, render_diagnostics_json((diagnostic,)))
+        payload = json.loads(rendered)
+        self.assertFalse(payload["ok"])
+        item = payload["diagnostics"][0]
+        self.assertEqual(item["severity"], "error")
+        self.assertEqual(item["code"], "INS-SEM-0001")
+        self.assertEqual(item["message"], "unknown binding missing")
+        self.assertEqual(item["span"], {"path": "bad.ins", "line": 2, "column": 6, "end_line": 2, "end_column": 13})
+        self.assertEqual(
+            item["notes"],
+            [
+                {
+                    "message": "first use is here",
+                    "span": {"path": "bad.ins", "line": 1, "column": 1, "end_line": 1, "end_column": 8},
+                }
+            ],
+        )
+
+    def test_v064_json_diagnostic_cli_smokes(self):
+        env = {**os.environ, "PYTHONPATH": str(SRC)}
+
+        def run_cli(*args: str | Path, cwd: Path = ROOT) -> subprocess.CompletedProcess[str]:
+            return subprocess.run(
+                [sys.executable, "-m", "inscription", *(str(arg) for arg in args)],
+                cwd=cwd,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+
+        def stderr_json(proc: subprocess.CompletedProcess[str]) -> dict[str, object]:
+            self.assertEqual(proc.stdout, "")
+            return json.loads(proc.stderr)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            bad = tmp_path / "bad.ins"
+            bad.write_text("To main, giving i32.\nGive missing.\n")
+            bad_proc = run_cli("compile", bad, "--diagnostic-format", "json")
+            self.assertEqual(bad_proc.returncode, 2)
+            bad_payload = stderr_json(bad_proc)
+            self.assertFalse(bad_payload["ok"])
+            bad_diag = bad_payload["diagnostics"][0]
+            self.assertEqual(bad_diag["code"], "INS-SEM-0001")
+            self.assertIn("unknown binding missing", bad_diag["message"])
+            self.assertEqual(bad_diag["span"]["line"], 2)
+
+            bad_period = tmp_path / "bad_period.ins"
+            bad_period.write_text("To main, giving i32.\nGive 42\n")
+            period_proc = run_cli("compile", bad_period, "--diagnostic-format", "json")
+            self.assertEqual(period_proc.returncode, 2)
+            period_diag = stderr_json(period_proc)["diagnostics"][0]
+            self.assertEqual(period_diag["code"], "INS-PARSE-0001")
+            self.assertEqual(period_diag["span"]["line"], 2)
+
+            bad_pkg = tmp_path / "badpkg"
+            bad_pkg.mkdir()
+            (bad_pkg / "package.ins").write_text(
+                "Package Bad.\n\n"
+                "Sources are in \"src\".\n"
+                "Sources are in \"source\".\n\n"
+                "Root module is Bad.\n"
+            )
+            pkg_proc = run_cli("package", "check", bad_pkg, "--diagnostic-format", "json")
+            self.assertEqual(pkg_proc.returncode, 2)
+            pkg_diag = stderr_json(pkg_proc)["diagnostics"][0]
+            self.assertTrue(pkg_diag["code"].startswith("INS-PKG"))
+            self.assertTrue(str(pkg_diag["span"]["path"]).endswith("package.ins"))
+
+            bad_build = tmp_path / "badbuild"
+            (bad_build / "src").mkdir(parents=True)
+            (bad_build / "package.ins").write_text(
+                "Package BadBuild.\n\n"
+                "Sources are in \"src\".\n\n"
+                "Root module is BadBuild.\n"
+                "Expose module BadBuild.\n"
+            )
+            (bad_build / "src" / "BadBuild.ins").write_text("Module BadBuild.\n\nTo main, giving i32.\nGive 0.\n")
+            (bad_build / "build.ins").write_text(
+                "Import Build.\n\n"
+                "To build package package: Build.Package.\n"
+                "Build.static library named \"library\".\n"
+                "Build.c header named \"library\".\n"
+            )
+            build_proc = run_cli("build", bad_build, "--list", "--diagnostic-format", "json")
+            self.assertEqual(build_proc.returncode, 2)
+            build_diag = stderr_json(build_proc)["diagnostics"][0]
+            self.assertTrue(build_diag["code"].startswith("INS-BUILD"))
+            self.assertTrue(str(build_diag["span"]["path"]).endswith("build.ins"))
+
+            messy = tmp_path / "messy.ins"
+            messy.write_text("\n\nTo main, giving i32.\n\nGive   1 plus 2.\n")
+            fmt_proc = run_cli("format", messy, "--check", "--diagnostic-format", "json")
+            self.assertEqual(fmt_proc.returncode, 2)
+            fmt_diag = stderr_json(fmt_proc)["diagnostics"][0]
+            self.assertEqual(fmt_diag["code"], "INS-FMT-0001")
+
+            failing_test = tmp_path / "failing_test.ins"
+            failing_test.write_text("Test failure.\nExpect 1 is equal to 2.\n")
+            test_proc = run_cli("test", failing_test, "--diagnostic-format", "json")
+            self.assertEqual(test_proc.returncode, 1)
+            self.assertEqual(test_proc.stdout, "")
+            test_payload = json.loads(test_proc.stderr)
+            self.assertFalse(test_payload["ok"])
+            self.assertEqual(test_payload["summary"], {"passed": 0, "failed": 1})
+            self.assertEqual(test_payload["diagnostics"][0]["code"], "INS-TEST-0001")
+            self.assertEqual(test_payload["diagnostics"][0]["span"]["line"], 2)
+
+            release_pkg = tmp_path / "release_package"
+            shutil.copytree(ROOT / "tests" / "fixtures" / "packages" / "release_package", release_pkg)
+            collision = tmp_path / "release-out"
+            collision.mkdir()
+            (collision / "existing.txt").write_text("occupied\n")
+            release_proc = run_cli("package", "release", release_pkg, "-o", collision, "--diagnostic-format", "json")
+            self.assertEqual(release_proc.returncode, 2)
+            release_diag = stderr_json(release_proc)["diagnostics"][0]
+            self.assertEqual(release_diag["code"], "INS-REL-0001")
 
 
 class FormatterTests(unittest.TestCase):

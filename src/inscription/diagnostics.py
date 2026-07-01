@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -101,6 +102,35 @@ def render_exception(exc: InscriptionError) -> str:
     return render_diagnostic(exc.to_diagnostic(), source=exc.source)
 
 
+def diagnostic_to_payload(diagnostic: Diagnostic) -> dict[str, object]:
+    return {
+        "severity": diagnostic.severity or "error",
+        "code": diagnostic.code,
+        "message": diagnostic.message,
+        "span": _span_payload(diagnostic.span),
+        "notes": [
+            {
+                "message": note.message,
+                "span": _span_payload(note.span),
+            }
+            for note in diagnostic.notes
+        ],
+    }
+
+
+def diagnostics_payload(diagnostics: list[Diagnostic] | tuple[Diagnostic, ...]) -> dict[str, object]:
+    return {
+        "ok": False,
+        "diagnostics": [diagnostic_to_payload(diagnostic) for diagnostic in diagnostics],
+    }
+
+
+def render_diagnostics_json(diagnostics: list[Diagnostic] | tuple[Diagnostic, ...]) -> str:
+    """Render deterministic machine-readable diagnostics."""
+
+    return json.dumps(diagnostics_payload(diagnostics), indent=2, ensure_ascii=False) + "\n"
+
+
 def render_diagnostic(diagnostic: Diagnostic, *, source: str | None = None) -> str:
     """Render a deterministic, color-free diagnostic with a source excerpt."""
 
@@ -142,6 +172,18 @@ def _format_location(path: str | None, line: int, column: int) -> str:
     if path:
         return f"{_display_path(path)}:{line}:{column}"
     return f"{line}:{column}"
+
+
+def _span_payload(span: SourceSpan | None) -> dict[str, object] | None:
+    if span is None:
+        return None
+    return {
+        "path": _display_path(span.path) if span.path else None,
+        "line": span.line,
+        "column": span.column or 1,
+        "end_line": span.end_line if span.end_line is not None else span.line,
+        "end_column": span.end_column if span.end_column is not None else (span.column or 1),
+    }
 
 
 def _display_path(path: str) -> str:

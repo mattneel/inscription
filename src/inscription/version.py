@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-INSCRIPTION_VERSION = "0.63.0.dev0"
-LANGUAGE_VERSION = "v0.63"
+INSCRIPTION_VERSION = "0.64.0.dev0"
+LANGUAGE_VERSION = "v0.64"
 INTERFACE_JSON_FORMAT = "inscription-interface-v1"
 C_HEADER_FORMAT = "inscription-c-header-v1"
 RELEASE_FORMAT = "inscription-release-v1"

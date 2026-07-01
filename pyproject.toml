@@ -1,6 +1,6 @@
 [project]
 name = "inscription"
-version = "0.63.0.dev0"
+version = "0.64.0.dev0"
 description = "Deterministic phrase-shaped compiler to MLIR/LLVM 22"
 requires-python = ">=3.11"
 dependencies = ["Pygments>=2.18"]

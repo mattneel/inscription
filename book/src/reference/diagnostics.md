@@ -52,20 +52,55 @@ error[INS-PARSE-0001]: missing period at end of sentence
 
 Diagnostics remain deterministic and color-free by default. Filesystem and external toolchain failures may stay locationless when they are not tied to an Inscription source span.
 
+## JSON diagnostics
+
+v0.64 adds `--diagnostic-format text|json` to compiler, formatter, package, build, release, and test commands. `text` is the default. `json` emits machine-readable diagnostics to stderr when a command fails; successful artifact output remains unchanged.
+
+```sh
+PYTHONPATH=src python -m inscription compile bad.ins --diagnostic-format json
+PYTHONPATH=src python -m inscription package check badpkg --diagnostic-format json
+PYTHONPATH=src python -m inscription test tests/failing.ins --diagnostic-format json
+```
+
+Ordinary failures use this deterministic schema:
+
+```json
+{
+  "ok": false,
+  "diagnostics": [
+    {
+      "severity": "error",
+      "code": "INS-SEM-0001",
+      "message": "unknown binding missing",
+      "span": {
+        "path": "bad.ins",
+        "line": 2,
+        "column": 6,
+        "end_line": 2,
+        "end_column": 13
+      },
+      "notes": []
+    }
+  ]
+}
+```
+
+`span` is `null` when no source location is available. `notes` is always present and may be empty. JSON diagnostics do not include source excerpt text, ANSI color, timestamps, hostnames, usernames, git hashes, or trailing human text. Test failures may also include `summary` and per-test entries while preserving the same flat top-level `diagnostics` list.
+
 ## Current diagnostic code catalog
 
 | Code | Title | Category | Summary |
 | ---- | ----- | -------- | ------- |
 | `INS-BUILD-0001` | Duplicate build step | BUILD | A build.ins script declares the same build step name more than once. |
-| `INS-BUILD-0002` | Unknown Build API phrase | BUILD | A build.ins script calls a Build phrase that v0.63 does not define. |
+| `INS-BUILD-0002` | Unknown Build API phrase | BUILD | A build.ins script calls a Build phrase that the current restricted API does not define. |
 | `INS-BUILD-0003` | Build step dependency cycle | BUILD | Build step groups form a dependency cycle. |
-| `INS-BUILD-0004` | Invalid build script | BUILD | A build.ins script violates the restricted v0.63 build-script shape. |
+| `INS-BUILD-0004` | Invalid build script | BUILD | A build.ins script violates the restricted build-script shape. |
 | `INS-BUILD-0005` | Build tool missing | BUILD | A build step requires an external documentation or artifact tool that was not found. |
 | `INS-COMP-0001` | Unknown diagnostic code | COMP | The requested diagnostic code is not in the local Inscription catalog. |
 | `INS-FMT-0001` | Formatting check failed | FMT | A source, package manifest, or build script is not in canonical formatter output. |
 | `INS-INT-0001` | Comptime evaluation failed | INT | A comptime expression could not be evaluated by the pure interpreter. |
 | `INS-INT-0002` | Interpreter step limit exceeded | INT | Pure interpretation exceeded the deterministic step limit. |
-| `INS-INT-0003` | Unsupported interpreter feature | INT | The v0.63 pure interpreter encountered a feature it intentionally does not execute. |
+| `INS-INT-0003` | Unsupported interpreter feature | INT | The pure interpreter encountered a feature it intentionally does not execute. |
 | `INS-OWN-0001` | Owned buffer was moved | OWN | An owned buffer is used after its ownership has been moved. |
 | `INS-OWN-0002` | Partial move across control flow | OWN | Control-flow paths leave ownership in incompatible states. |
 | `INS-OWN-0003` | Invalid move target | OWN | A move expression targets something that cannot transfer ownership. |
@@ -89,7 +124,7 @@ Diagnostics remain deterministic and color-free by default. Filesystem and exter
 | `INS-SEM-0004` | Invalid return value | SEM | A phrase returns no value or a value incompatible with its declared return type. |
 | `INS-SEM-0005` | Match is not exhaustive | SEM | A match expression or step does not cover every possible input value. |
 | `INS-SEM-0006` | Duplicate or unreachable match pattern | SEM | A match arm can never be selected because an earlier arm already covers it. |
-| `INS-SEM-0007` | Unsupported type in this context | SEM | A type appears in a language position that v0.63 does not support. |
+| `INS-SEM-0007` | Unsupported type in this context | SEM | A type appears in a language position that the current language does not support. |
 | `INS-TEST-0001` | Expect failed | TEST | A source-level test expectation evaluated to false at runtime. |
 | `INS-TOOL-0001` | Required tool not found | TOOL | A required external LLVM/MLIR or documentation tool was not found. |
 | `INS-TOOL-0002` | Tool version mismatch | TOOL | An external tool exists but does not report the required version. |
