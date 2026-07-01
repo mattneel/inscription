@@ -24,3 +24,4 @@ Recent milestones:
 - v0.43: ordinary `//` comments, `///` declaration docs, `//!` module docs, interface JSON docs, and exported C header comments.
 - v0.44: first-class `Test ... .` declarations, test-only `Expect ... .` assertions, and the `inscription test` runner.
 - v0.45: declarative `package.ins` manifests plus `inscription package check` and `inscription package test`.
+- v0.46: `inscription package build` for package-aware static libraries, executables, interface JSON, C headers, LLVM IR, and save temps.

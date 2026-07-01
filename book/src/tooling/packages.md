@@ -1,6 +1,6 @@
 # Packages
 
-Inscription v0.45 adds a declarative package manifest named `package.ins`. It is metadata, not executable build logic: think `build.zig.zon`, not `build.zig`. A future `build.ins` could be an executable build surface, but v0.45 deliberately does not add scripts, dependencies, registries, lockfiles, variables, or conditionals.
+Inscription v0.45 added a declarative package manifest named `package.ins`; v0.46 adds package-aware artifact builds from that manifest. It is metadata, not executable build logic: think `build.zig.zon`, not `build.zig`. A future `build.ins` could be an executable build surface, but these package sprints deliberately do not add scripts, dependencies, registries, lockfiles, variables, or conditionals.
 
 A package root contains `package.ins`, a source directory, and optionally a test directory:
 
@@ -68,3 +68,24 @@ Expect ProtocolTools.Checksum.identity 42 is equal to 42.
 ```
 
 If a package has no test directory or no test files, the runner prints `no tests found` and exits successfully.
+
+
+## Package builds
+
+Build package artifacts with:
+
+```sh
+PYTHONPATH=src python -m inscription package build path/to/package
+PYTHONPATH=src python -m inscription package build path/to/package --emit static-library -o build/libProtocolTools.a
+PYTHONPATH=src python -m inscription package build path/to/package --emit c-header -o build/ProtocolTools.h
+PYTHONPATH=src python -m inscription package build path/to/package --emit interface-json -o build/ProtocolTools.json
+PYTHONPATH=src python -m inscription package build path/to/package --emit executable -o build/app
+```
+
+The default package build emits a static library at `build/lib<Package>.a`, using the final segment of a dotted package name and preserving casing. `package build` validates `package.ins`, uses `Sources are in ...` as the module root, and builds the manifest `Root module`.
+
+Library-like emits (`mlir`, `lowered-mlir`, `llvm-ir`, `object`, `static-library`, `interface-json`, and `c-header`) include the root module plus every `Expose module ... .` entry, even if an exposed module is not imported by the root. Executable emits compile the root module normally and require a runnable `main`.
+
+Package interface JSON includes a top-level `package` object with manifest metadata. Package C headers include exported scalar phrases from root/exposed modules and preserve exported phrase documentation comments. `--save-temps DIR` writes deterministic package intermediates such as `ProtocolTools.mlir`, `ProtocolTools.lowered.mlir`, `ProtocolTools.ll`, and `ProtocolTools.o`.
+
+`build.ins`, dependencies, registries, lockfiles, target triples, build profiles, and arbitrary package scripts remain future work.

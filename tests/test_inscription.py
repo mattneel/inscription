@@ -5,6 +5,7 @@ import importlib.util
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -7281,6 +7282,343 @@ Give result plus seen.
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertEqual(proc.stdout, "package ProtocolTools: ok\n")
 
+    def test_v046_package_build_header_and_interface_json(self):
+        env = {**os.environ, "PYTHONPATH": str(SRC)}
+        package_root = ROOT / "tests" / "fixtures" / "packages" / "library_package"
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            header_path = tmp_path / "ProtocolTools.h"
+            header_proc = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "inscription",
+                    "package",
+                    "build",
+                    str(package_root),
+                    "--emit",
+                    "c-header",
+                    "-o",
+                    str(header_path),
+                ],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(header_proc.returncode, 0, header_proc.stderr)
+            header = header_path.read_text()
+            self.assertIn("int32_t ins_add(int32_t arg0, int32_t arg1);", header)
+            self.assertIn(" * Returns the input checksum.", header)
+            self.assertIn("int32_t ins_checksum(int32_t arg0);", header)
+
+            json_path = tmp_path / "ProtocolTools.json"
+            json_proc = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "inscription",
+                    "package",
+                    "build",
+                    str(package_root),
+                    "--emit",
+                    "interface-json",
+                    "-o",
+                    str(json_path),
+                ],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(json_proc.returncode, 0, json_proc.stderr)
+            payload = json.loads(json_path.read_text())
+            self.assertEqual(payload["package"]["name"], "ProtocolTools")
+            self.assertEqual(payload["package"]["version"], "0.1.0")
+            self.assertEqual(payload["package"]["sources"], "src")
+            self.assertEqual(payload["package"]["root_module"], "ProtocolTools")
+            self.assertEqual(payload["package"]["exposed_modules"], ["ProtocolTools", "ProtocolTools.Checksum"])
+            self.assertEqual([module["name"] for module in payload["modules"]], ["ProtocolTools", "ProtocolTools.Checksum"])
+            exports = {export["symbol"] for module in payload["modules"] for export in module["exports"]}
+            self.assertEqual(exports, {"ins_add", "ins_checksum"})
+
+    def test_v046_package_build_llvm_binary_outputs_and_save_temps(self):
+        try:
+            resolve_toolchain(require_static_library=True, require_executable=True)
+        except ToolchainError as exc:
+            self.skipTest(str(exc))
+        env = {**os.environ, "PYTHONPATH": str(SRC)}
+        packages = ROOT / "tests" / "fixtures" / "packages"
+        library_package = packages / "library_package"
+        executable_package = packages / "executable_package"
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            llvm_path = tmp_path / "ProtocolTools.ll"
+            llvm_proc = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "inscription",
+                    "package",
+                    "build",
+                    str(library_package),
+                    "--emit",
+                    "llvm-ir",
+                    "--verify",
+                    "-o",
+                    str(llvm_path),
+                ],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(llvm_proc.returncode, 0, llvm_proc.stderr)
+            llvm_text = llvm_path.read_text()
+            self.assertIn("@ins_add", llvm_text)
+            self.assertIn("@ins_checksum", llvm_text)
+
+            optimized_proc = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "inscription",
+                    "package",
+                    "build",
+                    str(library_package),
+                    "--emit",
+                    "llvm-ir",
+                    "--runtime-checks",
+                    "-O1",
+                    "-o",
+                    str(tmp_path / "ProtocolTools.optimized.ll"),
+                ],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(optimized_proc.returncode, 0, optimized_proc.stderr)
+
+            archive_path = tmp_path / "libProtocolTools.a"
+            archive_proc = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "inscription",
+                    "package",
+                    "build",
+                    str(library_package),
+                    "--emit",
+                    "static-library",
+                    "-o",
+                    str(archive_path),
+                ],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(archive_proc.returncode, 0, archive_proc.stderr)
+            self.assertGreater(archive_path.stat().st_size, 0)
+
+            copied_package = tmp_path / "copied_library"
+            shutil.copytree(library_package, copied_package)
+            default_proc = subprocess.run(
+                [sys.executable, "-m", "inscription", "package", "build", str(copied_package)],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(default_proc.returncode, 0, default_proc.stderr)
+            self.assertTrue((copied_package / "build" / "libProtocolTools.a").exists())
+
+            temps = tmp_path / "temps"
+            save_proc = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "inscription",
+                    "package",
+                    "build",
+                    str(library_package),
+                    "--emit",
+                    "static-library",
+                    "--save-temps",
+                    str(temps),
+                    "-o",
+                    str(tmp_path / "libWithTemps.a"),
+                ],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(save_proc.returncode, 0, save_proc.stderr)
+            self.assertTrue((temps / "ProtocolTools.mlir").exists())
+            self.assertTrue((temps / "ProtocolTools.lowered.mlir").exists())
+            self.assertTrue((temps / "ProtocolTools.ll").exists())
+            self.assertTrue((temps / "ProtocolTools.o").exists())
+
+            exe_path = tmp_path / "app"
+            exe_proc = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "inscription",
+                    "package",
+                    "build",
+                    str(executable_package),
+                    "--emit",
+                    "executable",
+                    "-o",
+                    str(exe_path),
+                ],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(exe_proc.returncode, 0, exe_proc.stderr)
+            run_proc = subprocess.run([str(exe_path)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False)
+            self.assertEqual(run_proc.returncode, 42, run_proc.stderr)
+
+    def test_v046_package_build_diagnostics(self):
+        env = {**os.environ, "PYTHONPATH": str(SRC)}
+        packages = ROOT / "tests" / "fixtures" / "packages"
+        library_package = packages / "library_package"
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            no_manifest = subprocess.run(
+                [sys.executable, "-m", "inscription", "package", "build", str(tmp_path)],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(no_manifest.returncode, 2)
+            self.assertIn("package manifest not found at package.ins", no_manifest.stderr)
+
+            missing_source = subprocess.run(
+                [sys.executable, "-m", "inscription", "package", "build", str(packages / "bad_missing_source")],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(missing_source.returncode, 2)
+            self.assertIn("package sources directory `src` does not exist", missing_source.stderr)
+
+            executable_missing_main = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "inscription",
+                    "package",
+                    "build",
+                    str(library_package),
+                    "--emit",
+                    "executable",
+                    "-o",
+                    str(tmp_path / "app"),
+                ],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(executable_missing_main.returncode, 2)
+            self.assertIn("program must define a no-hole main to emit an executable", executable_missing_main.stderr)
+
+            object_no_output = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "inscription",
+                    "package",
+                    "build",
+                    str(library_package),
+                    "--emit",
+                    "object",
+                ],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(object_no_output.returncode, 2)
+            self.assertIn("object emission requires -o OUTPUT", object_no_output.stderr)
+
+            bad_link = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "inscription",
+                    "package",
+                    "build",
+                    str(library_package),
+                    "--link-object",
+                    str(tmp_path / "missing.o"),
+                ],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(bad_link.returncode, 2)
+            self.assertIn("--link-object is supported only with --emit executable", bad_link.stderr)
+
+            bad_archive = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "inscription",
+                    "package",
+                    "build",
+                    str(library_package),
+                    "--emit",
+                    "executable",
+                    "-o",
+                    str(tmp_path / "app"),
+                    "--archive-object",
+                    str(tmp_path / "missing.o"),
+                ],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(bad_archive.returncode, 2)
+            self.assertIn("--archive-object is only valid with --emit static-library", bad_archive.stderr)
 
 
 class FormatterTests(unittest.TestCase):

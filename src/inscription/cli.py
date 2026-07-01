@@ -8,7 +8,7 @@ from .compiler import compile_file, load_program
 from .diagnostics import InscriptionError
 from .formatter import format_file
 from .interface import emit_c_header, emit_interface_json, load_interface_context
-from .package import check_package, list_package_tests, run_package_tests
+from .package import build_package_artifact, check_package, list_package_tests, run_package_tests
 from .mlir import emit_mlir
 from .runner import (
     EMIT_MODES,
@@ -118,6 +118,33 @@ def main(argv: list[str] | None = None) -> int:
     package_test_p.add_argument("--filter", help="run only tests whose display name contains TEXT")
     package_test_p.add_argument("--list", action="store_true", help="list discovered package tests without running them")
     _add_optimization_args(package_test_p)
+    package_build_p = package_sub.add_parser("build", help="build package artifacts")
+    package_build_p.add_argument("root", nargs="?", type=Path, default=Path("."), help="package root containing package.ins")
+    package_build_p.add_argument(
+        "--emit",
+        default="static-library",
+        help=(
+            "artifact to emit: mlir, lowered-mlir, llvm-ir, object, executable, "
+            "static-library, interface-json, or c-header (default: static-library)"
+        ),
+    )
+    package_build_p.add_argument("-o", "--output", type=Path)
+    package_build_p.add_argument("--runtime-checks", action="store_true", help="emit runtime assertions for dynamic storage bounds")
+    package_build_p.add_argument(
+        "--save-temps",
+        type=Path,
+        help="directory for saved source MLIR, optimized MLIR when enabled, lowered MLIR, LLVM IR, and object intermediates",
+    )
+    package_build_p.add_argument("--link-object", action="append", type=Path, default=[], help="additional object file to link for executable emission")
+    package_build_p.add_argument(
+        "--archive-object",
+        action="append",
+        type=Path,
+        default=[],
+        help="additional object file to include in static-library emission",
+    )
+    package_build_p.add_argument("--verify", action="store_true", help="verify emitted artifacts with the LLVM/MLIR 22 toolchain")
+    _add_optimization_args(package_build_p)
 
     format_p = sub.add_parser("format", help="format an Inscription source file")
     format_p.add_argument("source", type=Path)
@@ -290,6 +317,27 @@ def main(argv: list[str] | None = None) -> int:
                 else:
                     print(f"test result: ok. {summary.passed} passed; 0 failed.")
                 return summary.exit_status
+            if args.package_command == "build":
+                result = build_package_artifact(
+                    args.root,
+                    emit=args.emit,
+                    output=args.output,
+                    runtime_checks=args.runtime_checks,
+                    opt_level=_resolve_opt_level(args),
+                    save_temps=args.save_temps,
+                    link_objects=tuple(args.link_object),
+                    archive_objects=tuple(args.archive_object),
+                    verify=args.verify,
+                )
+                if result.data is not None:
+                    assert result.output_path is not None
+                    result.output_path.write_bytes(result.data)
+                elif result.text is not None:
+                    if result.output_path is not None:
+                        result.output_path.write_text(result.text)
+                    else:
+                        sys.stdout.write(result.text)
+                return 0
         if args.command == "format":
             if args.in_place and args.output is not None:
                 raise InscriptionError("--in-place cannot be used with -o")

@@ -4,7 +4,7 @@ import re
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
-from .compiler import load_program, module_path, validate_module_name
+from .compiler import LoadedCompilation, load_compilation, load_program, module_path, validate_module_name
 from .diagnostics import InscriptionError
 from .mlir import emit_mlir
 from .parser import (
@@ -12,7 +12,8 @@ from .parser import (
     _split_line_comment,
     _split_punctuation_sentences_no_comments,
 )
-from .runner import Toolchain, build_artifacts
+from .interface import emit_c_header, emit_interface_json, make_interface_context
+from .runner import EMIT_MODES, Toolchain, build_artifacts, selected_artifact, validate_executable_main
 from .semantic import analyze
 from .tester import TestRunItem, TestRunSummary, list_tests, run_tests, test_slug
 
@@ -69,6 +70,15 @@ class PackageTestSummary:
     @property
     def exit_status(self) -> int:
         return 0 if self.failed == 0 else 1
+
+
+@dataclass(frozen=True)
+class PackageBuildResult:
+    package_name: str
+    emit: str
+    output_path: Path | None = None
+    text: str | None = None
+    data: bytes | None = None
 
 
 def is_manifest_source(source: str) -> bool:
@@ -419,6 +429,137 @@ def _relative_for_message(path: Path, root: Path) -> str:
         return path.relative_to(root).as_posix()
     except ValueError:
         return path.name
+
+
+def package_stem(manifest: PackageManifest) -> str:
+    return manifest.package_name.split(".")[-1]
+
+
+def package_metadata(manifest: PackageManifest) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "name": manifest.package_name,
+    }
+    if manifest.version is not None:
+        payload["version"] = manifest.version
+    payload["sources"] = manifest.sources
+    if manifest.tests is not None:
+        payload["tests"] = manifest.tests
+    payload["root_module"] = manifest.root_module
+    payload["exposed_modules"] = list(manifest.exposed_modules)
+    return payload
+
+
+def package_import_modules(manifest: PackageManifest) -> tuple[str, ...]:
+    modules: list[str] = []
+    seen: set[str] = set()
+    for module in (manifest.root_module, *manifest.exposed_modules):
+        if module in seen:
+            continue
+        modules.append(module)
+        seen.add(module)
+    return tuple(modules)
+
+
+def load_package_compilation(context: PackageContext) -> LoadedCompilation:
+    imports = "".join(f"Import {module}.\n" for module in package_import_modules(context.manifest))
+    return load_compilation(imports, source_path=context.manifest_path, module_root=context.sources_dir)
+
+
+def build_package_artifact(
+    root: Path,
+    *,
+    emit: str = "static-library",
+    output: Path | None = None,
+    runtime_checks: bool = False,
+    opt_level: str = "none",
+    save_temps: Path | None = None,
+    link_objects: tuple[Path, ...] = (),
+    archive_objects: tuple[Path, ...] = (),
+    verify: bool = False,
+    toolchain: Toolchain | None = None,
+) -> PackageBuildResult:
+    if emit not in EMIT_MODES:
+        raise InscriptionError(f"invalid emit mode {emit}")
+    if emit == "object" and output is None:
+        raise InscriptionError("object emission requires -o OUTPUT")
+    if emit == "executable" and output is None:
+        raise InscriptionError("executable emission requires -o OUTPUT")
+    if link_objects and emit != "executable":
+        raise InscriptionError("--link-object is supported only with --emit executable")
+    if archive_objects and emit != "static-library":
+        raise InscriptionError("--archive-object is only valid with --emit static-library")
+    for path in link_objects:
+        if not path.exists():
+            raise InscriptionError(f"link object {path} does not exist")
+    for path in archive_objects:
+        if not path.exists():
+            raise InscriptionError(f"archive object {path} does not exist")
+
+    context = check_package(root, verify=False, toolchain=toolchain)
+    stem = package_stem(context.manifest)
+    output_path = output
+    if emit == "static-library" and output_path is None:
+        output_path = context.root / "build" / f"lib{stem}.a"
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    if emit in {"interface-json", "c-header"}:
+        compilation = load_package_compilation(context)
+        interface_context = make_interface_context(compilation, root_dir=context.sources_dir)
+        if verify:
+            mlir = emit_mlir(compilation.program, runtime_checks=runtime_checks)
+            build_artifacts(
+                mlir,
+                emit="mlir",
+                verify=True,
+                save_temps=save_temps,
+                stem=stem,
+                opt_level=opt_level,
+                toolchain=toolchain,
+            )
+        if emit == "interface-json":
+            text = emit_interface_json(
+                interface_context,
+                package_metadata=package_metadata(context.manifest),
+                include_root_module=False,
+                root_module=context.manifest.root_module,
+            )
+        else:
+            text = emit_c_header(interface_context)
+        return PackageBuildResult(context.manifest.package_name, emit, output_path, text=text)
+
+    if emit == "executable":
+        root_path = module_path(context.sources_dir, context.manifest.root_module)
+        program = load_program(root_path.read_text(), source_path=root_path, module_root=context.sources_dir)
+        validate_executable_main(program)
+        strip_main_for_static_library = False
+    else:
+        compilation = load_package_compilation(context)
+        program = compilation.program
+        strip_main_for_static_library = emit == "static-library" and any(
+            fn.implementation == "export" for fn in program.functions
+        )
+
+    mlir = emit_mlir(program, runtime_checks=runtime_checks)
+    artifacts = build_artifacts(
+        mlir,
+        emit=emit,
+        verify=verify,
+        save_temps=save_temps,
+        stem=stem,
+        opt_level=opt_level,
+        executable_output=output_path if emit == "executable" else None,
+        link_objects=link_objects,
+        static_library_output=output_path if emit == "static-library" else None,
+        archive_objects=archive_objects,
+        strip_main_for_static_library=strip_main_for_static_library,
+        toolchain=toolchain,
+    )
+    if emit in {"executable", "static-library"}:
+        return PackageBuildResult(context.manifest.package_name, emit, output_path)
+    selected = selected_artifact(artifacts, emit)
+    if isinstance(selected, bytes):
+        return PackageBuildResult(context.manifest.package_name, emit, output_path, data=selected)
+    return PackageBuildResult(context.manifest.package_name, emit, output_path, text=selected)
 
 
 def package_test_files(context: PackageContext) -> tuple[Path, ...]:

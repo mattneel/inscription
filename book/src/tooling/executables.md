@@ -8,3 +8,12 @@ PYTHONPATH=src python -m inscription compile source.ins --emit executable -o sou
 ```
 
 The root program must provide a no-hole `main` returning an integer scalar. Additional objects can be linked with repeated `--link-object PATH`.
+
+Package executables build the manifest root module:
+
+```sh
+PYTHONPATH=src python -m inscription package build path/to/package --emit executable -o app
+./app
+```
+
+The root module must define runnable `main`. Exposed modules are included only when imported by the executable root.

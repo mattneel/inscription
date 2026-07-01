@@ -59,6 +59,10 @@ class InterfaceContext:
 def load_interface_context(source_path: Path, *, module_root: Path | None = None) -> InterfaceContext:
     source_path = source_path.resolve()
     compilation = load_compilation(source_path.read_text(), source_path=source_path, module_root=module_root)
+    return make_interface_context(compilation, root_dir=compilation.module_root)
+
+
+def make_interface_context(compilation: LoadedCompilation, *, root_dir: Path | None = None) -> InterfaceContext:
     analyze(compilation.program)
     raw_functions = function_table(compilation.program)
     aliases = type_alias_table(compilation.program)
@@ -69,30 +73,48 @@ def load_interface_context(source_path: Path, *, module_root: Path | None = None
     validate_type_aliases(records)
     constants = constant_table(compilation.program, records, raw_functions)
     functions = resolve_function_table(raw_functions, records, constants)
-    return InterfaceContext(compilation, aliases, enums, unions, records, constants, functions, compilation.module_root)
+    return InterfaceContext(compilation, aliases, enums, unions, records, constants, functions, root_dir)
 
 
-def emit_interface_json(context: InterfaceContext) -> str:
+def emit_interface_json(
+    context: InterfaceContext,
+    *,
+    package_metadata: dict[str, Any] | None = None,
+    include_root_module: bool = True,
+    root_module: str | None = None,
+) -> str:
     compilation = context.compilation
     root_dir = _root_dir(context)
     payload: dict[str, Any] = {
         "format": INTERFACE_JSON_FORMAT,
-        "source": _relative_path(compilation.root_path, root_dir),
-        "module_root": "." if root_dir is not None else None,
-        "root_module": compilation.root_program.module_name,
-        "modules": [
-            _module_json(
-                name=compilation.root_program.module_name,
-                path=compilation.root_path,
-                program=compilation.root_program,
-                context=context,
-            ),
-            *(
-                _module_json(name=module.name, path=module.path, program=module.program, context=context)
-                for module in compilation.modules
-            ),
-        ],
     }
+    if package_metadata is not None:
+        payload["package"] = package_metadata
+    payload.update(
+        {
+            "source": _relative_path(compilation.root_path, root_dir),
+            "module_root": "." if root_dir is not None else None,
+            "root_module": root_module if root_module is not None else compilation.root_program.module_name,
+            "modules": [
+                *(
+                    [
+                        _module_json(
+                            name=compilation.root_program.module_name,
+                            path=compilation.root_path,
+                            program=compilation.root_program,
+                            context=context,
+                        )
+                    ]
+                    if include_root_module
+                    else []
+                ),
+                *(
+                    _module_json(name=module.name, path=module.path, program=module.program, context=context)
+                    for module in compilation.modules
+                ),
+            ],
+        }
+    )
     return json.dumps(payload, indent=2, ensure_ascii=False) + "\n"
 
 

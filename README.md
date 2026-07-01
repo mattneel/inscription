@@ -11,13 +11,13 @@ The full language guide now lives in **[The Inscription Book](book/src/title-pag
 
 ## Status
 
-This repository currently implements **Inscription v0.45: package manifests**. v0.45 adds declarative `package.ins` manifests plus `inscription package check` and `inscription package test` on top of first-class source tests, comments, documentation comments, owned buffer literal/copy initialization, pattern alternatives, integer ranges, match guards, exhaustive matches, and move-aware owned-buffer control flow. The mdBook documentation site remains the primary language guide.
+This repository currently implements **Inscription v0.46: package build artifacts**. v0.46 adds `inscription package build` for package-aware static libraries, executables, LLVM IR, interface JSON, and C headers on top of declarative `package.ins` manifests, package checks/tests, first-class source tests, comments, documentation comments, owned buffer literal/copy initialization, pattern alternatives, integer ranges, match guards, exhaustive matches, and move-aware owned-buffer control flow. The mdBook documentation site remains the primary language guide.
 
 The current language includes:
 
 - scalar integer, float, and boolean types
 - deterministic prose-punctuation syntax, `then` parent continuations, canonical formatter, ordinary comments, documentation comments, first-class tests, test-time `Expect` assertions, and declarative package manifests
-- modules, imports, and package-aware module roots
+- modules, imports, package-aware module roots, and package build artifact routing
 - constants, checks, runtime `Require`, and optional `--runtime-checks`
 - phrases, extern declarations, and scalar exported phrases
 - records, layout records, nominal enums, tagged unions, exhaustive matches, wildcard `anything` patterns, match guards, pattern alternatives, integer ranges, and ignored union payload fields
@@ -72,12 +72,14 @@ PYTHONPATH=src python -m inscription test tests/fixtures/positive/test_basic.ins
 PYTHONPATH=src python -m inscription test tests/fixtures/positive/test_basic.ins --filter addition
 ```
 
-Validate and test a package:
+Validate, test, and build a package:
 
 ```sh
 PYTHONPATH=src python -m inscription package check tests/fixtures/packages/basic_package
 PYTHONPATH=src python -m inscription package test tests/fixtures/packages/basic_package
 PYTHONPATH=src python -m inscription package test tests/fixtures/packages/basic_package --list
+PYTHONPATH=src python -m inscription package build tests/fixtures/packages/library_package --emit c-header -o ProtocolTools.h
+PYTHONPATH=src python -m inscription package build tests/fixtures/packages/library_package --emit static-library -o libProtocolTools.a
 ```
 
 Emit artifacts:
@@ -214,7 +216,7 @@ Expect add 20 and 22 is equal to 42.
 
 Run them with `inscription test SOURCE`; use `--list` to list discovered tests and `--filter TEXT` to run matching test display names.
 
-Package manifests live in `package.ins`. They are declarative metadata, not executable build scripts: v0.45 supports package metadata, source/test directory layout, a root module, and exposed module validation, but no dependencies, registry, lockfile, or `build.ins` logic.
+Package manifests live in `package.ins`. They are declarative metadata, not executable build scripts: v0.46 supports package metadata, source/test directory layout, a root module, exposed module validation, and package-aware artifact builds, but no dependencies, registry, lockfile, or `build.ins` logic.
 
 ```inscription
 //! Package manifest for ProtocolTools.
@@ -232,7 +234,7 @@ Expose module ProtocolTools.
 Expose module ProtocolTools.Protocol.
 ```
 
-Run `inscription package check` to validate the manifest and source layout. Run `inscription package test` to discover `.ins` test files under the manifest's test directory using the package source directory as the module root.
+Run `inscription package check` to validate the manifest and source layout. Run `inscription package test` to discover `.ins` test files under the manifest's test directory using the package source directory as the module root. Run `inscription package build` to emit package artifacts; the default artifact is `build/lib<Package>.a`, and `--emit c-header` / `--emit interface-json` include root plus exposed modules.
 
 ## Documentation map
 
@@ -241,8 +243,8 @@ Run `inscription package check` to validate the manifest and source layout. Run 
 - [`book/tools/check_book_examples.py`](book/tools/check_book_examples.py): deterministic book example checker
 - [`book/tools/inscription_mdbook_preprocessor.py`](book/tools/inscription_mdbook_preprocessor.py): mdBook preprocessor that reuses Inscription's own highlighter
 - [`docs/github-pages.md`](docs/github-pages.md): GitHub Pages setup notes
-- [`docs/inscription-v0.45-spec.md`](docs/inscription-v0.45-spec.md): current language sprint spec
-- [`grammar/inscription-v0.45.ebnf`](grammar/inscription-v0.45.ebnf): current grammar mirror
+- [`docs/inscription-v0.46-spec.md`](docs/inscription-v0.46-spec.md): current language sprint spec
+- [`grammar/inscription-v0.46.ebnf`](grammar/inscription-v0.46.ebnf): current grammar mirror
 
 ## Testing
 
