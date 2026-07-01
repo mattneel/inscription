@@ -48,3 +48,17 @@ PYTHONPATH=src python -m inscription compile hello.ins --emit executable -o hell
 ```
 
 The process exit code is the integer returned by `main`.
+
+## Start a package
+
+For a package skeleton with `package.ins`, `build.ins`, source, and a test:
+
+```sh
+PYTHONPATH=src python -m inscription package new hello-inscription --name HelloInscription
+PYTHONPATH=src python -m inscription package check hello-inscription
+PYTHONPATH=src python -m inscription package test hello-inscription
+PYTHONPATH=src python -m inscription build hello-inscription --list
+PYTHONPATH=src python -m inscription build hello-inscription
+```
+
+The generated `build.ins` uses `Build.standard package workflow.` so a bare build runs the default `ci` group. Add `--with-book` to generate a minimal mdBook skeleton, or `--executable` to generate a root module with `main` returning `42`.

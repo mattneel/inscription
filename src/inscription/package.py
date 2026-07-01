@@ -98,6 +98,13 @@ class PackageBuildResult:
     data: bytes | None = None
 
 
+@dataclass(frozen=True)
+class PackageInitResult:
+    root: Path
+    package_name: str
+    files: tuple[Path, ...]
+
+
 def is_manifest_source(source: str) -> bool:
     try:
         comments = collect_manifest_comments(source)
@@ -876,3 +883,205 @@ def _test_contexts(graph: PackageGraph, *, include_dependencies: bool) -> tuple[
 
 def _package_test_prefix(path: Path, context: PackageContext) -> str:
     return f"{context.manifest.package_name}::{_relative_for_message(path.resolve(), context.root.resolve())}"
+
+
+def init_package(
+    root: Path,
+    *,
+    name: str | None = None,
+    executable: bool = False,
+    library: bool = False,
+    with_book: bool = False,
+    force: bool = False,
+) -> PackageInitResult:
+    if executable and library:
+        raise InscriptionError("--library cannot be used with --executable")
+    root = root.resolve()
+    if root.exists() and not root.is_dir():
+        raise InscriptionError(f"package root {root} is not a directory")
+    package_name = _resolve_init_package_name(root, name)
+    files = _package_template_files(package_name, executable=executable, with_book=with_book)
+    target_paths = tuple(root / relative for relative, _ in files)
+    if not force:
+        for path in sorted(target_paths, key=lambda item: item.relative_to(root).as_posix()):
+            if path.exists():
+                raise InscriptionError(f"package init would overwrite {path.relative_to(root).as_posix()}; use --force to overwrite")
+    root.mkdir(parents=True, exist_ok=True)
+    written: list[Path] = []
+    for relative, content in files:
+        target = root / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content)
+        written.append(target)
+    return PackageInitResult(root, package_name, tuple(written))
+
+
+def new_package(
+    path: Path,
+    *,
+    name: str | None = None,
+    executable: bool = False,
+    library: bool = False,
+    with_book: bool = False,
+    force: bool = False,
+) -> PackageInitResult:
+    path = path.resolve()
+    if path.exists():
+        if not path.is_dir():
+            raise InscriptionError("package new target already exists and is not empty; use --force to overwrite")
+        if any(path.iterdir()) and not force:
+            raise InscriptionError("package new target already exists and is not empty; use --force to overwrite")
+    return init_package(
+        path,
+        name=name,
+        executable=executable,
+        library=library,
+        with_book=with_book,
+        force=force,
+    )
+
+
+def _resolve_init_package_name(root: Path, explicit: str | None) -> str:
+    if explicit is not None:
+        return _validate_init_package_name(explicit)
+    inferred = _infer_package_name(root.name)
+    if inferred is None:
+        raise InscriptionError("package name could not be inferred; pass --name NAME")
+    return inferred
+
+
+def _validate_init_package_name(name: str) -> str:
+    try:
+        return validate_module_name(name)
+    except InscriptionError as exc:
+        raise InscriptionError(f"invalid package name {name}") from exc
+
+
+def _infer_package_name(path_name: str) -> str | None:
+    parts = [part for part in re.split(r"[^A-Za-z0-9]+", path_name) if part]
+    if not parts:
+        return None
+    candidate = "".join(part[:1].upper() + part[1:] for part in parts)
+    try:
+        return _validate_init_package_name(candidate)
+    except InscriptionError:
+        return None
+
+
+def _package_template_files(
+    package_name: str,
+    *,
+    executable: bool,
+    with_book: bool,
+) -> tuple[tuple[Path, str], ...]:
+    source_relative = Path("src").joinpath(*package_name.split(".")).with_suffix(".ins")
+    files: list[tuple[Path, str]] = [
+        (Path(MANIFEST_NAME), _package_manifest_template(package_name)),
+        (Path("build.ins"), _build_script_template(executable=executable)),
+        (source_relative, _executable_source_template(package_name) if executable else _library_source_template(package_name)),
+        (Path("tests") / "basic.ins", _executable_test_template(package_name) if executable else _library_test_template(package_name)),
+    ]
+    if with_book:
+        files.extend(_book_template_files(package_name))
+    return tuple(files)
+
+
+def _package_manifest_template(package_name: str) -> str:
+    return (
+        f"//! Package manifest for {package_name}.\n\n"
+        f"Package {package_name}.\n\n"
+        'Version "0.1.0".\n\n'
+        'Sources are in "src".\n'
+        'Tests are in "tests".\n\n'
+        f"Root module is {package_name}.\n\n"
+        f"Expose module {package_name}.\n"
+    )
+
+
+def _build_script_template(*, executable: bool) -> str:
+    if not executable:
+        return (
+            "Import Build.\n\n"
+            "To build package package: Build.Package.\n"
+            "Build.standard package workflow.\n"
+        )
+    return (
+        "Import Build.\n\n"
+        "To build package package: Build.Package.\n"
+        "Build.standard package workflow.\n"
+        "// Add this when you want an executable artifact:\n"
+        "// Build.executable for package.\n"
+    )
+
+
+def _library_source_template(package_name: str) -> str:
+    return (
+        f"Module {package_name}.\n\n"
+        "/// Adds two numbers.\n"
+        "To add left: i32 and right: i32, giving i32, exported as ins_add.\n"
+        "Give left plus right.\n"
+    )
+
+
+def _library_test_template(package_name: str) -> str:
+    return (
+        f"Import {package_name}.\n\n"
+        "Test addition works.\n"
+        f"Expect {package_name}.add 20 and 22 is equal to 42.\n"
+    )
+
+
+def _executable_source_template(package_name: str) -> str:
+    return (
+        f"Module {package_name}.\n\n"
+        "To main, giving i32.\n"
+        "Give 42.\n"
+    )
+
+
+def _executable_test_template(package_name: str) -> str:
+    return (
+        f"Import {package_name}.\n\n"
+        "Test main value is stable.\n"
+        f"Expect {package_name}.main is equal to 42.\n"
+    )
+
+
+def _book_template_files(package_name: str) -> tuple[tuple[Path, str], ...]:
+    return (
+        (
+            Path("book") / "book.toml",
+            (
+                "[book]\n"
+                f'title = "{package_name}"\n'
+                f'authors = ["{package_name} contributors"]\n'
+                'language = "en"\n'
+                'src = "src"\n\n'
+                "[output.html]\n"
+                'default-theme = "ayu"\n'
+                'preferred-dark-theme = "ayu"\n'
+            ),
+        ),
+        (
+            Path("book") / "src" / "SUMMARY.md",
+            "# Summary\n\n[Introduction](introduction.md)\n",
+        ),
+        (
+            Path("book") / "src" / "introduction.md",
+            (
+                f"# {package_name}\n\n"
+                f"This is the documentation for {package_name}.\n\n"
+                "```inscription,check\n"
+                "To main, giving i32.\n"
+                "Give 7.\n"
+                "```\n"
+            ),
+        ),
+        (
+            Path("book") / "tools" / "check_book_examples.py",
+            (
+                "from __future__ import annotations\n\n"
+                'print("checked generated package book examples")\n'
+            ),
+        ),
+    )

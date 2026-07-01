@@ -1,6 +1,6 @@
 # Build Scripts
 
-Inscription v0.50 added an optional package build script named `build.ins`; v0.51 added package check and test steps; v0.52 added build step groups and a default step; v0.53 added dedicated mdBook documentation steps; v0.54 added package-aware defaults for common artifact and documentation steps; v0.55 adds the standard package workflow shortcut.
+Inscription v0.50 added an optional package build script named `build.ins`; v0.51 added package check and test steps; v0.52 added build step groups and a default step; v0.53 added dedicated mdBook documentation steps; v0.54 added package-aware defaults for common artifact and documentation steps; v0.55 added the standard package workflow shortcut; v0.56 adds package skeleton generators that emit that workflow by default.
 
 `package.ins` stays declarative package metadata, similar to `build.zig.zon`. `build.ins` is interpreted build logic, similar to a deliberately narrow first version of `build.zig`.
 
@@ -21,7 +21,7 @@ The required build phrase is a does phrase:
 To build package package: Build.Package.
 ```
 
-The `Build.Package` value is opaque in v0.55. It is passed by the build driver, but scripts cannot inspect package fields. Package-aware and standard workflow steps use only package metadata already known to the driver.
+The `Build.Package` value is opaque in v0.56. It is passed by the build driver, but scripts cannot inspect package fields. Package-aware and standard workflow steps use only package metadata already known to the driver.
 
 ## Standard workflow
 
@@ -57,13 +57,13 @@ Build.group named "release" with steps "ci" and "library" and "header" and "inte
 Build.default step is "ci".
 ```
 
-The standard workflow intentionally does not include an executable step in v0.55. Add `Build.executable for package.` explicitly when a package needs one.
+The standard workflow intentionally does not include an executable step in v0.56. Add `Build.executable for package.` explicitly when a package needs one.
 
 Duplicate rules are unchanged. Because the standard workflow expands to ordinary steps, adding `Build.tests named "tests".` or another `ci` group after it is rejected as a duplicate.
 
 ## Build API
 
-The v0.55 Build API records standard workflows, named validation/test steps, package-aware artifact/documentation steps, aggregate groups, a default step, and older named artifact/documentation forms:
+The v0.56 Build API records standard workflows, named validation/test steps, package-aware artifact/documentation steps, aggregate groups, a default step, and older named artifact/documentation forms:
 
 ```inscription,no-check
 Build.standard package workflow.
@@ -138,4 +138,4 @@ Book steps require `mdbook`; checked book steps also require `book/tools/check_b
 
 ## Boundaries
 
-v0.55 build scripts are intentionally narrow. They cannot import package source modules, inspect arbitrary package metadata, call externs, spawn processes, read arbitrary files, use the network, generate source, choose custom output paths, deploy docs, choose alternate documentation generators, or define general build graphs. `package.ins` remains parse-only, and dependency resolution is unchanged.
+v0.56 build scripts are intentionally narrow. They cannot import package source modules, inspect arbitrary package metadata, call externs, spawn processes, read arbitrary files, use the network, generate source, choose custom output paths, deploy docs, choose alternate documentation generators, or define general build graphs. `package.ins` remains parse-only, and dependency resolution is unchanged.

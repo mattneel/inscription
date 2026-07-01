@@ -9192,6 +9192,146 @@ Give result plus seen.
             self.assertTrue((package / "build" / "StandardNoBook.h").exists())
             self.assertTrue((package / "build" / "StandardNoBook.json").exists())
 
+    def test_v056_package_init_and_new_library_templates(self):
+        env = {**os.environ, "PYTHONPATH": str(SRC)}
+
+        def run_cli(*args: str | Path) -> subprocess.CompletedProcess[str]:
+            return subprocess.run(
+                [sys.executable, "-m", "inscription", *(str(arg) for arg in args)],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            package = tmp_path / "pkg"
+            init_proc = run_cli("package", "init", package, "--name", "HelloPkg")
+            self.assertEqual(init_proc.returncode, 0, init_proc.stderr)
+            self.assertEqual(init_proc.stdout, "package HelloPkg: initialized\n")
+            expected_files = [
+                package / "package.ins",
+                package / "build.ins",
+                package / "src" / "HelloPkg.ins",
+                package / "tests" / "basic.ins",
+            ]
+            for path in expected_files:
+                self.assertTrue(path.exists(), path)
+                check_proc = run_cli("format", path, "--check")
+                self.assertEqual(check_proc.returncode, 0, check_proc.stderr)
+
+            self.assertIn("Package HelloPkg.", (package / "package.ins").read_text())
+            self.assertIn("Build.standard package workflow.", (package / "build.ins").read_text())
+            self.assertIn("exported as ins_add", (package / "src" / "HelloPkg.ins").read_text())
+
+            check_proc = run_cli("package", "check", package)
+            self.assertEqual(check_proc.returncode, 0, check_proc.stderr)
+            test_proc = run_cli("package", "test", package)
+            self.assertEqual(test_proc.returncode, 0, test_proc.stderr)
+            self.assertIn("test result: ok. 1 passed; 0 failed.", test_proc.stdout)
+            list_proc = run_cli("build", package, "--list")
+            self.assertEqual(list_proc.returncode, 0, list_proc.stderr)
+            self.assertIn("build step ci: group -> check, tests\n", list_proc.stdout)
+            build_proc = run_cli("build", package)
+            self.assertEqual(build_proc.returncode, 0, build_proc.stderr)
+
+            new_package = tmp_path / "new-library"
+            new_proc = run_cli("package", "new", new_package, "--name", "NewLibrary")
+            self.assertEqual(new_proc.returncode, 0, new_proc.stderr)
+            self.assertEqual(new_proc.stdout, "package NewLibrary: created\n")
+            self.assertTrue((new_package / "src" / "NewLibrary.ins").exists())
+            new_check_proc = run_cli("package", "check", new_package)
+            self.assertEqual(new_check_proc.returncode, 0, new_check_proc.stderr)
+
+    def test_v056_package_new_executable_book_and_diagnostics(self):
+        env = {**os.environ, "PYTHONPATH": str(SRC)}
+
+        def run_cli(*args: str | Path) -> subprocess.CompletedProcess[str]:
+            return subprocess.run(
+                [sys.executable, "-m", "inscription", *(str(arg) for arg in args)],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            app = tmp_path / "hello-app"
+            app_proc = run_cli("package", "new", app, "--name", "HelloApp", "--executable")
+            self.assertEqual(app_proc.returncode, 0, app_proc.stderr)
+            self.assertTrue((app / "src" / "HelloApp.ins").exists())
+            self.assertIn("// Build.executable for package.", (app / "build.ins").read_text())
+            check_proc = run_cli("package", "check", app)
+            self.assertEqual(check_proc.returncode, 0, check_proc.stderr)
+            test_proc = run_cli("package", "test", app)
+            self.assertEqual(test_proc.returncode, 0, test_proc.stderr)
+            run_proc = run_cli("run", app / "src" / "HelloApp.ins")
+            self.assertEqual(run_proc.returncode, 42, run_proc.stderr)
+
+            inferred = tmp_path / "protocol-tools"
+            inferred_proc = run_cli("package", "new", inferred)
+            self.assertEqual(inferred_proc.returncode, 0, inferred_proc.stderr)
+            self.assertIn("Package ProtocolTools.", (inferred / "package.ins").read_text())
+            self.assertTrue((inferred / "src" / "ProtocolTools.ins").exists())
+
+            docs = tmp_path / "docs"
+            docs_proc = run_cli("package", "new", docs, "--name", "DocsPkg", "--with-book")
+            self.assertEqual(docs_proc.returncode, 0, docs_proc.stderr)
+            self.assertTrue((docs / "book" / "book.toml").exists())
+            self.assertTrue((docs / "book" / "tools" / "check_book_examples.py").exists())
+            docs_list_proc = run_cli("build", docs, "--list")
+            self.assertEqual(docs_list_proc.returncode, 0, docs_list_proc.stderr)
+            self.assertIn("build step book-check: book checked\n", docs_list_proc.stdout)
+            if shutil.which("mdbook") is not None:
+                book_proc = subprocess.run(
+                    ["mdbook", "build", str(docs / "book")],
+                    cwd=ROOT,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    check=False,
+                )
+                self.assertEqual(book_proc.returncode, 0, book_proc.stderr)
+                default_proc = run_cli("build", docs)
+                self.assertEqual(default_proc.returncode, 0, default_proc.stderr)
+                self.assertTrue((docs / "build" / "book-check" / "index.html").exists())
+
+            conflict = tmp_path / "conflict"
+            conflict.mkdir()
+            (conflict / "package.ins").write_text("old\n")
+            conflict_proc = run_cli("package", "init", conflict, "--name", "Conflict")
+            self.assertEqual(conflict_proc.returncode, 2)
+            self.assertIn("package init would overwrite package.ins; use --force to overwrite", conflict_proc.stderr)
+            force_proc = run_cli("package", "init", conflict, "--name", "Conflict", "--force")
+            self.assertEqual(force_proc.returncode, 0, force_proc.stderr)
+            self.assertIn("Package Conflict.", (conflict / "package.ins").read_text())
+
+            invalid_proc = run_cli("package", "new", tmp_path / "invalid", "--name", "123Bad")
+            self.assertEqual(invalid_proc.returncode, 2)
+            self.assertIn("invalid package name 123Bad", invalid_proc.stderr)
+
+            unknown_name = tmp_path / "123-bad"
+            infer_fail_proc = run_cli("package", "new", unknown_name)
+            self.assertEqual(infer_fail_proc.returncode, 2)
+            self.assertIn("package name could not be inferred; pass --name NAME", infer_fail_proc.stderr)
+
+            nonempty = tmp_path / "nonempty"
+            nonempty.mkdir()
+            (nonempty / "existing.txt").write_text("keep\n")
+            nonempty_proc = run_cli("package", "new", nonempty, "--name", "Nonempty")
+            self.assertEqual(nonempty_proc.returncode, 2)
+            self.assertIn("package new target already exists and is not empty; use --force to overwrite", nonempty_proc.stderr)
+
+            exclusive_proc = run_cli("package", "new", tmp_path / "both", "--name", "Both", "--library", "--executable")
+            self.assertEqual(exclusive_proc.returncode, 2)
+            self.assertIn("--library cannot be used with --executable", exclusive_proc.stderr)
+
 
 class FormatterTests(unittest.TestCase):
     def cli(self, *args: str, cwd: Path | None = None) -> subprocess.CompletedProcess[str]:

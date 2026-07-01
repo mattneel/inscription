@@ -6,6 +6,8 @@ Common commands:
 PYTHONPATH=src python -m inscription compile SOURCE --verify
 PYTHONPATH=src python -m inscription run SOURCE
 PYTHONPATH=src python -m inscription test SOURCE
+PYTHONPATH=src python -m inscription package new PATH --name PackageName
+PYTHONPATH=src python -m inscription package init PACKAGE_ROOT --name PackageName
 PYTHONPATH=src python -m inscription package check PACKAGE_ROOT
 PYTHONPATH=src python -m inscription package test PACKAGE_ROOT
 PYTHONPATH=src python -m inscription package build PACKAGE_ROOT
@@ -15,7 +17,7 @@ PYTHONPATH=src python -m inscription highlight SOURCE
 PYTHONPATH=src python -m inscription check-tools --show-pipeline
 ```
 
-`compile` emits artifacts without executing the program. `run` lowers through LLVM 22 and executes `main` with `lli`. `test` discovers top-level `Test ... .` declarations, compiles each selected test through the MLIR/LLVM pipeline, and reports a deterministic summary. `package check` validates `package.ins` manifests, dependency graphs, and package source layout. `package test` discovers test files from the manifest test directory and runs them with the package source directory plus direct dependency exposed modules as import roots. `package build` emits package-aware artifacts through the existing compile pipeline. `build` interprets `build.ins` and dispatches named check, test, artifact, documentation, and group steps through the package machinery. `format` is parse-only and does not need LLVM tools. `highlight` uses the same Inscription lexer used by this book.
+`compile` emits artifacts without executing the program. `run` lowers through LLVM 22 and executes `main` with `lli`. `test` discovers top-level `Test ... .` declarations, compiles each selected test through the MLIR/LLVM pipeline, and reports a deterministic summary. `package new` and `package init` generate formatter-clean package skeletons. `package check` validates `package.ins` manifests, dependency graphs, and package source layout. `package test` discovers test files from the manifest test directory and runs them with the package source directory plus direct dependency exposed modules as import roots. `package build` emits package-aware artifacts through the existing compile pipeline. `build` interprets `build.ins` and dispatches named check, test, artifact, documentation, and group steps through the package machinery. `format` is parse-only and does not need LLVM tools. `highlight` uses the same Inscription lexer used by this book.
 
 Useful test options:
 
@@ -32,6 +34,10 @@ PYTHONPATH=src python -m inscription test SOURCE --save-temps /tmp/inscription-t
 Useful package commands:
 
 ```sh
+PYTHONPATH=src python -m inscription package new hello --name Hello
+PYTHONPATH=src python -m inscription package new docs-pkg --name DocsPkg --with-book
+PYTHONPATH=src python -m inscription package init . --name ExistingPkg
+PYTHONPATH=src python -m inscription package new app --name App --executable
 PYTHONPATH=src python -m inscription package check .
 PYTHONPATH=src python -m inscription package check . --verify
 PYTHONPATH=src python -m inscription package test .
@@ -43,6 +49,8 @@ PYTHONPATH=src python -m inscription package build . --emit c-header -o build/pa
 PYTHONPATH=src python -m inscription package build . --emit interface-json -o build/package.json
 PYTHONPATH=src python -m inscription package build . --emit executable -o build/app
 ```
+
+`package init` initializes an existing directory, creating it if needed. `package new` creates and initializes a package directory. Both commands default to a library template, accept `--executable`, can add a minimal mdBook with `--with-book`, and protect existing generated files unless `--force` is supplied.
 
 `package check` exits 0 on a valid manifest/layout/dependency graph and exits 2 for manifest, package, compiler, or tool diagnostics. `package test` exits 0 when all selected tests pass, exits 1 for runtime test failures, and exits 2 for package/compiler/tool diagnostics. `package build` exits 0 on success and exits 2 for package/compiler/tool diagnostics; its default output is `build/lib<Package>.a`.
 

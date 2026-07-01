@@ -10,7 +10,7 @@ from .compiler import compile_file, load_program
 from .diagnostics import InscriptionError
 from .formatter import format_file
 from .interface import emit_c_header, emit_interface_json, load_interface_context
-from .package import build_package_artifact, check_package, list_package_tests, run_package_tests
+from .package import build_package_artifact, check_package, init_package, list_package_tests, new_package, run_package_tests
 from .mlir import emit_mlir
 from .runner import (
     EMIT_MODES,
@@ -131,6 +131,20 @@ def main(argv: list[str] | None = None) -> int:
 
     package_p = sub.add_parser("package", help="work with package.ins manifests")
     package_sub = package_p.add_subparsers(dest="package_command", required=True)
+    package_init_p = package_sub.add_parser("init", help="initialize a package skeleton in an existing directory")
+    package_init_p.add_argument("root", nargs="?", type=Path, default=Path("."), help="package root to initialize")
+    package_init_p.add_argument("--name", help="package/module name; defaults to an inferred name from ROOT")
+    package_init_p.add_argument("--executable", action="store_true", help="generate an executable-oriented package source")
+    package_init_p.add_argument("--library", action="store_true", help="generate the default library-oriented package source")
+    package_init_p.add_argument("--with-book", action="store_true", help="also generate a minimal mdBook skeleton")
+    package_init_p.add_argument("--force", action="store_true", help="overwrite generated skeleton files if they already exist")
+    package_new_p = package_sub.add_parser("new", help="create a new package directory and initialize it")
+    package_new_p.add_argument("path", type=Path, help="new package directory")
+    package_new_p.add_argument("--name", help="package/module name; defaults to an inferred name from PATH")
+    package_new_p.add_argument("--executable", action="store_true", help="generate an executable-oriented package source")
+    package_new_p.add_argument("--library", action="store_true", help="generate the default library-oriented package source")
+    package_new_p.add_argument("--with-book", action="store_true", help="also generate a minimal mdBook skeleton")
+    package_new_p.add_argument("--force", action="store_true", help="allow an existing nonempty target and overwrite generated skeleton files")
     package_check_p = package_sub.add_parser("check", help="validate a package manifest and source layout")
     package_check_p.add_argument("root", nargs="?", type=Path, default=Path("."), help="package root containing package.ins")
     package_check_p.add_argument("--verify", action="store_true", help="also verify package source MLIR with LLVM/MLIR tools")
@@ -321,6 +335,28 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"test result: ok. {summary.passed} passed; 0 failed.")
             return summary.exit_status
         if args.command == "package":
+            if args.package_command == "init":
+                result = init_package(
+                    args.root,
+                    name=args.name,
+                    executable=args.executable,
+                    library=args.library,
+                    with_book=args.with_book,
+                    force=args.force,
+                )
+                print(f"package {result.package_name}: initialized")
+                return 0
+            if args.package_command == "new":
+                result = new_package(
+                    args.path,
+                    name=args.name,
+                    executable=args.executable,
+                    library=args.library,
+                    with_book=args.with_book,
+                    force=args.force,
+                )
+                print(f"package {result.package_name}: created")
+                return 0
             if args.package_command == "check":
                 context = check_package(args.root, verify=args.verify)
                 print(f"package {context.manifest.package_name}: ok")

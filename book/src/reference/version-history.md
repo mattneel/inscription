@@ -34,3 +34,4 @@ Recent milestones:
 - v0.53: build script mdBook documentation steps with optional package-local example checking.
 - v0.54: package-aware `build.ins` defaults for artifact and documentation steps.
 - v0.55: standard `Build.standard package workflow.` shortcuts for conventional package CI/release workflows.
+- v0.56: package `init`/`new` commands that generate formatter-clean package, build, source, test, and optional book skeletons.
