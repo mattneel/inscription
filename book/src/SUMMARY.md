@@ -61,4 +61,5 @@
 
 - [Grammar](reference/grammar.md)
 - [Diagnostics](reference/diagnostics.md)
+- [Internal Interpreter](reference/interpreter.md)
 - [Version History](reference/version-history.md)

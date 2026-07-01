@@ -16,9 +16,10 @@ ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
 sys.path.insert(0, str(SRC))
 
-from inscription.compiler import compile_file as _compile_file, compile_source as _compile_source
+from inscription.compiler import compile_file as _compile_file, compile_source as _compile_source, load_program
 from inscription.diagnostics import InscriptionError
 from inscription.formatter import format_source
+from inscription.interpreter import FloatValue, IntValue, Interpreter, InterpreterError
 from inscription.package import format_manifest_source, parse_manifest
 from inscription.parser import normalize_punctuation_source
 from inscription.runner import LOWERING_PASSES, OPTIMIZATION_PRESETS, ToolchainError, resolve_toolchain, run_file as _run_file, run_source as _run_source, verify_mlir
@@ -8283,6 +8284,143 @@ class BookDocumentationTests(unittest.TestCase):
         self.assertNotIn("refs/heads/main", workflow)
         self.assertIn("pages: write", workflow)
         self.assertNotIn("\t", workflow)
+
+
+class InterpreterTests(unittest.TestCase):
+    def _interpreter(self, source: str, *, step_limit: int = 100_000) -> Interpreter:
+        return Interpreter(load_program(maybe_convert_source(source)), step_limit=step_limit)
+
+    def test_v048_interpreter_scalar_arithmetic(self):
+        interp = self._interpreter(
+            """
+            To add left: i32 and right: i32, giving i32.
+            Give left plus right.
+            """
+        )
+        value = interp.call_phrase("add", [20, 22])
+        self.assertEqual(value, IntValue("i32", 42))
+
+    def test_v048_interpreter_factorial_loop(self):
+        interp = self._interpreter(
+            """
+            To factorial n: i32, giving i32.
+            Let result be 1.
+            Let current be 1.
+            While current is less than or equal to n: result becomes result times current; current becomes current plus 1.
+            Give result.
+            """
+        )
+        self.assertEqual(interp.call_phrase("factorial", [5]), IntValue("i32", 120))
+
+    def test_v048_interpreter_enum_match(self):
+        interp = self._interpreter(
+            """
+            Enum Mode backed by u8 has idle be 0; active be 1; failed be 2.
+
+            To code for mode mode: Mode, giving i32.
+            Give match mode:
+            Mode.idle or Mode.failed gives 0;
+            Mode.active gives 7.
+            """
+        )
+        self.assertEqual(interp.call_phrase("code_for_mode", [interp.enum_value("Mode", "active")]), IntValue("i32", 7))
+
+    def test_v048_interpreter_union_match_with_guard(self):
+        interp = self._interpreter(
+            """
+            Union MaybeI32 has none; some value: i32.
+
+            To positive or zero maybe: MaybeI32, giving i32.
+            Give match maybe:
+            MaybeI32.some with value when value is greater than zero gives value;
+            anything gives 0.
+            """
+        )
+        self.assertEqual(interp.call_phrase("positive_or_zero", [interp.union_value("MaybeI32", "some", {"value": 7})]), IntValue("i32", 7))
+        self.assertEqual(interp.call_phrase("positive_or_zero", [interp.union_value("MaybeI32", "some", {"value": -3})]), IntValue("i32", 0))
+        self.assertEqual(interp.call_phrase("positive_or_zero", [interp.union_value("MaybeI32", "none")]), IntValue("i32", 0))
+
+    def test_v048_interpreter_record_field_access(self):
+        interp = self._interpreter(
+            """
+            Record Point has x: i32; y: i32.
+
+            To score point point: Point, giving i32.
+            Give point.x plus point.y.
+            """
+        )
+        point = interp.record_value("Point", {"x": 3, "y": 4})
+        self.assertEqual(interp.call_phrase("score_point", [point]), IntValue("i32", 7))
+
+    def test_v048_interpreter_float_arithmetic_and_cast(self):
+        average = self._interpreter(
+            """
+            To average left: f64 and right: f64, giving f64.
+            Give (left plus right) divided by 2.0.
+            """
+        )
+        self.assertEqual(average.call_phrase("average", [2.0, 4.0]), FloatValue("f64", 3.0))
+        cast_demo = self._interpreter(
+            """
+            To cast demo value: i32, giving f64.
+            Give value as f64.
+            """
+        )
+        self.assertEqual(cast_demo.call_phrase("cast_demo", [42]), FloatValue("f64", 42.0))
+
+    def test_v048_interpreter_step_limit(self):
+        interp = self._interpreter(
+            """
+            To infinite, giving i32.
+            Let x be 0.
+            While true: x becomes x plus 1.
+            Give x.
+            """,
+            step_limit=10,
+        )
+        with self.assertRaisesRegex(InterpreterError, "interpreter step limit exceeded"):
+            interp.call_phrase("infinite")
+
+    def test_v048_interpreter_unsupported_storage_and_extern_diagnostics(self):
+        arrays = self._interpreter(
+            """
+            To bad, giving i32.
+            Let cells be array of 4 i32 containing 1, 2, 3, 4.
+            Give cells at 0.
+            """
+        )
+        with self.assertRaisesRegex(InterpreterError, "interpreter does not support arrays in v0.48"):
+            arrays.call_phrase("bad")
+
+        externs = self._interpreter(
+            """
+            External host value, giving i32, as host_value.
+
+            To bad, giving i32.
+            Give host value.
+            """
+        )
+        with self.assertRaisesRegex(InterpreterError, "interpreter does not support extern phrase calls in v0.48"):
+            externs.call_phrase("bad")
+
+    def test_v048_interpreter_cross_checks_compiled_results(self):
+        factorial_source = """
+            To factorial n: i32, giving i32.
+            Let result be 1.
+            Let current be 1.
+            While current is less than or equal to n: result becomes result times current; current becomes current plus 1.
+            Give result.
+
+            To main, giving i32.
+            Give factorial 5.
+            """
+        interp = self._interpreter(factorial_source)
+        self.assertEqual(interp.call_phrase("factorial", [5]), IntValue("i32", 120))
+        try:
+            result = run_source(factorial_source)
+        except ToolchainError as exc:
+            self.skipTest(str(exc))
+        self.assertEqual(result.exit_status, 120)
 
 
 if __name__ == "__main__":
