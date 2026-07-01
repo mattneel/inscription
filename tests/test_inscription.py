@@ -2223,6 +2223,7 @@ class CompilerTests(unittest.TestCase):
                 "To highlight move cells: owned buffer of i32, giving i32.\nGive length of cells.\n\nTo highlight move main, giving i32.\nLet cells be owned buffer of 1 i32 filled with 0.\nGive highlight move move cells.\n",
                 "To highlight then, giving i32.\nFor i from 0 up to 1: For j from 0 up to 1: i becomes i; then i becomes i.\nGive 0.\n",
                 "To highlight anything flag: i1, giving i32.\nGive match flag:\ntrue gives 1;\nanything gives 0.\n",
+                "Union HighlightGuard has none; some value: i32 and marker: i32.\n\nTo highlight guard maybe: HighlightGuard, giving i32.\nGive match maybe:\nHighlightGuard.some with value ignored and marker as mark when mark is greater than zero gives mark;\nanything gives 0.\n",
             ]
         )
         html = highlight_source(source, output_format="html")
@@ -4587,6 +4588,174 @@ Give result plus seen.
             "Mode.active gives 1.\n",
             "anything must be the final match arm",
         )
+
+    def test_v040_match_guards_and_ignored_payloads(self):
+        guarded = compile_source(self.fixture("match_guard_union_positive.ins"))
+        self.assertIn("func.func @positive_or_zero", guarded)
+        self.assertIn("scf.if", guarded)
+
+        negative_value = compile_source(self.fixture("match_guard_union_negative.ins"))
+        self.assertIn("func.func @positive_or_zero", negative_value)
+
+        ignored = compile_source(self.fixture("match_payload_ignored.ins"))
+        self.assertIn("func.func @precedence_token", ignored)
+
+        ignored_guard = compile_source(self.fixture("match_guard_ignored_payload.ins"))
+        self.assertIn("func.func @high_precedence_token", ignored_guard)
+
+        step_move = compile_source(self.fixture("match_guard_step_move.ins"))
+        self.assertIn("func.func @guarded_move", step_move)
+        self.assertIn("func.call @consume_cells", step_move)
+        step_body = step_move.split("func.func @guarded_move", 1)[1].split("func.func @main", 1)[0]
+        self.assertNotIn("memref.dealloc", step_body)
+
+        compile_time = compile_source(self.fixture("match_guard_compile_time.ins"))
+        self.assertIn("arith.constant 42 : i32", compile_time)
+
+        enum_guard = compile_source(self.fixture("match_guard_enum.ins"))
+        self.assertIn("func.func @guarded_mode", enum_guard)
+
+        self.assertCompileError(
+            "Union MaybeI32 has none; some value: i32.\n\n"
+            "To bad maybe: MaybeI32, giving i32.\n"
+            "Give match maybe:\n"
+            "MaybeI32.some with value when value gives value;\n"
+            "anything gives 0.\n",
+            "match guard must have type i1, got i32",
+        )
+        self.assertCompileError(
+            "Enum Mode backed by u8 has idle be 0; active be 1.\n\n"
+            "To bad mode: Mode, giving i32.\n"
+            "Give match mode:\n"
+            "Mode.idle gives 0;\n"
+            "Mode.active when true gives 7.\n",
+            "match over Mode is missing case Mode.active",
+        )
+        self.assertCompileError(
+            "Union MaybeI32 has none; some value: i32.\n\n"
+            "To bad maybe: MaybeI32, giving i32.\n"
+            "Give match maybe:\n"
+            "MaybeI32.some with value gives value;\n"
+            "MaybeI32.some with value when value is greater than zero gives value;\n"
+            "MaybeI32.none gives 0.\n",
+            "match pattern MaybeI32.some is unreachable because an earlier unguarded arm already matches it",
+        )
+        self.assertCompileError(
+            "Union MaybeI32 has none; some value: i32.\n\n"
+            "To bad maybe: MaybeI32, giving i32.\n"
+            "Give match maybe:\n"
+            "MaybeI32.some with value gives value;\n"
+            "MaybeI32.some with value gives 0;\n"
+            "MaybeI32.none gives 0.\n",
+            "match has duplicate pattern MaybeI32.some",
+        )
+        self.assertCompileError(
+            "To bad x: i32, giving i32.\n"
+            "Give match x:\n"
+            "0 gives 1;\n"
+            "otherwise when true gives 2.\n",
+            "otherwise cannot have a match guard",
+        )
+        self.assertCompileError(
+            "To bad x: i32, giving i32.\n"
+            "Give match x:\n"
+            "0 gives 1;\n"
+            "anything when true gives 2.\n",
+            "anything cannot have a match guard",
+        )
+        self.assertCompileError(
+            "Union Token has eof; operator symbol: u8 and precedence: u8.\n\n"
+            "To bad token: Token, giving i32.\n"
+            "Give match token:\n"
+            "Token.operator with symbol ignored and precedence as prec gives symbol as i32;\n"
+            "anything gives 0.\n",
+            "unknown binding symbol",
+        )
+        self.assertCompileError(
+            "To bad, giving i32.\n"
+            "Give ignored.\n",
+            "ignored may only be used in union payload patterns",
+        )
+        self.assertCompileError(
+            "Union Token has eof; operator symbol: u8 and precedence: u8.\n\n"
+            "To bad token: Token, giving i32.\n"
+            "Give match token:\n"
+            "Token.operator with symbol as ignored and precedence gives precedence as i32;\n"
+            "anything gives 0.\n",
+            "ignored is reserved in union payload patterns",
+        )
+        self.assertCompileError(
+            "Union MaybeI32 has none; some value: i32.\n\n"
+            "To consume cells cells: owned buffer of i32, giving i32.\n"
+            "Give length of cells.\n\n"
+            "To bad maybe: MaybeI32, giving i32.\n"
+            "Let cells be owned buffer of 4 i32 filled with 1.\n"
+            "Let result be 0.\n"
+            "Match maybe:\n"
+            "MaybeI32.some with value when value is greater than zero: result becomes consume cells move cells;\n"
+            "MaybeI32.some with value: result becomes 0;\n"
+            "MaybeI32.none: result becomes consume cells move cells.\n"
+            "Give result.\n",
+            "owned buffer cells is moved in some match arms but not all",
+        )
+
+    def test_v040_match_guard_artifacts(self):
+        try:
+            resolve_toolchain()
+        except ToolchainError:
+            return
+
+        env = {**os.environ, "PYTHONPATH": str(SRC)}
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            llvm_ir = tmp_path / "match_guard_union_positive.ll"
+            llvm_proc = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "inscription",
+                    "compile",
+                    str(FIXTURES / "match_guard_union_positive.ins"),
+                    "--emit",
+                    "llvm-ir",
+                    "--verify",
+                    "-o",
+                    str(llvm_ir),
+                ],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(llvm_proc.returncode, 0, llvm_proc.stderr)
+            self.assertIn("define i32 @main", llvm_ir.read_text())
+
+            exe = tmp_path / "match_guard_union_positive"
+            exe_proc = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "inscription",
+                    "compile",
+                    str(FIXTURES / "match_guard_union_positive.ins"),
+                    "--emit",
+                    "executable",
+                    "-o",
+                    str(exe),
+                ],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(exe_proc.returncode, 0, exe_proc.stderr)
+            run_proc = subprocess.run([str(exe)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False)
+            self.assertEqual(run_proc.returncode, 7, run_proc.stderr)
+            self.assertEqual(run_proc.stdout, "")
 
     def test_v039_exhaustive_match_artifacts(self):
         try:

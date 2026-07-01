@@ -1330,7 +1330,7 @@ class MlirEmitter:
         if not arms:
             assert otherwise is not None
             return self.emit_record_expr(otherwise, env, lines, indent, expected=record_type)
-        if otherwise is None and len(arms) == 1:
+        if otherwise is None and len(arms) == 1 and arms[0].guard is None:
             arm = arms[0]
             arm_env = self.env_with_union_pattern_payload(arm.pattern, scrutinee_type, scrutinee, dict(env))
             return self.emit_record_expr(arm.expr, arm_env, lines, indent, expected=record_type)
@@ -1343,12 +1343,53 @@ class MlirEmitter:
         lines.append(f"{indent}{assignment}scf.if {cond.name} -> ({self.type_list(result_types)}) {{")
         then_holder: dict[str, RecordStorage] = {}
         then_env = self.env_with_union_pattern_payload(arm.pattern, scrutinee_type, scrutinee, dict(env))
-        self.emit_with_local_constants(
-            lambda: then_holder.setdefault(
-                "record",
-                self.emit_record_expr(arm.expr, then_env, lines, indent + "  ", expected=record_type),
+        if arm.guard is None:
+            self.emit_with_local_constants(
+                lambda: then_holder.setdefault(
+                    "record",
+                    self.emit_record_expr(arm.expr, then_env, lines, indent + "  ", expected=record_type),
+                )
             )
-        )
+        else:
+            guard = self.emit_expr(arm.guard, then_env, lines, indent + "  ", expected="i1")
+            guarded_base = self.fresh()
+            guarded_assignment = f"{guarded_base}:{len(fields)} = " if len(fields) > 1 else f"{guarded_base} = "
+            lines.append(f"{indent}  {guarded_assignment}scf.if {guard.name} -> ({self.type_list(result_types)}) {{")
+            guard_then_holder: dict[str, RecordStorage] = {}
+            self.emit_with_local_constants(
+                lambda: guard_then_holder.setdefault(
+                    "record",
+                    self.emit_record_expr(arm.expr, then_env, lines, indent + "    ", expected=record_type),
+                )
+            )
+            guard_then_record = guard_then_holder["record"]
+            guard_then_values = [guard_then_record.fields[field.name] for field in fields]
+            lines.append(
+                f"{indent}    scf.yield {', '.join(value.name for value in guard_then_values)} : {self.type_list(result_types)}"
+            )
+            lines.append(f"{indent}  }} else {{")
+            guard_else_holder: dict[str, RecordStorage] = {}
+            self.emit_with_local_constants(
+                lambda: guard_else_holder.setdefault(
+                    "record",
+                    self.emit_record_match_arms(
+                        arms[1:], otherwise, scrutinee, scrutinee_type, dict(env), lines, indent + "    ", record_type
+                    ),
+                )
+            )
+            guard_else_record = guard_else_holder["record"]
+            guard_else_values = [guard_else_record.fields[field.name] for field in fields]
+            lines.append(
+                f"{indent}    scf.yield {', '.join(value.name for value in guard_else_values)} : {self.type_list(result_types)}"
+            )
+            lines.append(f"{indent}  }}")
+            then_holder["record"] = RecordStorage(
+                record_type,
+                {
+                    field.name: Value(guarded_base if len(fields) == 1 else f"{guarded_base}#{index}", field.type_name)
+                    for index, field in enumerate(fields)
+                },
+            )
         then_record = then_holder["record"]
         then_values = [then_record.fields[field.name] for field in fields]
         lines.append(
@@ -1565,7 +1606,7 @@ class MlirEmitter:
         if not arms:
             assert otherwise is not None
             return self.emit_union_expr(otherwise, env, lines, indent, expected=union_type)
-        if otherwise is None and len(arms) == 1:
+        if otherwise is None and len(arms) == 1 and arms[0].guard is None:
             arm = arms[0]
             arm_env = self.env_with_union_pattern_payload(arm.pattern, scrutinee_type, scrutinee, dict(env))
             return self.emit_union_expr(arm.expr, arm_env, lines, indent, expected=union_type)
@@ -1578,12 +1619,49 @@ class MlirEmitter:
         lines.append(f"{indent}{assignment}scf.if {cond.name} -> ({self.type_list(result_types)}) {{")
         then_env = self.env_with_union_pattern_payload(arm.pattern, scrutinee_type, scrutinee, dict(env))
         then_holder: dict[str, UnionStorage] = {}
-        self.emit_with_local_constants(
-            lambda: then_holder.setdefault(
-                "union",
-                self.emit_union_expr(arm.expr, then_env, lines, indent + "  ", expected=union_type),
+        if arm.guard is None:
+            self.emit_with_local_constants(
+                lambda: then_holder.setdefault(
+                    "union",
+                    self.emit_union_expr(arm.expr, then_env, lines, indent + "  ", expected=union_type),
+                )
             )
-        )
+        else:
+            guard = self.emit_expr(arm.guard, then_env, lines, indent + "  ", expected="i1")
+            guarded_base = self.fresh()
+            guarded_assignment = f"{guarded_base}:{len(slot_types)} = " if len(slot_types) > 1 else f"{guarded_base} = "
+            lines.append(f"{indent}  {guarded_assignment}scf.if {guard.name} -> ({self.type_list(result_types)}) {{")
+            guard_then_holder: dict[str, UnionStorage] = {}
+            self.emit_with_local_constants(
+                lambda: guard_then_holder.setdefault(
+                    "union",
+                    self.emit_union_expr(arm.expr, then_env, lines, indent + "    ", expected=union_type),
+                )
+            )
+            guard_then_union = guard_then_holder["union"]
+            guard_then_values = self.union_values(guard_then_union)
+            lines.append(f"{indent}    scf.yield {', '.join(value.name for value in guard_then_values)} : {self.type_list(result_types)}")
+            lines.append(f"{indent}  }} else {{")
+            guard_else_holder: dict[str, UnionStorage] = {}
+            self.emit_with_local_constants(
+                lambda: guard_else_holder.setdefault(
+                    "union",
+                    self.emit_union_match_arms(
+                        arms[1:], otherwise, scrutinee, scrutinee_type, dict(env), lines, indent + "    ", union_type
+                    ),
+                )
+            )
+            guard_else_union = guard_else_holder["union"]
+            guard_else_values = self.union_values(guard_else_union)
+            lines.append(f"{indent}    scf.yield {', '.join(value.name for value in guard_else_values)} : {self.type_list(result_types)}")
+            lines.append(f"{indent}  }}")
+            then_holder["union"] = UnionStorage(
+                union_type,
+                {
+                    slot_name: Value(guarded_base if len(slot_types) == 1 else f"{guarded_base}#{index}", slot_type)
+                    for index, (slot_name, slot_type) in enumerate(slot_types)
+                },
+            )
         then_union = then_holder["union"]
         then_values = self.union_values(then_union)
         lines.append(f"{indent}  scf.yield {', '.join(value.name for value in then_values)} : {self.type_list(result_types)}")
@@ -1827,7 +1905,7 @@ class MlirEmitter:
         if not arms:
             assert otherwise is not None
             return self.emit_expr(otherwise, env, lines, indent, expected=type_name)
-        if otherwise is None and len(arms) == 1:
+        if otherwise is None and len(arms) == 1 and arms[0].guard is None:
             arm = arms[0]
             arm_env = self.env_with_union_pattern_payload(arm.pattern, scrutinee_type, scrutinee, dict(env))
             return self.emit_expr(arm.expr, arm_env, lines, indent, expected=type_name)
@@ -1837,18 +1915,49 @@ class MlirEmitter:
         mlir_result_type = mlir_type(type_name)
         lines.append(f"{indent}{result.name} = scf.if {cond.name} -> ({mlir_result_type}) {{")
         then_holder: dict[str, Value] = {}
-        self.emit_with_local_constants(
-            lambda: then_holder.setdefault(
-                "value",
-                self.emit_expr(
-                    arm.expr,
-                    self.env_with_union_pattern_payload(arm.pattern, scrutinee_type, scrutinee, dict(env)),
-                    lines,
-                    indent + "  ",
-                    expected=type_name,
-                ),
+        then_env = self.env_with_union_pattern_payload(arm.pattern, scrutinee_type, scrutinee, dict(env))
+        if arm.guard is None:
+            self.emit_with_local_constants(
+                lambda: then_holder.setdefault(
+                    "value",
+                    self.emit_expr(
+                        arm.expr,
+                        then_env,
+                        lines,
+                        indent + "  ",
+                        expected=type_name,
+                    ),
+                )
             )
-        )
+        else:
+            guard = self.emit_expr(arm.guard, then_env, lines, indent + "  ", expected="i1")
+            guarded = Value(self.fresh(), type_name)
+            lines.append(f"{indent}  {guarded.name} = scf.if {guard.name} -> ({mlir_result_type}) {{")
+            guard_then_holder: dict[str, Value] = {}
+            self.emit_with_local_constants(
+                lambda: guard_then_holder.setdefault(
+                    "value",
+                    self.emit_expr(
+                        arm.expr,
+                        then_env,
+                        lines,
+                        indent + "    ",
+                        expected=type_name,
+                    ),
+                )
+            )
+            lines.append(f"{indent}    scf.yield {guard_then_holder['value'].name} : {mlir_result_type}")
+            lines.append(f"{indent}  }} else {{")
+            guard_else_holder: dict[str, Value] = {}
+            self.emit_with_local_constants(
+                lambda: guard_else_holder.setdefault(
+                    "value",
+                    self.emit_match_expr_arms(arms[1:], otherwise, scrutinee, scrutinee_type, dict(env), lines, indent + "    ", type_name),
+                )
+            )
+            lines.append(f"{indent}    scf.yield {guard_else_holder['value'].name} : {mlir_result_type}")
+            lines.append(f"{indent}  }}")
+            then_holder["value"] = guarded
         lines.append(f"{indent}  scf.yield {then_holder['value'].name} : {mlir_result_type}")
         lines.append(f"{indent}}} else {{")
         else_holder: dict[str, Value] = {}
@@ -1924,6 +2033,8 @@ class MlirEmitter:
         if not variant.payload_fields:
             return env
         for binding, payload in zip(pattern.bindings, variant.payload_fields, strict=True):
+            if binding.ignored:
+                continue
             binding_name = binding.alias_name or binding.field_name
             payload_type = payload.type_name
             label = f"{variant.name}_{payload.name}"
@@ -2295,7 +2406,7 @@ class MlirEmitter:
             for body_stmt in otherwise_body:
                 self.emit_body_stmt(body_stmt, env, lines, indent)
             return
-        if otherwise_body is None and len(arms) == 1:
+        if otherwise_body is None and len(arms) == 1 and arms[0].guard is None:
             arm = arms[0]
             arm_env = self.env_with_union_pattern_payload(arm.pattern, scrutinee_type, scrutinee, env)
             for body_stmt in arm.body:
@@ -2313,11 +2424,54 @@ class MlirEmitter:
             lines.append(f"{indent}scf.if {cond.name} {{")
 
         then_env = self.env_with_union_pattern_payload(arm.pattern, scrutinee_type, scrutinee, dict(env))
-        self.emit_with_local_constants(
-            lambda: self.emit_with_binding_scope(
-                lambda: self.emit_if_branch(arm.body, then_env, result_slots, result_types, lines, indent)
+        if arm.guard is None:
+            self.emit_with_local_constants(
+                lambda: self.emit_with_binding_scope(
+                    lambda: self.emit_if_branch(arm.body, then_env, result_slots, result_types, lines, indent)
+                )
             )
-        )
+        else:
+            guard = self.emit_expr(arm.guard, then_env, lines, indent + "  ", expected="i1")
+            guarded_base = self.fresh() if result_slots else None
+            if result_slots:
+                guarded_prefix = f"{guarded_base}:{len(result_slots)} = " if len(result_slots) > 1 else f"{guarded_base} = "
+                lines.append(f"{indent}  {guarded_prefix}scf.if {guard.name} -> ({self.type_list(result_types)}) {{")
+            else:
+                lines.append(f"{indent}  scf.if {guard.name} {{")
+
+            guard_then_env = dict(then_env)
+            self.emit_with_local_constants(
+                lambda: self.emit_with_binding_scope(
+                    lambda: self.emit_if_branch(arm.body, guard_then_env, result_slots, result_types, lines, indent + "  ")
+                )
+            )
+            lines.append(f"{indent}  }} else {{")
+            guard_else_env = dict(env)
+            self.emit_with_local_constants(
+                lambda: self.emit_with_binding_scope(
+                    lambda: self.emit_match_step_else_branch(
+                        arms[1:],
+                        otherwise_body,
+                        scrutinee,
+                        scrutinee_type,
+                        guard_else_env,
+                        result_slots,
+                        result_types,
+                        lines,
+                        indent + "    ",
+                    )
+                )
+            )
+            lines.append(f"{indent}  }}")
+            if guarded_base is not None:
+                for index, (slot, type_name) in enumerate(zip(result_slots, result_types, strict=True)):
+                    result_name = guarded_base if len(result_slots) == 1 else f"{guarded_base}#{index}"
+                    self.set_slot_value(then_env, slot, Value(result_name, type_name))
+            yielded = ", ".join(self.slot_value(then_env, slot).name for slot in result_slots) if result_slots else ""
+            if result_slots:
+                lines.append(f"{indent}  scf.yield {yielded} : {self.type_list(result_types)}")
+            else:
+                lines.append(f"{indent}  scf.yield")
         lines.append(f"{indent}}} else {{")
         else_env = dict(env)
         self.emit_with_local_constants(

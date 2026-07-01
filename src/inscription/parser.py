@@ -847,6 +847,44 @@ def _find_top_level_char(text: str, target: str) -> int:
     return -1
 
 
+def _find_top_level_keyword(text: str, keyword: str) -> int:
+    depth = 0
+    in_string = False
+    escaped = False
+    index = 0
+    while index < len(text):
+        char = text[index]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            index += 1
+            continue
+        if char == '"':
+            in_string = True
+            index += 1
+            continue
+        if char == "(":
+            depth += 1
+            index += 1
+            continue
+        if char == ")":
+            depth -= 1
+            index += 1
+            continue
+        if depth == 0 and text.startswith(keyword, index):
+            before = text[index - 1] if index > 0 else " "
+            after_index = index + len(keyword)
+            after = text[after_index] if after_index < len(text) else " "
+            if not (before.isalnum() or before == "_") and not (after.isalnum() or after == "_"):
+                return index
+        index += 1
+    return -1
+
+
 def _translate_clause_body(body: str, line: int, indent: int) -> list[str]:
     clauses = _split_step_clauses(body, line)
     if not clauses:
@@ -1024,11 +1062,11 @@ def _split_match_step_arms(arms_text: str) -> list[str]:
 
 
 def _looks_like_match_arm_start(text: str) -> bool:
-    if text.startswith(("otherwise:", "anything:", "true:", "false:")):
+    if re.match(r"(?:otherwise|anything|true|false)(?:\s+when\b[^:]*)?:", text):
         return True
-    if re.match(r"-?\d+\s*:", text):
+    if re.match(r"-?\d+(?:\s+when\b[^:]*)?\s*:", text):
         return True
-    return re.match(r"[A-Z][A-Za-z0-9_.]*(?:\s+with\b[^:]*)?\s*:", text) is not None
+    return re.match(r"[A-Z][A-Za-z0-9_.]*(?:(?:\s+with\b[^:]*)|(?:\s+when\b[^:]*))?\s*:", text) is not None
 
 
 class Parser:
@@ -1779,6 +1817,8 @@ class Parser:
                 break
             if current.is_header:
                 raise InscriptionError("match expression arms must use `pattern gives expression`", current.number)
+            if current.text.startswith("otherwise when "):
+                raise InscriptionError("otherwise cannot have a match guard", current.number)
             if current.text.startswith("otherwise gives "):
                 if otherwise is not None:
                     raise InscriptionError("match expression can contain only one otherwise", current.number)
@@ -1792,9 +1832,11 @@ class Parser:
             if " gives " not in current.text:
                 raise InscriptionError("match expression arms must use `pattern gives expression`", current.number)
             pattern_text, expr_text = current.text.split(" gives ", 1)
+            pattern_text, guard_text = self._split_match_guard(pattern_text.strip(), current.number)
             arms.append(
                 MatchExprArm(
-                    self._parse_pattern(pattern_text.strip(), current.number),
+                    self._parse_pattern(pattern_text, current.number),
+                    None if guard_text is None else self._parse_expression(guard_text, current.number),
                     self._parse_expression(expr_text.strip(), current.number),
                     current.number,
                 )
@@ -1817,6 +1859,8 @@ class Parser:
                 break
             if not current.is_header:
                 raise InscriptionError("match block arms must use `pattern:`", current.number)
+            if current.text.startswith("otherwise when "):
+                raise InscriptionError("otherwise cannot have a match guard", current.number)
             if current.text == "otherwise":
                 if otherwise_body is not None:
                     raise InscriptionError("match block can contain only one otherwise", current.number)
@@ -1833,7 +1877,15 @@ class Parser:
             body, next_index = self._parse_step_block(current_index + 1, current.indent, "match arm")
             if not body:
                 raise InscriptionError("match arm must contain at least one step", current.number)
-            arms.append(MatchStepArm(self._parse_pattern(current.text, current.number), tuple(body), current.number))
+            pattern_text, guard_text = self._split_match_guard(current.text, current.number)
+            arms.append(
+                MatchStepArm(
+                    self._parse_pattern(pattern_text, current.number),
+                    None if guard_text is None else self._parse_expression(guard_text, current.number),
+                    tuple(body),
+                    current.number,
+                )
+            )
             current_index = next_index
         return MatchStep(scrutinee, tuple(arms), otherwise_body, header.number), current_index
 
@@ -2180,18 +2232,33 @@ class Parser:
         if match is not None and match.group(3) is not None:
             bindings: list[UnionPatternBinding] = []
             for binding_text in match.group(3).split(" and "):
-                binding_match = re.fullmatch(r"([a-z][a-z0-9_]*)(?: as ([a-z][a-z0-9_]*))?", binding_text.strip())
+                binding_match = re.fullmatch(r"([a-z][a-z0-9_]*)(?:(?: as ([a-z][a-z0-9_]*))|(?: ignored))?", binding_text.strip())
                 if binding_match is None:
                     raise InscriptionError("malformed union pattern", line)
+                alias_name = binding_match.group(2)
+                ignored = binding_text.strip().endswith(" ignored")
+                if alias_name == "ignored":
+                    raise InscriptionError("ignored is reserved in union payload patterns", line)
                 bindings.append(
                     UnionPatternBinding(
                         self._field_name(binding_match.group(1), line),
-                        None if binding_match.group(2) is None else self._field_name(binding_match.group(2), line),
+                        None if alias_name is None else self._field_name(alias_name, line),
+                        ignored,
                         line,
                     )
                 )
             return UnionPattern(match.group(1), self._field_name(match.group(2), line), tuple(bindings), line)
         return self._parse_expression(text, line)
+
+    def _split_match_guard(self, text: str, line: int) -> tuple[str, str | None]:
+        index = _find_top_level_keyword(text, "when")
+        if index == -1:
+            return text.strip(), None
+        pattern = text[:index].strip()
+        guard = text[index + len("when") :].strip()
+        if not pattern or not guard:
+            raise InscriptionError("malformed match guard", line)
+        return pattern, guard
 
     def _parse_expression(self, text: str, line: int) -> Expr:
         return parse_expression(text, line, self.phrases)
@@ -2613,6 +2680,8 @@ class ExpressionParser:
                 raise InscriptionError("byte string literal cannot be used as a value; use `array of bytes` or `buffer of bytes`", self.line)
         if token == "anything":
             raise InscriptionError("anything may only be used as a match pattern", self.line)
+        if token == "ignored":
+            raise InscriptionError("ignored may only be used in union payload patterns", self.line)
         if token == "check":
             raise InscriptionError("check is a step and cannot be used as an expression", self.line)
         if token == "require":

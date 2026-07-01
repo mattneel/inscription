@@ -492,6 +492,7 @@ def qualify_stmt(stmt: Stmt, module_name: str, record_names: set[str], constant_
             tuple(
                 MatchStepArm(
                     qualify_pattern(arm.pattern, module_name, record_names, constant_names),
+                    None if arm.guard is None else qualify_expr(arm.guard, module_name, record_names, constant_names),
                     tuple(qualify_stmt(s, module_name, record_names, constant_names) for s in arm.body),
                     arm.line,
                 )
@@ -514,7 +515,7 @@ def qualify_pattern(pattern, module_name: str, record_names: set[str], constant_
         return UnionPattern(
             qname(module_name, pattern.type_name) if pattern.type_name in record_names else pattern.type_name,
             pattern.variant_name,
-            tuple(UnionPatternBinding(binding.field_name, binding.alias_name, binding.line) for binding in pattern.bindings),
+            tuple(UnionPatternBinding(binding.field_name, binding.alias_name, binding.ignored, binding.line) for binding in pattern.bindings),
             pattern.line,
         )
     return qualify_expr(pattern, module_name, record_names, constant_names)
@@ -604,6 +605,7 @@ def qualify_expr(expr: Expr, module_name: str, record_names: set[str], constant_
             tuple(
                 MatchExprArm(
                     qualify_pattern(arm.pattern, module_name, record_names, constant_names),
+                    None if arm.guard is None else qualify_expr(arm.guard, module_name, record_names, constant_names),
                     qualify_expr(arm.expr, module_name, record_names, constant_names),
                     arm.line,
                 )

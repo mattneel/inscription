@@ -18,3 +18,4 @@ Recent milestones:
 - v0.37: owned temporary moves with `move (call)` and consuming pipelines.
 - v0.38: move-aware `When`/`Otherwise` and `Match` ownership merging for owned buffers.
 - v0.39: exhaustive enum/union/bool matches and the `anything` wildcard pattern.
+- v0.40: match arm guards with lowercase `when` and ignored union payload fields.

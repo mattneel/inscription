@@ -294,6 +294,7 @@ class UnionConstructor:
 class UnionPatternBinding:
     field_name: str
     alias_name: str | None
+    ignored: bool
     line: int
 
 
@@ -389,6 +390,7 @@ class WhenExpr:
 @dataclass(frozen=True)
 class MatchExprArm:
     pattern: "Pattern"
+    guard: "Expr | None"
     expr: "Expr"
     line: int
 
@@ -572,6 +574,7 @@ class IfStmt:
 @dataclass(frozen=True)
 class MatchStepArm:
     pattern: Pattern
+    guard: Expr | None
     body: tuple["BodyStmt", ...]
     line: int
 
