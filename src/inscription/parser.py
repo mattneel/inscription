@@ -36,6 +36,7 @@ from .ast import (
     ImportDecl,
     Integer,
     AlignmentOfType,
+    AnythingPattern,
     LengthOf,
     LengthOfBytes,
     LayoutRead,
@@ -89,7 +90,7 @@ FLOAT_LITERAL_RE = r"(?:\d+\.\d+(?:[eE][+-]?\d+)?|\d+[eE][+-]?\d+)"
 STRING_LITERAL_RE = r'"(?:\\.|[^"\\])*"'
 TOKEN_RE = re.compile(rf"\s*({STRING_LITERAL_RE}|{FLOAT_LITERAL_RE}|-?\d+|[A-Z][A-Za-z0-9_]*|[a-z][a-z0-9_]*|[().,])")
 RESERVED = {
-    "address", "alignment", "and", "arguments", "array", "as", "at", "be", "becomes", "bitwise", "buffer", "by", "call",
+    "address", "alignment", "and", "anything", "arguments", "array", "as", "at", "be", "becomes", "bitwise", "buffer", "by", "call",
     "check", "constant", "containing", "divided", "do", "does", "each", "else", "equal", "export", "extern", "false", "filled", "float", "for", "from",
     "enum", "function", "gives", "greater", "f32", "f64", "i1", "i32", "i64", "if", "in", "index", "input", "into", "import",
     "i8", "i16", "is", "layout", "length", "less", "let", "match", "memref", "minus", "module", "move", "no", "not", "or", "otherwise", "output", "packed", "parameters",
@@ -1023,7 +1024,7 @@ def _split_match_step_arms(arms_text: str) -> list[str]:
 
 
 def _looks_like_match_arm_start(text: str) -> bool:
-    if text.startswith(("otherwise:", "true:", "false:")):
+    if text.startswith(("otherwise:", "anything:", "true:", "false:")):
         return True
     if re.match(r"-?\d+\s*:", text):
         return True
@@ -1743,7 +1744,9 @@ class Parser:
         if first_child_index >= len(self.lines) or self.lines[first_child_index].indent <= line.indent:
             return False
         first_child = self.lines[first_child_index]
-        return (not first_child.is_header) and (" gives " in first_child.text or first_child.text.startswith("otherwise gives "))
+        return (not first_child.is_header) and (
+            " gives " in first_child.text or first_child.text.startswith("otherwise gives ")
+        )
 
     def _collect_match_expression_lines(self, index: int) -> tuple[list[Line], int]:
         header = self.lines[index]
@@ -1797,8 +1800,6 @@ class Parser:
                 )
             )
             current_index += 1
-        if otherwise is None:
-            raise InscriptionError("match expression requires otherwise", header.number)
         return MatchExpr(scrutinee, tuple(arms), otherwise, header.number), current_index
 
     def _parse_match_step(self, index: int) -> tuple[MatchStep, int]:
@@ -1834,8 +1835,6 @@ class Parser:
                 raise InscriptionError("match arm must contain at least one step", current.number)
             arms.append(MatchStepArm(self._parse_pattern(current.text, current.number), tuple(body), current.number))
             current_index = next_index
-        if otherwise_body is None:
-            raise InscriptionError("match block requires otherwise", header.number)
         return MatchStep(scrutinee, tuple(arms), otherwise_body, header.number), current_index
 
     def _parse_let_match(self, index: int) -> tuple[SetStmt, int]:
@@ -2175,6 +2174,8 @@ class Parser:
         )
 
     def _parse_pattern(self, text: str, line: int):
+        if text.strip() == "anything":
+            return AnythingPattern(line)
         match = re.fullmatch(r"((?:[A-Za-z][A-Za-z0-9_]*\.)*[A-Z][A-Za-z0-9_]*)\.([a-z][a-z0-9_]*)(?: with (.+))?", text.strip())
         if match is not None and match.group(3) is not None:
             bindings: list[UnionPatternBinding] = []
@@ -2610,6 +2611,8 @@ class ExpressionParser:
                 literal = self.pop()
                 decode_byte_string_token(literal, self.line)
                 raise InscriptionError("byte string literal cannot be used as a value; use `array of bytes` or `buffer of bytes`", self.line)
+        if token == "anything":
+            raise InscriptionError("anything may only be used as a match pattern", self.line)
         if token == "check":
             raise InscriptionError("check is a step and cannot be used as an expression", self.line)
         if token == "require":

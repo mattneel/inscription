@@ -305,7 +305,12 @@ class UnionPattern:
     line: int
 
 
-Pattern = "Expr | UnionPattern"
+@dataclass(frozen=True)
+class AnythingPattern:
+    line: int
+
+
+Pattern = "Expr | UnionPattern | AnythingPattern"
 
 
 @dataclass(frozen=True)
@@ -392,7 +397,7 @@ class MatchExprArm:
 class MatchExpr:
     scrutinee: "Expr"
     arms: tuple[MatchExprArm, ...]
-    otherwise: "Expr"
+    otherwise: "Expr | None"
     line: int
 
 
@@ -575,7 +580,7 @@ class MatchStepArm:
 class MatchStep:
     scrutinee: Expr
     arms: tuple[MatchStepArm, ...]
-    otherwise_body: tuple["BodyStmt", ...]
+    otherwise_body: tuple["BodyStmt", ...] | None
     line: int
 
 

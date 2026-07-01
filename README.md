@@ -11,7 +11,7 @@ The full language guide now lives in **[The Inscription Book](book/src/title-pag
 
 ## Status
 
-This repository currently implements **Inscription v0.38: move-aware control flow for owned buffers**. v0.38 lets non-loop `When`/`Otherwise` and `Match` step control flow move outer owned buffers when every branch leaves the buffer in the same ownership state, while preserving explicit `move`, owned temporary moves, lexical cleanup, and primitive-only extern/export ABI restrictions. The mdBook documentation site remains the primary language guide.
+This repository currently implements **Inscription v0.39: exhaustive match and wildcard patterns**. v0.39 adds the `anything` wildcard pattern and lets enum, union, and boolean matches omit `otherwise` when they are exhaustive. Integer matches still require `otherwise` or `anything`. The mdBook documentation site remains the primary language guide.
 
 The current language includes:
 
@@ -20,7 +20,7 @@ The current language includes:
 - modules and imports
 - constants, checks, runtime `Require`, and optional `--runtime-checks`
 - phrases, extern declarations, and scalar exported phrases
-- records, layout records, nominal enums, and tagged unions
+- records, layout records, nominal enums, tagged unions, exhaustive matches, and wildcard `anything` patterns
 - buffers, arrays, borrowed views, byte literals, and byte-string storage initialization
 - owned dynamic buffers with lexical cleanup, owned-buffer returns, explicit consuming `move` calls, owned temporary moves, and move-aware branch/match control flow
 - MLIR, LLVM IR, object, executable, static-library, interface JSON, and C header emission
@@ -135,14 +135,31 @@ Otherwise, result becomes consume cells move cells.
 Give result.
 ```
 
+Enum, union, and boolean matches can now be written without `otherwise` when every case is covered. Use `anything` as an explicit wildcard catch-all:
+
+```inscription
+Enum Mode backed by u8 has idle be 0; active be 1; failed be 2.
+
+To code for mode mode: Mode, giving i32.
+Give match mode:
+Mode.idle gives 0;
+Mode.active gives 7;
+Mode.failed gives 255.
+
+To fallback code mode: Mode, giving i32.
+Give match mode:
+Mode.active gives 7;
+anything gives 1.
+```
+
 ## Documentation map
 
 - [`book/src/SUMMARY.md`](book/src/SUMMARY.md): table of contents for The Inscription Book
 - [`book/tools/check_book_examples.py`](book/tools/check_book_examples.py): deterministic book example checker
 - [`book/tools/inscription_mdbook_preprocessor.py`](book/tools/inscription_mdbook_preprocessor.py): mdBook preprocessor that reuses Inscription's own highlighter
 - [`docs/github-pages.md`](docs/github-pages.md): GitHub Pages setup notes
-- [`docs/inscription-v0.38-spec.md`](docs/inscription-v0.38-spec.md): current language sprint spec
-- [`grammar/inscription-v0.38.ebnf`](grammar/inscription-v0.38.ebnf): current grammar mirror
+- [`docs/inscription-v0.39-spec.md`](docs/inscription-v0.39-spec.md): current language sprint spec
+- [`grammar/inscription-v0.39.ebnf`](grammar/inscription-v0.39.ebnf): current grammar mirror
 
 ## Testing
 

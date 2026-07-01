@@ -142,4 +142,4 @@ Mixed branches are rejected because the caller would not know whether it still o
 
 ## Current restrictions
 
-Owned buffers cannot be copied, rebound, stored in records or unions, exposed through extern/export ABI, or moved from fixed buffers, arrays, or views. Direct temporary moves are allowed only as `move (owned-buffer-returning call)` actuals to consuming parameters. v0.38 allows all-path moves of outer-scope owned buffers through `When`/`Otherwise` and step-level `Match`. Mixed move/live branches are rejected. Loops still reject moving an outer-scope owned buffer; move a loop-local binding instead.
+Owned buffers cannot be copied, rebound, stored in records or unions, exposed through extern/export ABI, or moved from fixed buffers, arrays, or views. Direct temporary moves are allowed only as `move (owned-buffer-returning call)` actuals to consuming parameters. All-path moves of outer-scope owned buffers are allowed through `When`/`Otherwise` and step-level `Match`. Mixed move/live branches are rejected. Loops still reject moving an outer-scope owned buffer; move a loop-local binding instead.

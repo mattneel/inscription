@@ -32,6 +32,7 @@ from .ast import (
     IfStmt,
     Integer,
     AlignmentOfType,
+    AnythingPattern,
     LengthOf,
     LengthOfBytes,
     LayoutRead,
@@ -1318,7 +1319,7 @@ class MlirEmitter:
     def emit_record_match_arms(
         self,
         arms,
-        otherwise: Expr,
+        otherwise: Expr | None,
         scrutinee: Value | UnionStorage,
         scrutinee_type: ValueType,
         env: dict[str, EnvValue],
@@ -1327,7 +1328,12 @@ class MlirEmitter:
         record_type: RecordType,
     ) -> RecordStorage:
         if not arms:
+            assert otherwise is not None
             return self.emit_record_expr(otherwise, env, lines, indent, expected=record_type)
+        if otherwise is None and len(arms) == 1:
+            arm = arms[0]
+            arm_env = self.env_with_union_pattern_payload(arm.pattern, scrutinee_type, scrutinee, dict(env))
+            return self.emit_record_expr(arm.expr, arm_env, lines, indent, expected=record_type)
         arm = arms[0]
         cond = self.emit_match_condition(scrutinee, scrutinee_type, arm.pattern, env, lines, indent)
         fields = self.record_fields(record_type)
@@ -1548,7 +1554,7 @@ class MlirEmitter:
     def emit_union_match_arms(
         self,
         arms,
-        otherwise: Expr,
+        otherwise: Expr | None,
         scrutinee: Value | UnionStorage,
         scrutinee_type: ValueType,
         env: dict[str, EnvValue],
@@ -1557,7 +1563,12 @@ class MlirEmitter:
         union_type: UnionType,
     ) -> UnionStorage:
         if not arms:
+            assert otherwise is not None
             return self.emit_union_expr(otherwise, env, lines, indent, expected=union_type)
+        if otherwise is None and len(arms) == 1:
+            arm = arms[0]
+            arm_env = self.env_with_union_pattern_payload(arm.pattern, scrutinee_type, scrutinee, dict(env))
+            return self.emit_union_expr(arm.expr, arm_env, lines, indent, expected=union_type)
         arm = arms[0]
         cond = self.emit_match_condition(scrutinee, scrutinee_type, arm.pattern, env, lines, indent)
         slot_types = self.union_slot_types(union_type)
@@ -1805,7 +1816,7 @@ class MlirEmitter:
     def emit_match_expr_arms(
         self,
         arms,
-        otherwise: Expr,
+        otherwise: Expr | None,
         scrutinee: Value | UnionStorage,
         scrutinee_type: ValueType,
         env: dict[str, EnvValue],
@@ -1814,7 +1825,12 @@ class MlirEmitter:
         type_name: ValueType,
     ) -> Value:
         if not arms:
+            assert otherwise is not None
             return self.emit_expr(otherwise, env, lines, indent, expected=type_name)
+        if otherwise is None and len(arms) == 1:
+            arm = arms[0]
+            arm_env = self.env_with_union_pattern_payload(arm.pattern, scrutinee_type, scrutinee, dict(env))
+            return self.emit_expr(arm.expr, arm_env, lines, indent, expected=type_name)
         arm = arms[0]
         cond = self.emit_match_condition(scrutinee, scrutinee_type, arm.pattern, env, lines, indent)
         result = Value(self.fresh(), type_name)
@@ -1850,11 +1866,13 @@ class MlirEmitter:
         self,
         scrutinee: Value | UnionStorage,
         scrutinee_type: ValueType,
-        pattern: Expr | UnionPattern,
+        pattern: Expr | UnionPattern | AnythingPattern,
         env: dict[str, EnvValue],
         lines: list[str],
         indent: str,
     ) -> Value:
+        if isinstance(pattern, AnythingPattern):  # pragma: no cover - semantic analysis requires final catch-all arms
+            raise AssertionError("anything catch-all should be lowered as a fallback arm")
         if isinstance(scrutinee_type, UnionType):
             assert isinstance(scrutinee, UnionStorage)
             union = self.unions[scrutinee_type.name]
@@ -2239,7 +2257,7 @@ class MlirEmitter:
         visible_binding_order = list(self.binding_order)
         visible_record_order = list(self.record_order)
         visible_union_order = list(self.union_order)
-        all_bodies = tuple(body_stmt for arm in stmt.arms for body_stmt in arm.body) + tuple(stmt.otherwise_body)
+        all_bodies = tuple(body_stmt for arm in stmt.arms for body_stmt in arm.body) + tuple(stmt.otherwise_body or ())
         result_slots = self.assigned_binding_slots(all_bodies, visible_binding_order, visible_record_order, env, visible_union_order)
         result_values = [self.slot_value(env, slot) for slot in result_slots]
         result_types = [value.type_name for value in result_values]
@@ -2262,7 +2280,7 @@ class MlirEmitter:
     def emit_match_step_arms(
         self,
         arms,
-        otherwise_body: tuple[BodyStmt, ...],
+        otherwise_body: tuple[BodyStmt, ...] | None,
         scrutinee: Value | UnionStorage,
         scrutinee_type: ValueType,
         env: dict[str, EnvValue],
@@ -2273,8 +2291,15 @@ class MlirEmitter:
         result_base: str | None = None,
     ) -> None:
         if not arms:
+            assert otherwise_body is not None
             for body_stmt in otherwise_body:
                 self.emit_body_stmt(body_stmt, env, lines, indent)
+            return
+        if otherwise_body is None and len(arms) == 1:
+            arm = arms[0]
+            arm_env = self.env_with_union_pattern_payload(arm.pattern, scrutinee_type, scrutinee, env)
+            for body_stmt in arm.body:
+                self.emit_body_stmt(body_stmt, arm_env, lines, indent)
             return
 
         arm = arms[0]
@@ -2319,7 +2344,7 @@ class MlirEmitter:
     def emit_match_step_else_branch(
         self,
         arms,
-        otherwise_body: tuple[BodyStmt, ...],
+        otherwise_body: tuple[BodyStmt, ...] | None,
         scrutinee: Value | UnionStorage,
         scrutinee_type: ValueType,
         env: dict[str, EnvValue],
@@ -2329,6 +2354,7 @@ class MlirEmitter:
         indent: str,
     ) -> None:
         if not arms:
+            assert otherwise_body is not None
             self.emit_if_branch(otherwise_body, env, result_slots, result_types, lines, indent[:-2] if indent.endswith("  ") else indent)
             return
         nested_base = self.fresh() if result_slots else None
@@ -2415,7 +2441,8 @@ class MlirEmitter:
                 elif isinstance(statement, MatchStep):
                     for arm in statement.arms:
                         visit(arm.body)
-                    visit(statement.otherwise_body)
+                    if statement.otherwise_body is not None:
+                        visit(statement.otherwise_body)
 
         visit(body)
         slots: list[CarrySlot] = []

@@ -2222,6 +2222,7 @@ class CompilerTests(unittest.TestCase):
                 "highlight owned n: i32 gives i32:\n  let cells be owned buffer of n i32 filled with 1\n  length of cells\n",
                 "To highlight move cells: owned buffer of i32, giving i32.\nGive length of cells.\n\nTo highlight move main, giving i32.\nLet cells be owned buffer of 1 i32 filled with 0.\nGive highlight move move cells.\n",
                 "To highlight then, giving i32.\nFor i from 0 up to 1: For j from 0 up to 1: i becomes i; then i becomes i.\nGive 0.\n",
+                "To highlight anything flag: i1, giving i32.\nGive match flag:\ntrue gives 1;\nanything gives 0.\n",
             ]
         )
         html = highlight_source(source, output_format="html")
@@ -4538,6 +4539,113 @@ Give result plus seen.
                 self.assertEqual(archive_proc.returncode, 0, archive_proc.stderr)
                 self.assertGreater(archive.stat().st_size, 0)
 
+    def test_v039_exhaustive_match_and_wildcard_patterns(self):
+        enum_mlir = compile_source(self.fixture("match_enum_exhaustive.ins"))
+        self.assertIn("func.func @code_for_mode", enum_mlir)
+        self.assertIn("arith.cmpi eq", enum_mlir)
+
+        union_mlir = compile_source(self.fixture("match_union_exhaustive.ins"))
+        self.assertIn("func.func @value_or_zero", union_mlir)
+        self.assertIn("MaybeI32.some", self.fixture("match_union_exhaustive.ins"))
+
+        bool_mlir = compile_source(self.fixture("match_bool_exhaustive.ins"))
+        self.assertIn("func.func @bool_code", bool_mlir)
+
+        anything_enum = compile_source(self.fixture("match_anything_enum.ins"))
+        self.assertIn("func.func @code_for_mode", anything_enum)
+        self.assertIn("arith.cmpi eq", anything_enum)
+
+        anything_union = compile_source(self.fixture("match_anything_union.ins"))
+        self.assertIn("func.func @value_or_one", anything_union)
+
+        step_move = compile_source(self.fixture("match_exhaustive_steps_move.ins"))
+        self.assertIn("func.func @match_exhaustive_move", step_move)
+        self.assertIn("func.call @consume_cells", step_move)
+        step_body = step_move.split("func.func @match_exhaustive_move", 1)[1].split("func.func @main", 1)[0]
+        self.assertNotIn("memref.dealloc", step_body)
+
+        self.assertCompileError(
+            "Enum Mode backed by u8 has idle be 0; active be 1; failed be 2.\n\n"
+            "To bad mode: Mode, giving i32.\n"
+            "Give match mode:\n"
+            "Mode.idle gives 0;\n"
+            "Mode.active gives 7.\n",
+            "match over Mode is missing case Mode.failed",
+        )
+        self.assertCompileError(
+            "To bad x: i32, giving i32.\n"
+            "Give match x:\n"
+            "0 gives 1;\n"
+            "1 gives 2.\n",
+            "match over i32 requires otherwise or anything",
+        )
+        self.assertCompileError(
+            "Enum Mode backed by u8 has idle be 0; active be 1.\n\n"
+            "To bad mode: Mode, giving i32.\n"
+            "Give match mode:\n"
+            "anything gives 0;\n"
+            "Mode.active gives 1.\n",
+            "anything must be the final match arm",
+        )
+
+    def test_v039_exhaustive_match_artifacts(self):
+        try:
+            resolve_toolchain()
+        except ToolchainError:
+            return
+
+        env = {**os.environ, "PYTHONPATH": str(SRC)}
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            llvm_ir = tmp_path / "match_enum_exhaustive.ll"
+            llvm_proc = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "inscription",
+                    "compile",
+                    str(FIXTURES / "match_enum_exhaustive.ins"),
+                    "--emit",
+                    "llvm-ir",
+                    "--verify",
+                    "-o",
+                    str(llvm_ir),
+                ],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(llvm_proc.returncode, 0, llvm_proc.stderr)
+            self.assertIn("define i32 @main", llvm_ir.read_text())
+
+            exe = tmp_path / "match_enum_exhaustive"
+            exe_proc = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "inscription",
+                    "compile",
+                    str(FIXTURES / "match_enum_exhaustive.ins"),
+                    "--emit",
+                    "executable",
+                    "-o",
+                    str(exe),
+                ],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(exe_proc.returncode, 0, exe_proc.stderr)
+            run_proc = subprocess.run([str(exe)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False)
+            self.assertEqual(run_proc.returncode, 7, run_proc.stderr)
+            self.assertEqual(run_proc.stdout, "")
+
     def test_negative_diagnostics(self):
         cases = {
             "malformed top level": ("Please add two numbers\n", "missing period at end of sentence"),
@@ -5269,13 +5377,51 @@ Give result plus seen.
                 "enum Mode: u8:\n  idle be 0\n\nbad gives i32:\n  let value: i32 be 0\n  let mode: Mode be value as Mode\n  0\n",
                 "cannot cast i32 to Mode; cast to u8 first",
             ),
-            "match expression missing otherwise": (
-                "enum Mode: u8:\n  idle be 0\n  active be 1\n\nbad mode: Mode gives i32:\n  match mode:\n    Mode.idle gives 0\n    Mode.active gives 1\n",
-                "match expression requires otherwise",
+            "match expression integer without catch-all": (
+                "bad x: i32 gives i32:\n  match x:\n    0 gives 1\n    1 gives 2\n",
+                "match over i32 requires otherwise or anything",
             ),
-            "match block missing otherwise": (
+            "match block enum missing case": (
                 "enum Mode: u8:\n  idle be 0\n  active be 1\n\nbad mode: Mode gives i32:\n  let x be 0\n  match mode:\n    Mode.idle:\n      x becomes 1\n  x\n",
-                "match block requires otherwise",
+                "match over Mode is missing case Mode.active",
+            ),
+            "match expression enum missing one case": (
+                "enum Mode: u8:\n  idle be 0\n  active be 1\n  failed be 2\n\nbad mode: Mode gives i32:\n  match mode:\n    Mode.idle gives 0\n    Mode.active gives 7\n",
+                "match over Mode is missing case Mode.failed",
+            ),
+            "match expression enum missing multiple cases": (
+                "enum Mode: u8:\n  idle be 0\n  active be 1\n  failed be 2\n\nbad mode: Mode gives i32:\n  match mode:\n    Mode.idle gives 0\n",
+                "match over Mode is missing cases Mode.active, Mode.failed",
+            ),
+            "match expression bool missing false": (
+                "bad flag: i1 gives i32:\n  match flag:\n    true gives 1\n",
+                "match over i1 is missing case false",
+            ),
+            "match anything not final": (
+                "enum Mode: u8:\n  idle be 0\n  active be 1\n\nbad mode: Mode gives i32:\n  match mode:\n    anything gives 0\n    Mode.active gives 1\n",
+                "anything must be the final match arm",
+            ),
+            "match anything plus otherwise": (
+                "enum Mode: u8:\n  idle be 0\n  active be 1\n\nbad mode: Mode gives i32:\n  match mode:\n    Mode.active gives 1\n    anything gives 2\n    otherwise gives 3\n",
+                "match cannot contain both anything and otherwise",
+            ),
+            "anything outside match": (
+                "bad gives i32:\n  anything\n",
+                "anything may only be used as a match pattern",
+            ),
+            "exhaustive step match partial move": (
+                "enum Mode: u8:\n  left be 0\n  right be 1\n\n"
+                "consume cells cells: owned buffer of i32 gives i32:\n  length of cells\n\n"
+                "bad mode: Mode gives i32:\n"
+                "  let cells be owned buffer of 4 i32 filled with 1\n"
+                "  let result be 0\n"
+                "  match mode:\n"
+                "    Mode.left:\n"
+                "      result becomes consume cells move cells\n"
+                "    Mode.right:\n"
+                "      result becomes 0\n"
+                "  result\n",
+                "owned buffer cells is moved in some match arms but not all",
             ),
             "match pattern type mismatch": (
                 "enum Mode: u8:\n  idle be 0\n\nbad gives i32:\n  match Mode.idle:\n    0 gives 1\n    otherwise gives 2\n",
@@ -5428,6 +5574,10 @@ Give result plus seen.
             "union pattern duplicate alias": (
                 "union Token:\n  operator symbol: u8 and precedence: u8\n\nbad token: Token gives i32:\n  match token:\n    Token.operator with symbol as x and precedence as x gives 0\n    otherwise gives 1\n",
                 "match pattern has duplicate binding x",
+            ),
+            "union match missing variant": (
+                "union MaybeI32:\n  none\n  some value: i32\n\nbad maybe: MaybeI32 gives i32:\n  match maybe:\n    MaybeI32.some with value gives value\n",
+                "match over MaybeI32 is missing variant MaybeI32.none",
             ),
             "union payload binding shadows existing": (
                 "union Token:\n  operator symbol: u8 and precedence: u8\n\nbad token: Token gives i32:\n  let symbol be 1\n  match token:\n    Token.operator with symbol and precedence gives symbol\n    otherwise gives 0\n",

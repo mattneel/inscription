@@ -37,6 +37,7 @@ from .ast import (
     IfStmt,
     Integer,
     AlignmentOfType,
+    AnythingPattern,
     LengthOf,
     LengthOfBytes,
     LayoutInfo,
@@ -1150,11 +1151,21 @@ def _check_expr_ownership(
         _check_expr_ownership(expr.scrutinee, bindings, functions, records, constants, scope_depth=scope_depth)
         env = {**_constant_env_types(constants), **_env_types(bindings)}
         scrutinee_type = infer_match_scrutinee_type(expr.scrutinee, env, functions, records, constants=constants)
-        _check_match_patterns(tuple(arm.pattern for arm in expr.arms), scrutinee_type, env, functions, records, constants)
+        _check_match_patterns(
+            tuple(arm.pattern for arm in expr.arms),
+            scrutinee_type,
+            env,
+            functions,
+            records,
+            constants,
+            has_otherwise=expr.otherwise is not None,
+            match_line=expr.line,
+        )
         for arm in expr.arms:
             arm_scope = _bindings_with_match_payload(arm.pattern, scrutinee_type, bindings, constants)
             _check_expr_ownership(arm.expr, arm_scope, functions, records, constants, scope_depth=scope_depth + 1)
-        _check_expr_ownership(expr.otherwise, bindings, functions, records, constants, scope_depth=scope_depth + 1)
+        if expr.otherwise is not None:
+            _check_expr_ownership(expr.otherwise, bindings, functions, records, constants, scope_depth=scope_depth + 1)
         return
     if isinstance(expr, Call):
         for actual in expr.args:
@@ -1780,7 +1791,16 @@ def _check_match_step(
     _require_match_scrutinee_type(scrutinee_type, stmt.line)
     if not stmt.arms:
         raise InscriptionError("match block requires at least one pattern arm", stmt.line)
-    _check_match_patterns(tuple(arm.pattern for arm in stmt.arms), scrutinee_type, env, functions, records, constants)
+    _check_match_patterns(
+        tuple(arm.pattern for arm in stmt.arms),
+        scrutinee_type,
+        env,
+        functions,
+        records,
+        constants,
+        has_otherwise=stmt.otherwise_body is not None,
+        match_line=stmt.line,
+    )
 
     branch_scopes: list[dict[str, Binding]] = []
     for arm in stmt.arms:
@@ -1791,12 +1811,13 @@ def _check_match_step(
             _check_body_stmt(body_stmt, arm_scope, functions, records, constants, scope_depth=scope_depth + 1)
         branch_scopes.append(arm_scope)
 
-    if not stmt.otherwise_body:
-        raise InscriptionError("match arm must contain at least one step", stmt.line)
-    otherwise_scope = dict(bindings)
-    for body_stmt in stmt.otherwise_body:
-        _check_body_stmt(body_stmt, otherwise_scope, functions, records, constants, scope_depth=scope_depth + 1)
-    branch_scopes.append(otherwise_scope)
+    if stmt.otherwise_body is not None:
+        if not stmt.otherwise_body:
+            raise InscriptionError("match arm must contain at least one step", stmt.line)
+        otherwise_scope = dict(bindings)
+        for body_stmt in stmt.otherwise_body:
+            _check_body_stmt(body_stmt, otherwise_scope, functions, records, constants, scope_depth=scope_depth + 1)
+        branch_scopes.append(otherwise_scope)
     _merge_control_flow_owned_moves(bindings, tuple(branch_scopes), stmt.line, context="match arms")
 
 
@@ -2508,12 +2529,17 @@ def evaluate_const_expr(
         scrutinee = evaluate_const_expr(expr.scrutinee, env, functions, records, constants, expected=scrutinee_type)
         result_type = type_name
         for arm in expr.arms:
+            if isinstance(arm.pattern, AnythingPattern):
+                return evaluate_const_expr(arm.expr, env, functions, records, constants, expected=result_type)
             if isinstance(arm.pattern, UnionPattern):
                 raise CompileTimeEvaluationError("union value is not compile-time evaluable", arm.line)
             pattern = evaluate_const_expr(arm.pattern, env, functions, records, constants, expected=scrutinee_type)
             if _const_values_equal(scrutinee, pattern):
                 return evaluate_const_expr(arm.expr, env, functions, records, constants, expected=result_type)
-        return evaluate_const_expr(expr.otherwise, env, functions, records, constants, expected=result_type)
+        if expr.otherwise is not None:
+            return evaluate_const_expr(expr.otherwise, env, functions, records, constants, expected=result_type)
+        if expr.arms:
+            return evaluate_const_expr(expr.arms[-1].expr, env, functions, records, constants, expected=result_type)
     raise CompileTimeEvaluationError("expression is not compile-time evaluable", getattr(expr, "line", None))
 
 
@@ -2902,7 +2928,16 @@ def infer_match_expression_type(
     _require_match_scrutinee_type(scrutinee_type, expr.line)
     if not expr.arms:
         raise InscriptionError("match expression requires at least one pattern arm", expr.line)
-    _check_match_patterns(tuple(arm.pattern for arm in expr.arms), scrutinee_type, env, functions, records, constants)
+    _check_match_patterns(
+        tuple(arm.pattern for arm in expr.arms),
+        scrutinee_type,
+        env,
+        functions,
+        records,
+        constants,
+        has_otherwise=expr.otherwise is not None,
+        match_line=expr.line,
+    )
 
     result_type = expected if expected is not None else (
         infer_expr_type(
@@ -2912,8 +2947,6 @@ def infer_match_expression_type(
             records,
             constants=constants,
         )
-        if expr.arms
-        else infer_expr_type(expr.otherwise, env, functions, records, constants=constants)
     )
     if isinstance(result_type, BufferType | ArrayType | ViewType):
         raise InscriptionError(f"match expression cannot return {format_type(result_type)}", expr.line)
@@ -2927,12 +2960,13 @@ def infer_match_expression_type(
                 f"match expression arms must have matching types, got {format_type(result_type)} and {format_type(actual)}",
                 arm.line,
             )
-    otherwise_type = _infer_declared_type(expr.otherwise, result_type, env, functions, records, constants)
-    if otherwise_type != result_type:
-        raise InscriptionError(
-            f"match expression arms must have matching types, got {format_type(result_type)} and {format_type(otherwise_type)}",
-            expr.line,
-        )
+    if expr.otherwise is not None:
+        otherwise_type = _infer_declared_type(expr.otherwise, result_type, env, functions, records, constants)
+        if otherwise_type != result_type:
+            raise InscriptionError(
+                f"match expression arms must have matching types, got {format_type(result_type)} and {format_type(otherwise_type)}",
+                expr.line,
+            )
     return result_type
 
 
@@ -2956,15 +2990,26 @@ def _require_match_scrutinee_type(type_name: ValueType, line: int) -> None:
 
 
 def _check_match_patterns(
-    patterns: tuple[Expr | UnionPattern, ...],
+    patterns: tuple[Expr | UnionPattern | AnythingPattern, ...],
     scrutinee_type: ValueType,
     env: dict[str, ValueType],
     functions: dict[str, Function],
     records: dict[str, RecordDecl],
     constants: dict[str, ConstValue],
+    *,
+    has_otherwise: bool,
+    match_line: int,
 ) -> None:
     seen: dict[tuple[str, int | bool], str] = {}
-    for pattern in patterns:
+    has_anything = False
+    for index, pattern in enumerate(patterns):
+        if isinstance(pattern, AnythingPattern):
+            has_anything = True
+            if has_otherwise:
+                raise InscriptionError("match cannot contain both anything and otherwise", pattern.line)
+            if index != len(patterns) - 1:
+                raise InscriptionError("anything must be the final match arm", pattern.line)
+            continue
         pattern_type = _infer_match_pattern_type(pattern, scrutinee_type, env, functions, records, constants)
         if pattern_type != scrutinee_type:
             raise InscriptionError(
@@ -2989,16 +3034,112 @@ def _check_match_patterns(
         if key in seen:
             raise InscriptionError(f"match has duplicate pattern {label}", getattr(pattern, "line", None))
         seen[key] = label
+    if not has_otherwise and not has_anything:
+        _check_match_exhaustive_without_catchall(patterns, scrutinee_type, match_line)
+
+
+def _check_match_exhaustive_without_catchall(
+    patterns: tuple[Expr | UnionPattern | AnythingPattern, ...],
+    scrutinee_type: ValueType,
+    line: int,
+) -> None:
+    if scrutinee_type == "i1":
+        covered = {
+            bool(pattern.value)
+            for pattern in patterns
+            if isinstance(pattern, Boolean)
+        }
+        missing = [label for value, label in ((True, "true"), (False, "false")) if value not in covered]
+        if missing:
+            _raise_missing_match_cases("i1", "case", "cases", missing, line)
+        return
+
+    if isinstance(scrutinee_type, EnumType):
+        info = ACTIVE_ENUMS.get(scrutinee_type.name)
+        if info is None:
+            raise InscriptionError(f"unknown type {scrutinee_type.name}", line)
+        covered = {
+            case_name
+            for pattern in patterns
+            if (case_name := _direct_enum_case_pattern_name(pattern, scrutinee_type)) is not None
+        }
+        missing = [f"{info.name}.{case_name}" for case_name in info.case_order if case_name not in covered]
+        if missing:
+            _raise_missing_match_cases(info.name, "case", "cases", missing, line)
+        return
+
+    if isinstance(scrutinee_type, UnionType):
+        union = _union_info(scrutinee_type.name, line)
+        covered = {
+            variant.name
+            for pattern in patterns
+            if (variant := _direct_union_variant_pattern(pattern, union)) is not None
+        }
+        missing = [f"{union.name}.{variant_name}" for variant_name in union.variant_order if variant_name not in covered]
+        if missing:
+            _raise_missing_match_cases(union.name, "variant", "variants", missing, line)
+        return
+
+    raise InscriptionError(f"match over {format_type(scrutinee_type)} requires otherwise or anything", line)
+
+
+def _raise_missing_match_cases(
+    type_name: str,
+    singular: str,
+    plural: str,
+    missing: list[str],
+    line: int,
+) -> None:
+    noun = singular if len(missing) == 1 else plural
+    raise InscriptionError(f"match over {type_name} is missing {noun} {', '.join(missing)}", line)
+
+
+def _direct_enum_case_pattern_name(pattern: Expr | UnionPattern | AnythingPattern, scrutinee_type: EnumType) -> str | None:
+    if not isinstance(pattern, EnumCase):
+        return None
+    resolved_member_type = resolve_named_value_type(RecordType(pattern.type_name))
+    member_type_name = (
+        resolved_member_type.name
+        if isinstance(resolved_member_type, EnumType | UnionType)
+        else pattern.type_name
+    )
+    if member_type_name != scrutinee_type.name:
+        return None
+    info = ACTIVE_ENUMS.get(member_type_name)
+    if info is None or pattern.case_name not in info.cases:
+        return None
+    return pattern.case_name
+
+
+def _direct_union_variant_pattern(pattern: Expr | UnionPattern | AnythingPattern, union: UnionInfo) -> UnionVariantInfo | None:
+    if isinstance(pattern, UnionPattern):
+        if pattern.type_name != union.name:
+            other = _union_info(pattern.type_name, pattern.line)
+            if other.name != union.name:
+                return None
+        return _union_variant(union, pattern.variant_name, pattern.line)
+    if isinstance(pattern, EnumCase):
+        if pattern.type_name != union.name:
+            other = _union_info(pattern.type_name, pattern.line)
+            if other.name != union.name:
+                return None
+        variant = _union_variant(union, pattern.case_name, pattern.line)
+        if variant.payload_fields:
+            return None
+        return variant
+    return None
 
 
 def _infer_match_pattern_type(
-    pattern: Expr | UnionPattern,
+    pattern: Expr | UnionPattern | AnythingPattern,
     scrutinee_type: ValueType,
     env: dict[str, ValueType],
     functions: dict[str, Function],
     records: dict[str, RecordDecl],
     constants: dict[str, ConstValue],
 ) -> ValueType:
+    if isinstance(pattern, AnythingPattern):
+        return scrutinee_type
     if isinstance(pattern, UnionPattern):
         union = _union_info(pattern.type_name, pattern.line)
         variant = _union_variant(union, pattern.variant_name, pattern.line)

@@ -15,3 +15,19 @@ Give score token Token.operator with symbol be 10 and precedence be 5.
 ```
 
 Payload aliases are scoped to the match arm. Unions are not stored in records, buffers, arrays, views, owned buffers, layout records, or extern/export ABI.
+
+Union matches can omit `otherwise` when every declared variant is covered:
+
+```inscription,check
+Union MaybeI32 has none; some value: i32.
+
+To value or zero maybe: MaybeI32, giving i32.
+Give match maybe:
+MaybeI32.none gives 0;
+MaybeI32.some with value gives value.
+
+To main, giving i32.
+Give value or zero MaybeI32.some with value be 42.
+```
+
+Use `anything` or `otherwise` when a catch-all branch is clearer or when externally sourced union tags must be handled explicitly.

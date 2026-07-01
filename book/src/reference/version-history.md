@@ -16,5 +16,5 @@ Recent milestones:
 - v0.35: mdBook documentation site and GitHub Pages workflow.
 - v0.36: explicit `move` and consuming owned-buffer parameters.
 - v0.37: owned temporary moves with `move (call)` and consuming pipelines.
-
 - v0.38: move-aware `When`/`Otherwise` and `Match` ownership merging for owned buffers.
+- v0.39: exhaustive enum/union/bool matches and the `anything` wildcard pattern.

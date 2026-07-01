@@ -35,6 +35,7 @@ from .ast import (
     ImportDecl,
     Integer,
     AlignmentOfType,
+    AnythingPattern,
     LengthOf,
     LengthOfBytes,
     LayoutRead,
@@ -496,7 +497,9 @@ def qualify_stmt(stmt: Stmt, module_name: str, record_names: set[str], constant_
                 )
                 for arm in stmt.arms
             ),
-            tuple(qualify_stmt(s, module_name, record_names, constant_names) for s in stmt.otherwise_body),
+            None
+            if stmt.otherwise_body is None
+            else tuple(qualify_stmt(s, module_name, record_names, constant_names) for s in stmt.otherwise_body),
             stmt.line,
         )
     if isinstance(stmt, ReturnStmt):
@@ -505,6 +508,8 @@ def qualify_stmt(stmt: Stmt, module_name: str, record_names: set[str], constant_
 
 
 def qualify_pattern(pattern, module_name: str, record_names: set[str], constant_names: set[str]):
+    if isinstance(pattern, AnythingPattern):
+        return pattern
     if isinstance(pattern, UnionPattern):
         return UnionPattern(
             qname(module_name, pattern.type_name) if pattern.type_name in record_names else pattern.type_name,
@@ -604,7 +609,7 @@ def qualify_expr(expr: Expr, module_name: str, record_names: set[str], constant_
                 )
                 for arm in expr.arms
             ),
-            qualify_expr(expr.otherwise, module_name, record_names, constant_names),
+            None if expr.otherwise is None else qualify_expr(expr.otherwise, module_name, record_names, constant_names),
             expr.line,
         )
     raise AssertionError(expr)  # pragma: no cover
