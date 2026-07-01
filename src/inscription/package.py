@@ -20,6 +20,7 @@ from .tester import TestRunItem, TestRunSummary, list_tests, run_tests, test_slu
 MANIFEST_NAME = "package.ins"
 SEMVER_RE = re.compile(r"\d+\.\d+\.\d+")
 STRING_RE = re.compile(r'"(?:\\.|[^"\\])*"')
+MODULE_RE_FRAGMENT = r"[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z][A-Za-z0-9_]*)*"
 
 
 @dataclass(frozen=True)
@@ -31,6 +32,13 @@ class ManifestCommentInfo:
 
 
 @dataclass(frozen=True)
+class PackageDependency:
+    name: str
+    path: str
+    line: int
+
+
+@dataclass(frozen=True)
 class PackageManifest:
     package_name: str
     sources: str
@@ -38,6 +46,7 @@ class PackageManifest:
     version: str | None = None
     tests: str | None = None
     exposed_modules: tuple[str, ...] = ()
+    dependencies: tuple[PackageDependency, ...] = ()
     documentation: str | None = None
     comments_by_line: dict[int, tuple[SourceComment, ...]] | None = None
     declaration_lines: dict[str, int] | None = None
@@ -58,6 +67,14 @@ class PackageContext:
         if self.manifest.tests is None:
             return None
         return self.root / self.manifest.tests
+
+
+@dataclass(frozen=True)
+class PackageGraph:
+    root: PackageContext
+    packages: tuple[PackageContext, ...]
+    dependencies_by_name: dict[str, tuple[PackageContext, ...]]
+    contexts_by_name: dict[str, PackageContext]
 
 
 @dataclass(frozen=True)
@@ -99,6 +116,130 @@ def load_package_context(root: Path) -> PackageContext:
     return PackageContext(root, manifest_path, manifest)
 
 
+class PackageGraphLoader:
+    def __init__(self) -> None:
+        self.contexts_by_root: dict[Path, PackageContext] = {}
+        self.contexts_by_name: dict[str, PackageContext] = {}
+        self.dependencies_by_name: dict[str, tuple[PackageContext, ...]] = {}
+        self.order: list[PackageContext] = []
+
+    def load(self, root: Path) -> PackageGraph:
+        root_context = self._load_package(root.resolve(), expected_name=None, dependency_path=None, stack=())
+        return PackageGraph(
+            root_context,
+            tuple(self.order),
+            self.dependencies_by_name,
+            self.contexts_by_name,
+        )
+
+    def _load_package(
+        self,
+        root: Path,
+        *,
+        expected_name: str | None,
+        dependency_path: str | None,
+        stack: tuple[PackageContext, ...],
+    ) -> PackageContext:
+        root = root.resolve()
+        manifest_path = root / MANIFEST_NAME
+        if not manifest_path.exists():
+            if expected_name is not None and dependency_path is not None:
+                raise InscriptionError(f"dependency {expected_name} not found at {dependency_path}/{MANIFEST_NAME}")
+            raise InscriptionError(f"package manifest not found at {MANIFEST_NAME}")
+        for index, context in enumerate(stack):
+            if context.root == root:
+                cycle_names = [item.manifest.package_name for item in stack[index:]]
+                cycle_names.append(expected_name or context.manifest.package_name)
+                raise InscriptionError(f"package dependency cycle detected: {' -> '.join(cycle_names)}")
+        if root in self.contexts_by_root:
+            context = self.contexts_by_root[root]
+            if expected_name is not None and context.manifest.package_name != expected_name:
+                raise InscriptionError(
+                    f"dependency {expected_name} resolved to package {context.manifest.package_name}; expected {expected_name}"
+                )
+            return context
+
+        context = load_package_context(root)
+        if expected_name is not None and context.manifest.package_name != expected_name:
+            raise InscriptionError(
+                f"dependency {expected_name} resolved to package {context.manifest.package_name}; expected {expected_name}"
+            )
+        previous = self.contexts_by_name.get(context.manifest.package_name)
+        if previous is not None and previous.root != context.root:
+            raise InscriptionError(f"dependency {context.manifest.package_name} resolves to multiple package roots")
+
+        self.contexts_by_root[root] = context
+        self.contexts_by_name[context.manifest.package_name] = context
+        self.order.append(context)
+
+        direct_dependencies: list[PackageContext] = []
+        dependency_path_names: dict[Path, str] = {}
+        for dependency in context.manifest.dependencies:
+            dependency_root = (context.root / dependency.path).resolve()
+            previous_name = dependency_path_names.get(dependency_root)
+            if previous_name is not None and previous_name != dependency.name:
+                raise InscriptionError(
+                    f"dependency path {dependency.path} is declared for both {previous_name} and {dependency.name}",
+                    dependency.line,
+                )
+            dependency_path_names[dependency_root] = dependency.name
+            loaded = self._load_package(
+                dependency_root,
+                expected_name=dependency.name,
+                dependency_path=dependency.path,
+                stack=(*stack, context),
+            )
+            known = self.contexts_by_name.get(dependency.name)
+            if known is not None and known.root != loaded.root:
+                raise InscriptionError(f"dependency {dependency.name} resolves to multiple package roots", dependency.line)
+            direct_dependencies.append(loaded)
+        self.dependencies_by_name[context.manifest.package_name] = tuple(direct_dependencies)
+        return context
+
+
+def load_package_graph(root: Path) -> PackageGraph:
+    return PackageGraphLoader().load(root)
+
+
+class PackageModuleResolver:
+    def __init__(self, graph: PackageGraph, current_package: PackageContext):
+        self.graph = graph
+        self.current_package = current_package
+        self.module_package_names: dict[str, str] = {}
+
+    def __call__(self, module: str, stack: tuple[str, ...]) -> Path:
+        importer = self._importer_package(stack)
+        local = module_path(importer.sources_dir, module)
+        if local.exists():
+            self.module_package_names[module] = importer.manifest.package_name
+            return local
+        for dependency in self.graph.dependencies_by_name.get(importer.manifest.package_name, ()):
+            dependency_path = module_path(dependency.sources_dir, module)
+            if module in _dependency_visible_modules(dependency):
+                self.module_package_names[module] = dependency.manifest.package_name
+                return dependency_path
+            if dependency_path.exists():
+                raise InscriptionError(f"module {module} is not exposed by package {dependency.manifest.package_name}")
+        return local
+
+    def _importer_package(self, stack: tuple[str, ...]) -> PackageContext:
+        if not stack:
+            return self.current_package
+        importer_module = stack[-1]
+        package_name = self.module_package_names.get(importer_module)
+        if package_name is not None:
+            return self.graph.contexts_by_name[package_name]
+        for context in self.graph.packages:
+            if module_path(context.sources_dir, importer_module).exists():
+                self.module_package_names[importer_module] = context.manifest.package_name
+                return context
+        return self.current_package
+
+
+def _dependency_visible_modules(context: PackageContext) -> set[str]:
+    return {context.manifest.root_module, *context.manifest.exposed_modules}
+
+
 def parse_manifest(source: str) -> PackageManifest:
     comments = collect_manifest_comments(source)
     sentences = _split_punctuation_sentences_no_comments(comments.source)
@@ -112,6 +253,8 @@ def parse_manifest(source: str) -> PackageManifest:
     root_module: str | None = None
     exposed: list[str] = []
     exposed_seen: set[str] = set()
+    dependencies: list[PackageDependency] = []
+    dependency_names: set[str] = set()
     declaration_lines: dict[str, int] = {}
 
     for index, sentence in enumerate(sentences):
@@ -175,6 +318,18 @@ def parse_manifest(source: str) -> PackageManifest:
             exposed.append(module)
             declaration_lines[f"Expose module {module}"] = line
             continue
+        if text.startswith("Depend"):
+            match = re.fullmatch(rf"Depend\s+on\s+({MODULE_RE_FRAGMENT})\s+from\s+path\s+({STRING_RE.pattern})", text)
+            if match is None:
+                raise InscriptionError("malformed dependency declaration", line)
+            name = _validate_manifest_module_path(match.group(1), "dependency", line)
+            if name in dependency_names:
+                raise InscriptionError(f"package manifest declares dependency {name} more than once", line)
+            dependency_names.add(name)
+            path = _validate_dependency_path(_parse_manifest_string(match.group(2), line), line)
+            dependencies.append(PackageDependency(name, path, line))
+            declaration_lines[f"Depend on {name}"] = line
+            continue
         _reject_manifest_sentence(text, line)
 
     assert package_name is not None
@@ -189,6 +344,7 @@ def parse_manifest(source: str) -> PackageManifest:
         version,
         tests,
         tuple(exposed),
+        tuple(dependencies),
         comments.module_documentation,
         comments.comments_by_line,
         declaration_lines,
@@ -282,6 +438,18 @@ def format_manifest_source(source: str) -> str:
         for comment in comments_by_line.get(source_line, ()) if source_line is not None else ():
             out.append(_format_manifest_comment(comment))
         out.append(f"Expose module {module}.")
+    first_dependency = True
+    for dependency in manifest.dependencies:
+        key = f"Depend on {dependency.name}"
+        line_text = f"Depend on {dependency.name} from path {_quote_manifest_string(dependency.path)}."
+        if first_dependency:
+            append_decl(key, [line_text])
+            first_dependency = False
+            continue
+        source_line = declaration_lines.get(key)
+        for comment in comments_by_line.get(source_line, ()) if source_line is not None else ():
+            out.append(_format_manifest_comment(comment))
+        out.append(line_text)
 
     while out and out[-1] == "":
         out.pop()
@@ -358,6 +526,16 @@ def _validate_manifest_path(path_text: str, line: int) -> str:
     return path_text
 
 
+def _validate_dependency_path(path_text: str, line: int) -> str:
+    if not path_text:
+        raise InscriptionError("dependency path must not be empty", line)
+    if "\x00" in path_text:
+        raise InscriptionError("dependency paths may not contain NUL", line)
+    if PurePosixPath(path_text).is_absolute() or Path(path_text).is_absolute():
+        raise InscriptionError("dependency paths must be relative", line)
+    return path_text
+
+
 def _validate_manifest_module_path(name: str, context: str, line: int) -> str:
     if not name:
         raise InscriptionError(f"{context} declaration requires a module path", line)
@@ -373,16 +551,29 @@ def _reject_manifest_sentence(text: str, line: int) -> None:
         raise InscriptionError("package manifests do not support imports", line)
     if text.startswith("Test "):
         raise InscriptionError("package manifests do not support test declarations", line)
-    raise InscriptionError("package manifests support only Package, Version, Sources, Tests, Root module, and Expose module declarations", line)
+    if text.startswith("Depend "):
+        raise InscriptionError("malformed dependency declaration", line)
+    raise InscriptionError("package manifests support only Package, Version, Sources, Tests, Root module, Expose module, and Depend on declarations", line)
 
 
 def check_package(root: Path, *, verify: bool = False, toolchain: Toolchain | None = None) -> PackageContext:
-    context = load_package_context(root)
-    _validate_package_context(context, verify=verify, toolchain=toolchain)
-    return context
+    return checked_package_graph(root, verify=verify, toolchain=toolchain).root
 
 
-def _validate_package_context(context: PackageContext, *, verify: bool, toolchain: Toolchain | None) -> None:
+def checked_package_graph(root: Path, *, verify: bool = False, toolchain: Toolchain | None = None) -> PackageGraph:
+    graph = load_package_graph(root)
+    for context in graph.packages:
+        _validate_package_context(context, graph=graph, verify=verify, toolchain=toolchain)
+    return graph
+
+
+def _validate_package_context(
+    context: PackageContext,
+    *,
+    graph: PackageGraph,
+    verify: bool,
+    toolchain: Toolchain | None,
+) -> None:
     sources_dir = context.sources_dir
     if not sources_dir.is_dir():
         raise InscriptionError(f"package sources directory `{context.manifest.sources}` does not exist")
@@ -390,17 +581,18 @@ def _validate_package_context(context: PackageContext, *, verify: bool, toolchai
     if context.manifest.tests is not None and (tests_dir is None or not tests_dir.is_dir()):
         raise InscriptionError(f"package tests directory `{context.manifest.tests}` does not exist")
     checked_modules: set[str] = set()
-    _check_module(context, context.manifest.root_module, kind="root", verify=verify, toolchain=toolchain)
+    _check_module(context, graph, context.manifest.root_module, kind="root", verify=verify, toolchain=toolchain)
     checked_modules.add(context.manifest.root_module)
     for module in context.manifest.exposed_modules:
         if module in checked_modules:
             continue
-        _check_module(context, module, kind="exposed", verify=verify, toolchain=toolchain)
+        _check_module(context, graph, module, kind="exposed", verify=verify, toolchain=toolchain)
         checked_modules.add(module)
 
 
 def _check_module(
     context: PackageContext,
+    graph: PackageGraph,
     module: str,
     *,
     kind: str,
@@ -413,7 +605,8 @@ def _check_module(
         if kind == "root":
             raise InscriptionError(f"root module {module} not found at {relative}")
         raise InscriptionError(f"exposed module {module} not found at {relative}")
-    program = load_program(path.read_text(), source_path=path, module_root=context.sources_dir)
+    resolver = PackageModuleResolver(graph, context)
+    program = load_program(path.read_text(), source_path=path, module_root=context.sources_dir, module_path_resolver=resolver)
     if program.module_name != module:
         if kind == "root":
             raise InscriptionError(f"root module {module} resolved to module {program.module_name}; expected {module}")
@@ -435,7 +628,7 @@ def package_stem(manifest: PackageManifest) -> str:
     return manifest.package_name.split(".")[-1]
 
 
-def package_metadata(manifest: PackageManifest) -> dict[str, object]:
+def package_metadata(manifest: PackageManifest, graph: PackageGraph | None = None) -> dict[str, object]:
     payload: dict[str, object] = {
         "name": manifest.package_name,
     }
@@ -446,6 +639,19 @@ def package_metadata(manifest: PackageManifest) -> dict[str, object]:
         payload["tests"] = manifest.tests
     payload["root_module"] = manifest.root_module
     payload["exposed_modules"] = list(manifest.exposed_modules)
+    dependencies: list[dict[str, object]] = []
+    for dependency in manifest.dependencies:
+        item: dict[str, object] = {
+            "name": dependency.name,
+            "path": dependency.path,
+        }
+        if graph is not None:
+            dependency_context = graph.contexts_by_name.get(dependency.name)
+            if dependency_context is not None and dependency_context.manifest.version is not None:
+                item["version"] = dependency_context.manifest.version
+        dependencies.append(item)
+    if dependencies:
+        payload["dependencies"] = dependencies
     return payload
 
 
@@ -460,9 +666,15 @@ def package_import_modules(manifest: PackageManifest) -> tuple[str, ...]:
     return tuple(modules)
 
 
-def load_package_compilation(context: PackageContext) -> LoadedCompilation:
+def load_package_compilation(context: PackageContext, graph: PackageGraph) -> LoadedCompilation:
     imports = "".join(f"Import {module}.\n" for module in package_import_modules(context.manifest))
-    return load_compilation(imports, source_path=context.manifest_path, module_root=context.sources_dir)
+    resolver = PackageModuleResolver(graph, context)
+    return load_compilation(
+        imports,
+        source_path=context.manifest_path,
+        module_root=context.sources_dir,
+        module_path_resolver=resolver,
+    )
 
 
 def build_package_artifact(
@@ -495,7 +707,8 @@ def build_package_artifact(
         if not path.exists():
             raise InscriptionError(f"archive object {path} does not exist")
 
-    context = check_package(root, verify=False, toolchain=toolchain)
+    graph = checked_package_graph(root, verify=False, toolchain=toolchain)
+    context = graph.root
     stem = package_stem(context.manifest)
     output_path = output
     if emit == "static-library" and output_path is None:
@@ -503,7 +716,7 @@ def build_package_artifact(
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
     if emit in {"interface-json", "c-header"}:
-        compilation = load_package_compilation(context)
+        compilation = load_package_compilation(context, graph)
         interface_context = make_interface_context(compilation, root_dir=context.sources_dir)
         if verify:
             mlir = emit_mlir(compilation.program, runtime_checks=runtime_checks)
@@ -519,21 +732,27 @@ def build_package_artifact(
         if emit == "interface-json":
             text = emit_interface_json(
                 interface_context,
-                package_metadata=package_metadata(context.manifest),
+                package_metadata=package_metadata(context.manifest, graph),
                 include_root_module=False,
                 root_module=context.manifest.root_module,
             )
         else:
-            text = emit_c_header(interface_context)
+            text = emit_c_header(interface_context, include_modules=set(package_import_modules(context.manifest)))
         return PackageBuildResult(context.manifest.package_name, emit, output_path, text=text)
 
     if emit == "executable":
         root_path = module_path(context.sources_dir, context.manifest.root_module)
-        program = load_program(root_path.read_text(), source_path=root_path, module_root=context.sources_dir)
+        resolver = PackageModuleResolver(graph, context)
+        program = load_program(
+            root_path.read_text(),
+            source_path=root_path,
+            module_root=context.sources_dir,
+            module_path_resolver=resolver,
+        )
         validate_executable_main(program)
         strip_main_for_static_library = False
     else:
-        compilation = load_package_compilation(context)
+        compilation = load_package_compilation(context, graph)
         program = compilation.program
         strip_main_for_static_library = emit == "static-library" and any(
             fn.implementation == "export" for fn in program.functions
@@ -569,15 +788,30 @@ def package_test_files(context: PackageContext) -> tuple[Path, ...]:
     return tuple(sorted(tests_dir.rglob("*.ins")))
 
 
-def list_package_tests(root: Path, *, filter_text: str | None = None) -> tuple[str, ...] | str:
-    context = check_package(root, verify=False)
-    files = package_test_files(context)
-    if not files:
+def list_package_tests(
+    root: Path,
+    *,
+    filter_text: str | None = None,
+    include_dependencies: bool = False,
+) -> tuple[str, ...] | str:
+    graph = checked_package_graph(root, verify=False)
+    contexts = _test_contexts(graph, include_dependencies=include_dependencies)
+    if not any(package_test_files(context) for context in contexts):
         return "no tests found"
     displays: list[str] = []
-    for path in files:
-        prefix = _package_test_prefix(path, context.root)
-        displays.extend(list_tests(path, module_root=context.sources_dir, filter_text=filter_text, display_prefix=prefix))
+    for context in contexts:
+        for path in package_test_files(context):
+            prefix = _package_test_prefix(path, context)
+            resolver = PackageModuleResolver(graph, context)
+            displays.extend(
+                list_tests(
+                    path,
+                    module_root=context.sources_dir,
+                    module_path_resolver=resolver,
+                    filter_text=filter_text,
+                    display_prefix=prefix,
+                )
+            )
     if not displays:
         if filter_text is None:
             return "no tests found"
@@ -589,46 +823,56 @@ def run_package_tests(
     root: Path,
     *,
     filter_text: str | None = None,
+    include_dependencies: bool = False,
     runtime_checks: bool = False,
     opt_level: str = "none",
     save_temps: Path | None = None,
     toolchain: Toolchain | None = None,
 ) -> PackageTestSummary | str:
-    context = check_package(root, verify=False)
-    files = package_test_files(context)
-    if not files:
+    graph = checked_package_graph(root, verify=False)
+    contexts = _test_contexts(graph, include_dependencies=include_dependencies)
+    if not any(package_test_files(context) for context in contexts):
         return "no tests found"
     all_results: list[TestRunItem] = []
     passed = 0
     failed = 0
     matched_any = False
-    for path in files:
-        prefix = _package_test_prefix(path, context.root)
-        summary = run_tests(
-            path,
-            module_root=context.sources_dir,
-            runtime_checks=runtime_checks,
-            opt_level=opt_level,
-            save_temps=save_temps,
-            filter_text=filter_text,
-            toolchain=toolchain,
-            display_prefix=prefix,
-        )
-        if isinstance(summary, str):
-            continue
-        matched_any = True
-        for result in summary.results:
-            all_results.append(result)
-            if result.passed:
-                passed += 1
-            else:
-                failed += 1
+    for context in contexts:
+        for path in package_test_files(context):
+            prefix = _package_test_prefix(path, context)
+            resolver = PackageModuleResolver(graph, context)
+            summary = run_tests(
+                path,
+                module_root=context.sources_dir,
+                module_path_resolver=resolver,
+                runtime_checks=runtime_checks,
+                opt_level=opt_level,
+                save_temps=save_temps,
+                filter_text=filter_text,
+                toolchain=toolchain,
+                display_prefix=prefix,
+            )
+            if isinstance(summary, str):
+                continue
+            matched_any = True
+            for result in summary.results:
+                all_results.append(result)
+                if result.passed:
+                    passed += 1
+                else:
+                    failed += 1
     if not matched_any or not all_results:
         if filter_text is None:
             return "no tests found"
         return f"no tests matched filter `{filter_text}`"
-    return PackageTestSummary(context.manifest.package_name, passed, failed, tuple(all_results))
+    return PackageTestSummary(graph.root.manifest.package_name, passed, failed, tuple(all_results))
 
 
-def _package_test_prefix(path: Path, package_root: Path) -> str:
-    return _relative_for_message(path.resolve(), package_root.resolve())
+def _test_contexts(graph: PackageGraph, *, include_dependencies: bool) -> tuple[PackageContext, ...]:
+    if include_dependencies:
+        return graph.packages
+    return (graph.root,)
+
+
+def _package_test_prefix(path: Path, context: PackageContext) -> str:
+    return f"{context.manifest.package_name}::{_relative_for_message(path.resolve(), context.root.resolve())}"

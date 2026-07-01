@@ -5,6 +5,7 @@ import subprocess
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 
 from .ast import Program, TestDecl
 from .compiler import load_program
@@ -32,9 +33,19 @@ class TestRunSummary:
         return 0 if self.failed == 0 else 1
 
 
-def load_test_program(source_path: Path, *, module_root: Path | None = None) -> Program:
+def load_test_program(
+    source_path: Path,
+    *,
+    module_root: Path | None = None,
+    module_path_resolver: Callable[[str, tuple[str, ...]], Path] | None = None,
+) -> Program:
     source_path = source_path.resolve()
-    return load_program(source_path.read_text(), source_path=source_path, module_root=module_root)
+    return load_program(
+        source_path.read_text(),
+        source_path=source_path,
+        module_root=module_root,
+        module_path_resolver=module_path_resolver,
+    )
 
 
 def test_display_name(test: TestDecl, program: Program) -> str:
@@ -67,10 +78,11 @@ def list_tests(
     source_path: Path,
     *,
     module_root: Path | None = None,
+    module_path_resolver: Callable[[str, tuple[str, ...]], Path] | None = None,
     filter_text: str | None = None,
     display_prefix: str | None = None,
 ) -> tuple[str, ...]:
-    program = load_test_program(source_path, module_root=module_root)
+    program = load_test_program(source_path, module_root=module_root, module_path_resolver=module_path_resolver)
     analyze(program)
     return tuple(display for _test, display in filtered_tests(program, filter_text, display_prefix=display_prefix))
 
@@ -79,6 +91,7 @@ def run_tests(
     source_path: Path,
     *,
     module_root: Path | None = None,
+    module_path_resolver: Callable[[str, tuple[str, ...]], Path] | None = None,
     runtime_checks: bool = False,
     opt_level: str = "none",
     save_temps: Path | None = None,
@@ -87,7 +100,7 @@ def run_tests(
     display_prefix: str | None = None,
 ) -> TestRunSummary | str:
     source_path = source_path.resolve()
-    program = load_test_program(source_path, module_root=module_root)
+    program = load_test_program(source_path, module_root=module_root, module_path_resolver=module_path_resolver)
     analyze(program)
     all_tests = [(test, _prefix_display(test_display_name(test, program), display_prefix)) for test in program.tests]
     if not all_tests:

@@ -7153,7 +7153,7 @@ Give result plus seen.
             check=False,
         )
         self.assertEqual(run_proc.returncode, 0, run_proc.stderr)
-        self.assertIn("test tests/basic.ins::root::addition works ... ok", run_proc.stdout)
+        self.assertIn("test ProtocolTools::tests/basic.ins::root::addition works ... ok", run_proc.stdout)
         self.assertIn("test result: ok. 1 passed; 0 failed.", run_proc.stdout)
 
         list_proc = subprocess.run(
@@ -7166,7 +7166,7 @@ Give result plus seen.
             check=False,
         )
         self.assertEqual(list_proc.returncode, 0, list_proc.stderr)
-        self.assertEqual(list_proc.stdout, "test tests/basic.ins::root::addition works\n")
+        self.assertEqual(list_proc.stdout, "test ProtocolTools::tests/basic.ins::root::addition works\n")
 
         filter_proc = subprocess.run(
             [sys.executable, "-m", "inscription", "package", "test", str(basic), "--filter", "addition"],
@@ -7178,7 +7178,7 @@ Give result plus seen.
             check=False,
         )
         self.assertEqual(filter_proc.returncode, 0, filter_proc.stderr)
-        self.assertIn("test tests/basic.ins::root::addition works ... ok", filter_proc.stdout)
+        self.assertIn("test ProtocolTools::tests/basic.ins::root::addition works ... ok", filter_proc.stdout)
 
         no_match_proc = subprocess.run(
             [sys.executable, "-m", "inscription", "package", "test", str(basic), "--filter", "missing"],
@@ -7214,7 +7214,7 @@ Give result plus seen.
             check=False,
         )
         self.assertEqual(module_proc.returncode, 0, module_proc.stderr)
-        self.assertIn("test tests/checksum.ins::root::checksum works ... ok", module_proc.stdout)
+        self.assertIn("test ProtocolTools::tests/checksum.ins::root::checksum works ... ok", module_proc.stdout)
 
         runtime_proc = subprocess.run(
             [sys.executable, "-m", "inscription", "package", "test", str(basic), "--runtime-checks", "-O1"],
@@ -7239,9 +7239,9 @@ Give result plus seen.
                 check=False,
             )
             self.assertEqual(save_proc.returncode, 0, save_proc.stderr)
-            self.assertTrue((temps / "basic.tests_basic_ins_root_addition_works.mlir").exists())
-            self.assertTrue((temps / "basic.tests_basic_ins_root_addition_works.lowered.mlir").exists())
-            self.assertTrue((temps / "basic.tests_basic_ins_root_addition_works.ll").exists())
+            self.assertTrue((temps / "basic.protocoltools_tests_basic_ins_root_addition_works.mlir").exists())
+            self.assertTrue((temps / "basic.protocoltools_tests_basic_ins_root_addition_works.lowered.mlir").exists())
+            self.assertTrue((temps / "basic.protocoltools_tests_basic_ins_root_addition_works.ll").exists())
 
         fail_proc = subprocess.run(
             [sys.executable, "-m", "inscription", "package", "test", str(packages / "failing_package")],
@@ -7253,7 +7253,7 @@ Give result plus seen.
             check=False,
         )
         self.assertEqual(fail_proc.returncode, 1)
-        self.assertIn("test tests/fail.ins::root::failing expectation ... FAILED", fail_proc.stdout)
+        self.assertIn("test Failing::tests/fail.ins::root::failing expectation ... FAILED", fail_proc.stdout)
         self.assertIn("test result: FAILED. 0 passed; 1 failed.", fail_proc.stdout)
 
     def test_v045_package_check_verify(self):
@@ -7619,6 +7619,367 @@ Give result plus seen.
             )
             self.assertEqual(bad_archive.returncode, 2)
             self.assertIn("--archive-object is only valid with --emit static-library", bad_archive.stderr)
+
+    def test_v047_package_manifest_dependencies_parser_formatter_and_diagnostics(self):
+        source = (
+            "//! Package docs.\n\n"
+            "Package App.\n\n"
+            "Version \"0.1.0\".\n\n"
+            "Sources are in \"src\".\n"
+            "Tests are in \"tests\".\n\n"
+            "Root module is App.\n\n"
+            "Expose module App.\n\n"
+            "Depend on Checksums from path \"../checksums\".\n"
+            "Depend on Acme.Wire from path \"vendor/wire\".\n"
+        )
+        manifest = parse_manifest(source)
+        self.assertEqual([dependency.name for dependency in manifest.dependencies], ["Checksums", "Acme.Wire"])
+        self.assertEqual([dependency.path for dependency in manifest.dependencies], ["../checksums", "vendor/wire"])
+
+        messy = (
+            "//! Package docs.\n\n"
+            "Package App.\n\n"
+            "Depend on Wire from path \"vendor/wire\".\n"
+            "Root module is App.\n"
+            "Sources are in \"src\".\n"
+            "Version \"0.1.0\".\n"
+            "Expose module App.\n"
+            "Depend on Checksums from path \"../checksums\".\n"
+        )
+        expected = (
+            "//! Package docs.\n\n"
+            "Package App.\n\n"
+            "Version \"0.1.0\".\n\n"
+            "Sources are in \"src\".\n\n"
+            "Root module is App.\n\n"
+            "Expose module App.\n\n"
+            "Depend on Wire from path \"vendor/wire\".\n"
+            "Depend on Checksums from path \"../checksums\".\n"
+        )
+        self.assertEqual(format_manifest_source(messy), expected)
+        self.assertEqual(format_manifest_source(expected), expected)
+
+        cases = {
+            "duplicate dependency": (
+                "Package App.\n\nSources are in \"src\".\nRoot module is App.\n"
+                "Depend on Checksums from path \"../checksums\".\n"
+                "Depend on Checksums from path \"../other\".\n",
+                "package manifest declares dependency Checksums more than once",
+            ),
+            "absolute dependency path": (
+                "Package App.\n\nSources are in \"src\".\nRoot module is App.\n"
+                "Depend on Checksums from path \"/tmp/checksums\".\n",
+                "dependency paths must be relative",
+            ),
+            "empty dependency path": (
+                "Package App.\n\nSources are in \"src\".\nRoot module is App.\n"
+                "Depend on Checksums from path \"\".\n",
+                "dependency path must not be empty",
+            ),
+            "malformed dependency": (
+                "Package App.\n\nSources are in \"src\".\nRoot module is App.\n"
+                "Depend on Checksums path \"../checksums\".\n",
+                "malformed dependency declaration",
+            ),
+        }
+        for name, (case_source, contains) in cases.items():
+            with self.subTest(name=name):
+                with self.assertRaises(InscriptionError) as ctx:
+                    parse_manifest(case_source)
+                self.assertIn(contains, str(ctx.exception))
+
+        with self.assertRaises(InscriptionError) as source_ctx:
+            normalize_punctuation_source("Depend on Checksums from path \"../checksums\".\n")
+        self.assertIn("Depend declarations are only valid in package manifests", str(source_ctx.exception))
+
+    def test_v047_package_dependency_check_test_and_diagnostics(self):
+        env = {**os.environ, "PYTHONPATH": str(SRC)}
+        packages = ROOT / "tests" / "fixtures" / "packages"
+        app = packages / "app_with_dependency"
+
+        check_proc = subprocess.run(
+            [sys.executable, "-m", "inscription", "package", "check", str(app)],
+            cwd=ROOT,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(check_proc.returncode, 0, check_proc.stderr)
+        self.assertEqual(check_proc.stdout, "package App: ok\n")
+
+        try:
+            resolve_toolchain()
+        except ToolchainError as exc:
+            self.skipTest(str(exc))
+
+        test_proc = subprocess.run(
+            [sys.executable, "-m", "inscription", "package", "test", str(app)],
+            cwd=ROOT,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(test_proc.returncode, 0, test_proc.stderr)
+        self.assertIn("test App::tests/app.ins::root::app checksum works ... ok", test_proc.stdout)
+        self.assertIn("test App::tests/app.ins::root::direct dependency import works ... ok", test_proc.stdout)
+        self.assertNotIn("Checksums::tests/checksum.ins", test_proc.stdout)
+
+        include_proc = subprocess.run(
+            [sys.executable, "-m", "inscription", "package", "test", str(app), "--include-dependencies"],
+            cwd=ROOT,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(include_proc.returncode, 0, include_proc.stderr)
+        self.assertIn("test Checksums::tests/checksum.ins::root::checksum works ... ok", include_proc.stdout)
+
+        list_proc = subprocess.run(
+            [sys.executable, "-m", "inscription", "package", "test", str(app), "--include-dependencies", "--list"],
+            cwd=ROOT,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(list_proc.returncode, 0, list_proc.stderr)
+        self.assertIn("test App::tests/app.ins::root::app checksum works\n", list_proc.stdout)
+        self.assertIn("test Checksums::tests/checksum.ins::root::checksum works\n", list_proc.stdout)
+
+        filter_proc = subprocess.run(
+            [sys.executable, "-m", "inscription", "package", "test", str(app), "--include-dependencies", "--filter", "Checksums"],
+            cwd=ROOT,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(filter_proc.returncode, 0, filter_proc.stderr)
+        self.assertIn("test Checksums::tests/checksum.ins::root::checksum works ... ok", filter_proc.stdout)
+        self.assertNotIn("App::tests/app.ins", filter_proc.stdout)
+
+        visibility_proc = subprocess.run(
+            [sys.executable, "-m", "inscription", "package", "check", str(packages / "dependency_visibility" / "app")],
+            cwd=ROOT,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(visibility_proc.returncode, 2)
+        self.assertIn("module Checksums.Internal is not exposed by package Checksums", visibility_proc.stderr)
+
+        cycle_proc = subprocess.run(
+            [sys.executable, "-m", "inscription", "package", "check", str(packages / "cycle_packages" / "A")],
+            cwd=ROOT,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(cycle_proc.returncode, 2)
+        self.assertIn("package dependency cycle detected: A -> B -> A", cycle_proc.stderr)
+
+    def test_v047_package_dependency_build_outputs(self):
+        env = {**os.environ, "PYTHONPATH": str(SRC)}
+        app = ROOT / "tests" / "fixtures" / "packages" / "app_with_dependency"
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            header_path = tmp_path / "App.h"
+            header_proc = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "inscription",
+                    "package",
+                    "build",
+                    str(app),
+                    "--emit",
+                    "c-header",
+                    "-o",
+                    str(header_path),
+                ],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(header_proc.returncode, 0, header_proc.stderr)
+            header = header_path.read_text()
+            self.assertIn("int32_t ins_app_checksum(int32_t arg0);", header)
+            self.assertNotIn("ins_checksum", header)
+
+            json_path = tmp_path / "App.json"
+            json_proc = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "inscription",
+                    "package",
+                    "build",
+                    str(app),
+                    "--emit",
+                    "interface-json",
+                    "-o",
+                    str(json_path),
+                ],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(json_proc.returncode, 0, json_proc.stderr)
+            payload = json.loads(json_path.read_text())
+            self.assertEqual(
+                payload["package"]["dependencies"],
+                [{"name": "Checksums", "path": "../checksums_package", "version": "0.1.0"}],
+            )
+            module_names = {module["name"] for module in payload["modules"]}
+            self.assertIn("App", module_names)
+            self.assertIn("Checksums", module_names)
+
+        try:
+            resolve_toolchain(require_static_library=True, require_executable=True)
+        except ToolchainError as exc:
+            self.skipTest(str(exc))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            exe_path = tmp_path / "app"
+            exe_proc = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "inscription",
+                    "package",
+                    "build",
+                    str(app),
+                    "--emit",
+                    "executable",
+                    "-o",
+                    str(exe_path),
+                ],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(exe_proc.returncode, 0, exe_proc.stderr)
+            run_proc = subprocess.run([str(exe_path)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False)
+            self.assertEqual(run_proc.returncode, 42, run_proc.stderr)
+
+            archive_path = tmp_path / "libApp.a"
+            temps = tmp_path / "temps"
+            archive_proc = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "inscription",
+                    "package",
+                    "build",
+                    str(app),
+                    "--emit",
+                    "static-library",
+                    "--save-temps",
+                    str(temps),
+                    "-o",
+                    str(archive_path),
+                ],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(archive_proc.returncode, 0, archive_proc.stderr)
+            self.assertGreater(archive_path.stat().st_size, 0)
+            self.assertTrue((temps / "App.mlir").exists())
+            self.assertTrue((temps / "App.lowered.mlir").exists())
+            self.assertTrue((temps / "App.ll").exists())
+            self.assertTrue((temps / "App.o").exists())
+
+    def test_v047_package_dependency_graph_diagnostics(self):
+        env = {**os.environ, "PYTHONPATH": str(SRC)}
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+
+            missing = tmp_path / "missing-dependency"
+            missing.mkdir()
+            (missing / "package.ins").write_text(
+                "Package App.\n\nSources are in \"src\".\nRoot module is App.\n"
+                "Depend on Missing from path \"../missing\".\n"
+            )
+            missing_proc = subprocess.run(
+                [sys.executable, "-m", "inscription", "package", "check", str(missing)],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(missing_proc.returncode, 2)
+            self.assertIn("dependency Missing not found at ../missing/package.ins", missing_proc.stderr)
+
+            wrong_name = tmp_path / "wrong_name"
+            wrong_name.mkdir()
+            (wrong_name / "package.ins").write_text("Package Other.\n\nSources are in \"src\".\nRoot module is Other.\n")
+            mismatch = tmp_path / "mismatch"
+            mismatch.mkdir()
+            (mismatch / "package.ins").write_text(
+                "Package App.\n\nSources are in \"src\".\nRoot module is App.\n"
+                "Depend on Checksums from path \"../wrong_name\".\n"
+            )
+            mismatch_proc = subprocess.run(
+                [sys.executable, "-m", "inscription", "package", "check", str(mismatch)],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(mismatch_proc.returncode, 2)
+            self.assertIn("dependency Checksums resolved to package Other; expected Checksums", mismatch_proc.stderr)
+
+            shared = tmp_path / "shared"
+            shared.mkdir()
+            (shared / "package.ins").write_text("Package A.\n\nSources are in \"src\".\nRoot module is A.\n")
+            duplicate_path = tmp_path / "duplicate-path"
+            duplicate_path.mkdir()
+            (duplicate_path / "package.ins").write_text(
+                "Package App.\n\nSources are in \"src\".\nRoot module is App.\n"
+                "Depend on A from path \"../shared\".\n"
+                "Depend on B from path \"../shared\".\n"
+            )
+            duplicate_proc = subprocess.run(
+                [sys.executable, "-m", "inscription", "package", "check", str(duplicate_path)],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(duplicate_proc.returncode, 2)
+            self.assertIn("dependency path ../shared is declared for both A and B", duplicate_proc.stderr)
 
 
 class FormatterTests(unittest.TestCase):

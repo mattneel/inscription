@@ -378,6 +378,8 @@ def _normalize_punctuation_source_from_comments(comments: SourceCommentInfo) -> 
                 index += 1
             output.extend(_translate_test_body_sentences(body, indent=2))
             continue
+        if text.startswith("Depend "):
+            raise InscriptionError("Depend declarations are only valid in package manifests", sentence.line)
         raise InscriptionError(
             "expected top-level declaration sentence starting with Module, Import, Type, Constant, Check, Record, Layout record, Packed layout record, Enum, Union, External, To, or Test",
             sentence.line,

@@ -26,3 +26,5 @@ int32_t ins_add_counts(int32_t arg0, int32_t arg1);
 ```
 
 Ordinary comments and extern documentation are not emitted in C headers. Documentation text is not parsed as Markdown; it is copied deterministically and made safe for C comments.
+
+For package builds, the root package header intentionally omits dependency exports. Build each dependency package separately when you need that dependency's C header.

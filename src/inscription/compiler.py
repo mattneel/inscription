@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 
 from .ast import (
     ArrayBinding,
@@ -105,10 +106,14 @@ def load_program(
     *,
     source_path: Path | None = None,
     module_root: Path | None = None,
+    module_path_resolver: Callable[[str, tuple[str, ...]], Path] | None = None,
 ) -> Program:
-    if source_path is None and module_root is None and not _source_has_imports(source):
+    if module_path_resolver is None and source_path is None and module_root is None and not _source_has_imports(source):
         return parse_source(source)
-    resolver = ModuleResolver(module_root or (source_path.parent if source_path is not None else None))
+    resolver = ModuleResolver(
+        module_root or (source_path.parent if source_path is not None else None),
+        module_path_resolver=module_path_resolver,
+    )
     return resolver.load_entry(source, source_path=source_path)
 
 
@@ -137,8 +142,14 @@ class LoadedCompilation:
 
 
 class ModuleResolver:
-    def __init__(self, module_root: Path | None):
+    def __init__(
+        self,
+        module_root: Path | None,
+        *,
+        module_path_resolver: Callable[[str, tuple[str, ...]], Path] | None = None,
+    ):
         self.module_root = module_root.resolve() if module_root is not None else None
+        self.module_path_resolver = module_path_resolver
         self.cache: dict[str, LoadedModule] = {}
         self.order: list[str] = []
 
@@ -147,7 +158,7 @@ class ModuleResolver:
 
     def load_entry_compilation(self, source: str, *, source_path: Path | None = None) -> LoadedCompilation:
         module_name, imports = scan_module_header(source)
-        if imports and self.module_root is None:
+        if imports and self.module_root is None and self.module_path_resolver is None:
             raise InscriptionError("imports require a source path or --module-root", imports[0].line)
         dependencies = [self.load_module(import_decl.module, stack=()) for import_decl in imports]
         external_templates = tuple(template for dep in dependencies for template in dep.exported_templates)
@@ -169,9 +180,9 @@ class ModuleResolver:
         if name in stack:
             cycle = " -> ".join((*stack, name))
             raise InscriptionError(f"import cycle detected: {cycle}")
-        if self.module_root is None:
+        if self.module_root is None and self.module_path_resolver is None:
             raise InscriptionError("imports require a source path or --module-root")
-        path = module_path(self.module_root, name)
+        path = self._module_path(name, stack)
         if not path.exists():
             raise InscriptionError(f"module {name} not found at {path}")
         source = path.read_text()
@@ -194,14 +205,24 @@ class ModuleResolver:
         self.order.append(name)
         return loaded
 
+    def _module_path(self, name: str, stack: tuple[str, ...]) -> Path:
+        if self.module_path_resolver is not None:
+            return self.module_path_resolver(name, stack)
+        assert self.module_root is not None
+        return module_path(self.module_root, name)
+
 
 def load_compilation(
     source: str,
     *,
     source_path: Path | None = None,
     module_root: Path | None = None,
+    module_path_resolver: Callable[[str, tuple[str, ...]], Path] | None = None,
 ) -> LoadedCompilation:
-    resolver = ModuleResolver(module_root or (source_path.parent if source_path is not None else None))
+    resolver = ModuleResolver(
+        module_root or (source_path.parent if source_path is not None else None),
+        module_path_resolver=module_path_resolver,
+    )
     return resolver.load_entry_compilation(source, source_path=source_path)
 
 

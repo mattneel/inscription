@@ -22,3 +22,21 @@ Give left plus right.
 ```
 
 Ordinary `//` comments are not included in interface JSON. Documentation comments cannot attach to imports.
+
+Package builds add a top-level `package` object. When the package manifest declares local path dependencies, that object includes deterministic dependency metadata without absolute paths:
+
+```json
+{
+  "package": {
+    "name": "App",
+    "sources": "src",
+    "root_module": "App",
+    "exposed_modules": ["App"],
+    "dependencies": [
+      {"name": "Checksums", "path": "../checksums", "version": "0.1.0"}
+    ]
+  }
+}
+```
+
+Single-file `compile --emit interface-json` output is unchanged.

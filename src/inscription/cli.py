@@ -117,6 +117,7 @@ def main(argv: list[str] | None = None) -> int:
     package_test_p.add_argument("--save-temps", type=Path, help="directory for per-test source MLIR, lowered MLIR, and LLVM IR intermediates")
     package_test_p.add_argument("--filter", help="run only tests whose display name contains TEXT")
     package_test_p.add_argument("--list", action="store_true", help="list discovered package tests without running them")
+    package_test_p.add_argument("--include-dependencies", action="store_true", help="also run tests from local path dependencies")
     _add_optimization_args(package_test_p)
     package_build_p = package_sub.add_parser("build", help="build package artifacts")
     package_build_p.add_argument("root", nargs="?", type=Path, default=Path("."), help="package root containing package.ins")
@@ -291,7 +292,11 @@ def main(argv: list[str] | None = None) -> int:
                 return 0
             if args.package_command == "test":
                 if args.list:
-                    tests = list_package_tests(args.root, filter_text=args.filter)
+                    tests = list_package_tests(
+                        args.root,
+                        filter_text=args.filter,
+                        include_dependencies=args.include_dependencies,
+                    )
                     if isinstance(tests, str):
                         print(tests)
                         return 0
@@ -301,6 +306,7 @@ def main(argv: list[str] | None = None) -> int:
                 summary = run_package_tests(
                     args.root,
                     filter_text=args.filter,
+                    include_dependencies=args.include_dependencies,
                     runtime_checks=args.runtime_checks,
                     opt_level=_resolve_opt_level(args),
                     save_temps=args.save_temps,

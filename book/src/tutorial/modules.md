@@ -45,3 +45,23 @@ Expose module MathTools.
 ```
 
 With that manifest, `inscription package test` resolves imports from `src/` even when tests live under `tests/`.
+
+
+## Path dependencies
+
+A package can import exposed modules from a direct local path dependency declared in `package.ins`:
+
+```inscription,manifest
+Package App.
+
+Sources are in "src".
+Tests are in "tests".
+
+Root module is App.
+
+Expose module App.
+
+Depend on Checksums from path "../checksums".
+```
+
+`App` source and tests may import `Checksums` and any modules exposed by that dependency. Modules inside `Checksums` that are not its root module or an `Expose module ... .` entry remain internal to that dependency.

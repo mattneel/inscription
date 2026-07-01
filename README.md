@@ -11,13 +11,13 @@ The full language guide now lives in **[The Inscription Book](book/src/title-pag
 
 ## Status
 
-This repository currently implements **Inscription v0.46: package build artifacts**. v0.46 adds `inscription package build` for package-aware static libraries, executables, LLVM IR, interface JSON, and C headers on top of declarative `package.ins` manifests, package checks/tests, first-class source tests, comments, documentation comments, owned buffer literal/copy initialization, pattern alternatives, integer ranges, match guards, exhaustive matches, and move-aware owned-buffer control flow. The mdBook documentation site remains the primary language guide.
+This repository currently implements **Inscription v0.47: package path dependencies**. v0.47 adds local path dependencies to declarative `package.ins` manifests, extending package check/test/build with dependency-aware module resolution on top of package-aware static libraries, executables, LLVM IR, interface JSON, and C headers, first-class source tests, comments, documentation comments, owned buffer literal/copy initialization, pattern alternatives, integer ranges, match guards, exhaustive matches, and move-aware owned-buffer control flow. The mdBook documentation site remains the primary language guide.
 
 The current language includes:
 
 - scalar integer, float, and boolean types
 - deterministic prose-punctuation syntax, `then` parent continuations, canonical formatter, ordinary comments, documentation comments, first-class tests, test-time `Expect` assertions, and declarative package manifests
-- modules, imports, package-aware module roots, and package build artifact routing
+- modules, imports, package-aware module roots, local path dependencies, and package build artifact routing
 - constants, checks, runtime `Require`, and optional `--runtime-checks`
 - phrases, extern declarations, and scalar exported phrases
 - records, layout records, nominal enums, tagged unions, exhaustive matches, wildcard `anything` patterns, match guards, pattern alternatives, integer ranges, and ignored union payload fields
@@ -78,6 +78,7 @@ Validate, test, and build a package:
 PYTHONPATH=src python -m inscription package check tests/fixtures/packages/basic_package
 PYTHONPATH=src python -m inscription package test tests/fixtures/packages/basic_package
 PYTHONPATH=src python -m inscription package test tests/fixtures/packages/basic_package --list
+PYTHONPATH=src python -m inscription package test tests/fixtures/packages/app_with_dependency --include-dependencies
 PYTHONPATH=src python -m inscription package build tests/fixtures/packages/library_package --emit c-header -o ProtocolTools.h
 PYTHONPATH=src python -m inscription package build tests/fixtures/packages/library_package --emit static-library -o libProtocolTools.a
 ```
@@ -216,7 +217,7 @@ Expect add 20 and 22 is equal to 42.
 
 Run them with `inscription test SOURCE`; use `--list` to list discovered tests and `--filter TEXT` to run matching test display names.
 
-Package manifests live in `package.ins`. They are declarative metadata, not executable build scripts: v0.46 supports package metadata, source/test directory layout, a root module, exposed module validation, and package-aware artifact builds, but no dependencies, registry, lockfile, or `build.ins` logic.
+Package manifests live in `package.ins`. They are declarative metadata, not executable build scripts: v0.47 supports package metadata, source/test directory layout, a root module, exposed module validation, local path dependencies, and package-aware artifact builds, but no remote dependencies, registry, lockfile, version solver, or `build.ins` logic.
 
 ```inscription
 //! Package manifest for ProtocolTools.
@@ -232,9 +233,11 @@ Root module is ProtocolTools.
 
 Expose module ProtocolTools.
 Expose module ProtocolTools.Protocol.
+
+Depend on Checksums from path "../checksums".
 ```
 
-Run `inscription package check` to validate the manifest and source layout. Run `inscription package test` to discover `.ins` test files under the manifest's test directory using the package source directory as the module root. Run `inscription package build` to emit package artifacts; the default artifact is `build/lib<Package>.a`, and `--emit c-header` / `--emit interface-json` include root plus exposed modules.
+Run `inscription package check` to validate the manifest, source layout, and dependency graph. Run `inscription package test` to discover `.ins` test files under the manifest's test directory using the package source directory and direct dependency exposed modules for imports; add `--include-dependencies` to run dependency package tests. Run `inscription package build` to emit package artifacts; the default artifact is `build/lib<Package>.a`, and root package headers intentionally omit dependency exports.
 
 ## Documentation map
 
@@ -243,8 +246,8 @@ Run `inscription package check` to validate the manifest and source layout. Run 
 - [`book/tools/check_book_examples.py`](book/tools/check_book_examples.py): deterministic book example checker
 - [`book/tools/inscription_mdbook_preprocessor.py`](book/tools/inscription_mdbook_preprocessor.py): mdBook preprocessor that reuses Inscription's own highlighter
 - [`docs/github-pages.md`](docs/github-pages.md): GitHub Pages setup notes
-- [`docs/inscription-v0.46-spec.md`](docs/inscription-v0.46-spec.md): current language sprint spec
-- [`grammar/inscription-v0.46.ebnf`](grammar/inscription-v0.46.ebnf): current grammar mirror
+- [`docs/inscription-v0.47-spec.md`](docs/inscription-v0.47-spec.md): current language sprint spec
+- [`grammar/inscription-v0.47.ebnf`](grammar/inscription-v0.47.ebnf): current grammar mirror
 
 ## Testing
 

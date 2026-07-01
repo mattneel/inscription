@@ -118,9 +118,11 @@ def emit_interface_json(
     return json.dumps(payload, indent=2, ensure_ascii=False) + "\n"
 
 
-def emit_c_header(context: InterfaceContext) -> str:
+def emit_c_header(context: InterfaceContext, *, include_modules: set[str | None] | None = None) -> str:
     prototypes: list[str] = []
     for module_name, program in _ordered_module_programs(context.compilation):
+        if include_modules is not None and module_name not in include_modules:
+            continue
         for fn in program.functions:
             resolved = context.functions[fn.name]
             if resolved.implementation != "export":
