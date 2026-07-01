@@ -21,6 +21,7 @@ from .ast import (
     Cast,
     CheckStmt,
     Comparison,
+    ComptimeExpr,
     ConstantDecl,
     EnumCase,
     EnumCaseDecl,
@@ -95,7 +96,7 @@ STRING_LITERAL_RE = r'"(?:\\.|[^"\\])*"'
 TOKEN_RE = re.compile(rf"\s*({STRING_LITERAL_RE}|{FLOAT_LITERAL_RE}|-?\d+|[A-Z][A-Za-z0-9_]*|[a-z][a-z0-9_]*|[().,])")
 RESERVED = {
     "address", "alignment", "and", "anything", "arguments", "array", "as", "at", "be", "becomes", "bitwise", "buffer", "by", "call",
-    "check", "constant", "containing", "divided", "do", "does", "each", "else", "equal", "expect", "export", "extern", "false", "filled", "float", "for", "from",
+    "check", "comptime", "constant", "containing", "divided", "do", "does", "each", "else", "equal", "expect", "export", "extern", "false", "filled", "float", "for", "from",
     "enum", "function", "gives", "greater", "f32", "f64", "i1", "i32", "i64", "if", "in", "index", "input", "into", "import",
     "i8", "i16", "is", "layout", "length", "less", "let", "match", "memref", "minus", "module", "move", "no", "not", "or", "otherwise", "output", "packed", "parameters",
     "pointer", "plus", "print", "read", "remainder", "require", "return", "set", "shifted", "size", "takes", "test", "than", "then", "through", "times", "to",
@@ -1044,6 +1045,8 @@ def _split_guarded_value_clauses(expr: str) -> list[str] | None:
 def _translate_step_sentence(text: str, line: int, indent: int) -> list[str]:
     if _starts_then_marker(text):
         raise InscriptionError("then may only resume a parent clause after nested control", line)
+    if text.startswith("comptime "):
+        raise InscriptionError("comptime may only be used as an expression", line)
     if text.startswith("Let "):
         if _contains_then_marker(text):
             raise InscriptionError("then may only resume a parent clause after nested control", line)
@@ -3147,6 +3150,12 @@ class ExpressionParser:
             return self.parse_layout_read(stop)
         if token is not None and RECORD_NAME_RE.fullmatch(token) and tuple(self.tokens[self.pos + 1 : self.pos + 2]) == ("with",):
             return self.parse_record_constructor(stop)
+        if token == "comptime":
+            self.pop()
+            phrase_call = self.try_parse_phrase_call(stop)
+            if phrase_call is None:
+                raise InscriptionError("comptime must be followed by a phrase call", self.line)
+            return ComptimeExpr(phrase_call, self.line)
         phrase_call = self.try_parse_phrase_call(stop)
         if phrase_call is not None:
             return phrase_call

@@ -5344,8 +5344,108 @@ Give result plus seen.
             self.assertEqual(run_proc.returncode, 7, run_proc.stderr)
             self.assertEqual(run_proc.stdout, "")
 
+    def test_v049_comptime_lowers_to_constant_without_runtime_call(self):
+        mlir = compile_file(FIXTURES / "comptime_constant.ins", module_root=FIXTURES)
+        self.assertIn("arith.constant 16 : i32", mlir)
+        main_body = mlir.split("func.func @main", 1)[1]
+        self.assertNotIn("func.call @square", main_body)
+
+    def test_v049_comptime_interface_json_constant_value(self):
+        env = {**os.environ, "PYTHONPATH": str(SRC)}
+        proc = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "inscription",
+                "compile",
+                str(FIXTURES / "comptime_constant.ins"),
+                "--emit",
+                "interface-json",
+            ],
+            cwd=ROOT,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        payload = json.loads(proc.stdout)
+        constants = {
+            constant["name"]: constant
+            for module in payload["modules"]
+            for constant in module.get("constants", [])
+        }
+        self.assertEqual(constants["sixteen"]["value"], 16)
+
     def test_negative_diagnostics(self):
         cases = {
+            "comptime unsupported storage": (
+                "To bad value, giving i32.\n"
+                "Let cells be array of 4 i32 containing 1, 2, 3, 4.\n"
+                "Give cells at 0.\n\n"
+                "Constant x: i32 be comptime bad value.\n",
+                "comptime evaluation failed: interpreter does not support arrays in v0.49",
+            ),
+            "comptime extern call": (
+                "External host value, giving i32, as host_value.\n\n"
+                "To bad value, giving i32.\n"
+                "Give host value.\n\n"
+                "Constant x: i32 be comptime bad value.\n",
+                "comptime evaluation failed: interpreter does not support extern phrase calls in v0.49",
+            ),
+            "comptime step limit": (
+                "To infinite, giving i32.\n"
+                "Let x be 0.\n"
+                "While true: x becomes x plus 1.\n"
+                "Give x.\n\n"
+                "Constant x: i32 be comptime infinite.\n",
+                "comptime evaluation failed: interpreter step limit exceeded",
+            ),
+            "comptime does phrase": (
+                "To notify value: i32.\n"
+                "Require value is greater than zero.\n\n"
+                "Constant x: i32 be comptime notify 1.\n",
+                "phrase `notify _` does not return a value",
+            ),
+            "comptime unsupported return record": (
+                "Record Point has x: i32; y: i32.\n\n"
+                "To make point, giving Point.\n"
+                "Give Point with x be 1 and y be 2.\n\n"
+                "Constant x: i32 be comptime make point.\n",
+                "comptime result type Point is not supported in v0.49",
+            ),
+            "comptime unsupported argument record": (
+                "Record Point has x: i32; y: i32.\n\n"
+                "To score point point: Point, giving i32.\n"
+                "Give point.x plus point.y.\n\n"
+                "To bad, giving i32.\n"
+                "Let p be Point with x be 1 and y be 2.\n"
+                "Give comptime score point p.\n",
+                "comptime arguments of type Point are not supported in v0.49",
+            ),
+            "comptime statement": (
+                "To square x: i32, giving i32.\n"
+                "Give x times x.\n\n"
+                "To main, giving i32.\n"
+                "comptime square 4.\n"
+                "Give 0.\n",
+                "comptime may only be used as an expression",
+            ),
+            "comptime wrong argument type": (
+                "To square x: i32, giving i32.\n"
+                "Give x times x.\n\n"
+                "Constant x: i32 be comptime square true.\n",
+                "argument x must have type i32, got i1",
+            ),
+            "comptime runtime argument": (
+                "To square x: i32, giving i32.\n"
+                "Give x times x.\n\n"
+                "To bad, giving i32.\n"
+                "Let n be 4.\n"
+                "Give comptime square n.\n",
+                "comptime argument n must be compile-time evaluable",
+            ),
             "malformed top level": ("Please add two numbers\n", "missing period at end of sentence"),
             "unsupported free prose": ("main gives i32:\n  Please understand this naturally\n", "invalid token"),
             "undefined variable": ("main gives i32:\n  missing\n", "used before initialization"),

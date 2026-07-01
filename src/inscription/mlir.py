@@ -20,6 +20,7 @@ from .ast import (
     Cast,
     CheckStmt,
     Comparison,
+    ComptimeExpr,
     EnumCase,
     EnumType,
     ExpectStmt,
@@ -735,6 +736,9 @@ class MlirEmitter:
             return self.emit_cast(expr, env, lines, indent, type_name)
         if isinstance(expr, Binary):
             return self.emit_binary(expr, env, lines, indent, type_name)
+        if isinstance(expr, ComptimeExpr):
+            const_value = evaluate_const_expr(expr, env_types, self.functions, self.records, self.top_constants, expected=expected)
+            return self.emit_const_value(const_value, lines, indent)
         if isinstance(expr, Call):
             target = self.functions[expr.name]
             args = self.emit_call_arguments(expr, target, env, lines, indent)

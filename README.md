@@ -11,14 +11,14 @@ The full language guide now lives in **[The Inscription Book](book/src/title-pag
 
 ## Status
 
-This repository currently implements **Inscription v0.48: interpreter groundwork**. v0.48 adds an internal deterministic interpreter for a pure, side-effect-free subset of checked Inscription programs. It is groundwork for future `build.ins`, `comptime`, generated data, and stronger static evaluation; it does not expose user-facing build scripts or runtime interpretation. The existing v0.47 package path dependencies, package-aware static libraries, executables, LLVM IR, interface JSON, and C headers, first-class source tests, comments, documentation comments, owned buffer literal/copy initialization, pattern alternatives, integer ranges, match guards, exhaustive matches, and move-aware owned-buffer control flow remain available. The mdBook documentation site remains the primary language guide.
+This repository currently implements **Inscription v0.49: `comptime` scalar evaluation**. v0.49 exposes the internal pure interpreter through narrow `comptime phrase call` expressions that evaluate pure scalar/enum phrase calls during compilation and lower as constants. The existing v0.48 interpreter groundwork, v0.47 package path dependencies, package-aware static libraries, executables, LLVM IR, interface JSON, and C headers, first-class source tests, comments, documentation comments, owned buffer literal/copy initialization, pattern alternatives, integer ranges, match guards, exhaustive matches, and move-aware owned-buffer control flow remain available. The mdBook documentation site remains the primary language guide.
 
 The current language includes:
 
 - scalar integer, float, and boolean types
-- deterministic prose-punctuation syntax, `then` parent continuations, canonical formatter, ordinary comments, documentation comments, first-class tests, test-time `Expect` assertions, declarative package manifests, and internal pure-subset interpreter groundwork
+- deterministic prose-punctuation syntax, `then` parent continuations, canonical formatter, ordinary comments, documentation comments, first-class tests, test-time `Expect` assertions, declarative package manifests, and pure-subset interpreter groundwork
 - modules, imports, package-aware module roots, local path dependencies, and package build artifact routing
-- constants, checks, runtime `Require`, and optional `--runtime-checks`
+- constants, checks, `comptime` scalar/enum phrase-call evaluation, runtime `Require`, and optional `--runtime-checks`
 - phrases, extern declarations, and scalar exported phrases
 - records, layout records, nominal enums, tagged unions, exhaustive matches, wildcard `anything` patterns, match guards, pattern alternatives, integer ranges, and ignored union payload fields
 - buffers, arrays, borrowed views, byte literals, and byte-string storage initialization
@@ -240,9 +240,20 @@ Depend on Checksums from path "../checksums".
 Run `inscription package check` to validate the manifest, source layout, and dependency graph. Run `inscription package test` to discover `.ins` test files under the manifest's test directory using the package source directory and direct dependency exposed modules for imports; add `--include-dependencies` to run dependency package tests. Run `inscription package build` to emit package artifacts; the default artifact is `build/lib<Package>.a`, and root package headers intentionally omit dependency exports.
 
 
-## Internal interpreter groundwork
+## Compile-time evaluation and interpreter groundwork
 
-v0.48 adds `src/inscription/interpreter.py`, an internal deterministic interpreter for checked pure phrases over scalar, enum, record, layout-record-as-value, and union values. It supports selected expression and control-flow evaluation for compiler tests and future static tooling, with deterministic diagnostics for unsupported storage, owned buffers, views, extern calls, and step-limit exhaustion. It is not a stable user-facing execution mode, does not evaluate `package.ins`, and does not add `build.ins` or `comptime` syntax.
+v0.49 adds `comptime phrase call` expressions for pure scalar/enum compile-time execution:
+
+```inscription
+To square x: i32, giving i32.
+Give x times x.
+
+Constant sixteen: i32 be comptime square 4.
+```
+
+`comptime` calls are evaluated by the internal deterministic interpreter and emit ordinary constants; no runtime call is lowered. v0.49 supports scalar and enum arguments/results, pure phrase calls, control flow, matches, guards, alternatives, ranges, casts, and arithmetic. It intentionally rejects storage, owned buffers, views, extern calls, unsupported result types, and step-limit exhaustion. `package.ins` remains declarative, `build.ins` is still future work, and `comptime` is not a macro or reflection system.
+
+v0.48 introduced `src/inscription/interpreter.py`, an internal deterministic interpreter for checked pure phrases over scalar, enum, record, layout-record-as-value, and union values. It supports selected expression and control-flow evaluation for compiler tests and static tooling, with deterministic diagnostics for unsupported features. It is not a stable user-facing runtime interpretation mode.
 
 ## Documentation map
 
@@ -251,8 +262,8 @@ v0.48 adds `src/inscription/interpreter.py`, an internal deterministic interpret
 - [`book/tools/check_book_examples.py`](book/tools/check_book_examples.py): deterministic book example checker
 - [`book/tools/inscription_mdbook_preprocessor.py`](book/tools/inscription_mdbook_preprocessor.py): mdBook preprocessor that reuses Inscription's own highlighter
 - [`docs/github-pages.md`](docs/github-pages.md): GitHub Pages setup notes
-- [`docs/inscription-v0.48-spec.md`](docs/inscription-v0.48-spec.md): current language sprint spec
-- [`grammar/inscription-v0.48.ebnf`](grammar/inscription-v0.48.ebnf): current grammar mirror
+- [`docs/inscription-v0.49-spec.md`](docs/inscription-v0.49-spec.md): current language sprint spec
+- [`grammar/inscription-v0.49.ebnf`](grammar/inscription-v0.49.ebnf): current grammar mirror
 
 ## Testing
 

@@ -22,6 +22,7 @@ from .ast import (
     Cast,
     CheckStmt,
     Comparison,
+    ComptimeExpr,
     EnumCase,
     EnumType,
     ExpectStmt,
@@ -159,6 +160,30 @@ class Interpreter:
         functions = function_table(program)
         self.constants = constant_table(program, self.records, functions)
         self.functions = resolve_function_table(functions, self.records, self.constants)
+        self.current_return_type: ValueType | None = None
+
+    @classmethod
+    def from_checked_context(
+        cls,
+        *,
+        records: dict[str, object],
+        functions: dict[str, Function],
+        constants: dict[str, ConstValue],
+        enums: dict[str, object],
+        unions: dict[str, object],
+        step_limit: int = 100_000,
+    ) -> "Interpreter":
+        interpreter = cls.__new__(cls)
+        interpreter.program = Program((), (), (), (), (), (), ())
+        interpreter.step_limit = step_limit
+        interpreter.remaining_steps = step_limit
+        interpreter.enums = enums
+        interpreter.unions = unions
+        interpreter.records = records
+        interpreter.constants = constants
+        interpreter.functions = functions
+        interpreter.current_return_type = None
+        return interpreter
 
     def call_phrase(self, phrase_name_or_symbol: str, args: list[Value | int | bool | float] | tuple[Value | int | bool | float, ...] = ()) -> Value:
         self.remaining_steps = self.step_limit
@@ -170,15 +195,11 @@ class Interpreter:
         self._require_supported_type(fn.return_type, "return type", fn.line)
         if len(args) != len(fn.params):
             raise InterpreterError(f"interpreter expected {len(fn.params)} arguments, got {len(args)}", fn.line)
-        env: dict[str, Value] = {}
+        coerced: list[Value] = []
         for param, arg in zip(fn.params, args, strict=True):
             self._require_supported_type(param.type_name, f"parameter {param.name}", fn.line)
-            env[param.name] = self._coerce_argument(arg, param.type_name, param.name)
-        try:
-            self._execute_statements(fn.body, env)
-        except _ReturnSignal as signal:
-            return signal.value
-        raise InterpreterError(f"phrase `{fn.display_name}` did not give a value", fn.line)
+            coerced.append(self._coerce_argument(arg, param.type_name, param.name))
+        return self._call_function(fn, coerced)
 
     def enum_value(self, type_name: str, case_name: str) -> EnumValue:
         resolved = resolve_named_value_type(RecordType(type_name))
@@ -321,7 +342,7 @@ class Interpreter:
                 raise InterpreterError("interpreter assertion failed", stmt.line)
             return
         if isinstance(stmt, ReturnStmt):
-            raise _ReturnSignal(self._eval_expr(stmt.expr, env))
+            raise _ReturnSignal(self._eval_expr(stmt.expr, env, expected=self.current_return_type))
         if isinstance(stmt, BufferBinding):
             raise InterpreterError("interpreter does not support buffers in v0.48", stmt.line)
         if isinstance(stmt, ArrayBinding):
@@ -418,6 +439,8 @@ class Interpreter:
             return self._eval_expr(expr.otherwise, env, expected=result_type)
         if isinstance(expr, MatchExpr):
             return self._eval_match_expr(expr, env, expected=expected)
+        if isinstance(expr, ComptimeExpr):
+            return self._eval_call(expr.call, env)
         if isinstance(expr, Call):
             return self._eval_call(expr, env)
         if isinstance(expr, BufferLoad):
@@ -447,6 +470,8 @@ class Interpreter:
 
     def _call_function(self, fn: Function, args: list[Value]) -> Value:
         saved_steps = self.remaining_steps
+        saved_return_type = self.current_return_type
+        self.current_return_type = fn.return_type
         env: dict[str, Value] = {}
         for param, value in zip(fn.params, args, strict=True):
             self._require_supported_type(param.type_name, f"parameter {param.name}", fn.line)
@@ -455,8 +480,11 @@ class Interpreter:
         try:
             self._execute_statements(fn.body, env)
         except _ReturnSignal as signal:
+            if fn.return_type is not None:
+                self._require_value_type(signal.value, fn.return_type, fn.line)
             return signal.value
         finally:
+            self.current_return_type = saved_return_type
             self.remaining_steps = min(self.remaining_steps, saved_steps)
         raise InterpreterError(f"phrase `{fn.display_name}` did not give a value", fn.line)
 

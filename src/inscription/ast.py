@@ -396,6 +396,12 @@ class Call:
 
 
 @dataclass(frozen=True)
+class ComptimeExpr:
+    call: Call
+    line: int
+
+
+@dataclass(frozen=True)
 class Comparison:
     pred: CmpPredicate
     left: "Expr"
@@ -454,6 +460,7 @@ Expr = (
     | Cast
     | Binary
     | Call
+    | ComptimeExpr
     | Comparison
     | WhenExpr
     | MatchExpr

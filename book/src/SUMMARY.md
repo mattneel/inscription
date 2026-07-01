@@ -23,6 +23,7 @@
 - [Punctuation](language/punctuation.md)
 - [Scalar Types](language/scalar-types.md)
 - [Constants and Checks](language/constants-and-checks.md)
+- [Comptime](language/comptime.md)
 - [Require and Runtime Checks](language/require-and-runtime-checks.md)
 - [Control Flow](language/control-flow.md)
 - [Match](language/match.md)

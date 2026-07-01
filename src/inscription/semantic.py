@@ -23,6 +23,7 @@ from .ast import (
     Cast,
     CheckStmt,
     Comparison,
+    ComptimeExpr,
     ConstantDecl,
     EnumCase,
     EnumDecl,
@@ -321,14 +322,14 @@ class CompileTimeEvaluationError(Exception):
 
 def analyze(program: Program) -> None:
     type_alias_table(program)
-    enum_table(program)
+    raw_functions = function_table(program)
+    enum_table(program, raw_functions)
     unions = union_table(program)
     records = record_table(program)
     validate_union_payloads(unions, records)
     validate_type_aliases(records)
-    functions = function_table(program)
-    constants = constant_table(program, records, functions)
-    functions = resolve_function_table(functions, records, constants)
+    constants = constant_table(program, records, raw_functions)
+    functions = resolve_function_table(raw_functions, records, constants)
     validate_external_symbols(functions)
     for check in program.checks:
         _check_compile_time_check(check, {}, functions, records, constants)
@@ -340,8 +341,9 @@ def analyze(program: Program) -> None:
     _check_tests(program.tests, functions, records, constants)
 
 
-def enum_table(program: Program) -> dict[str, EnumInfo]:
+def enum_table(program: Program, functions: dict[str, Function] | None = None) -> dict[str, EnumInfo]:
     global ACTIVE_ENUMS
+    functions = functions or function_table(program)
     ACTIVE_ENUMS = {}
     record_names = {record.name for record in program.records}
     constant_names = {constant.name for constant in program.constants}
@@ -362,7 +364,7 @@ def enum_table(program: Program) -> dict[str, EnumInfo]:
             )
         if not enum.cases:
             raise InscriptionError(f"enum {enum.name} must declare at least one case", enum.line)
-        case_constants = _primitive_constants_before_enum(program, enum.line)
+        case_constants = _primitive_constants_before_enum(program, enum.line, functions)
         cases: dict[str, int] = {}
         values: dict[int, str] = {}
         for case in enum.cases:
@@ -372,7 +374,7 @@ def enum_table(program: Program) -> dict[str, EnumInfo]:
                 value = evaluate_const_expr(
                     case.value,
                     _constant_env_types(case_constants),
-                    {},
+                    functions,
                     {},
                     case_constants,
                     expected=underlying_type,
@@ -509,7 +511,11 @@ def _validate_storage_alias_element(alias_name: str, element_type: ValueType, li
         raise InscriptionError(f"type alias {alias_name} has invalid storage element type {format_type(element_type)}", line)
 
 
-def _primitive_constants_before_enum(program: Program, enum_line: int) -> dict[str, ConstValue]:
+def _primitive_constants_before_enum(
+    program: Program,
+    enum_line: int,
+    functions: dict[str, Function] | None = None,
+) -> dict[str, ConstValue]:
     """Evaluate earlier primitive scalar constants for enum case expressions.
 
     The main constant table needs enum metadata, but enum case values are
@@ -526,7 +532,7 @@ def _primitive_constants_before_enum(program: Program, enum_line: int) -> dict[s
             continue
         env = _constant_env_types(constants)
         try:
-            value = evaluate_const_expr(const.expr, env, {}, {}, constants, expected=const.type_name)
+            value = evaluate_const_expr(const.expr, env, functions or {}, {}, constants, expected=const.type_name)
         except (CompileTimeEvaluationError, InscriptionError):
             continue
         if value.type_name == const.type_name:
@@ -666,6 +672,8 @@ def constant_table(
                 or message.startswith("unknown binding")
                 or message.startswith("constant expression")
                 or message.startswith("constant shift")
+                or message.startswith("comptime ")
+                or message.startswith("phrase `")
             ):
                 raise
             try:
@@ -1254,6 +1262,12 @@ def _check_expr_ownership(
             _check_expr_ownership(arm.expr, arm_scope, functions, records, constants, scope_depth=scope_depth + 1)
         if expr.otherwise is not None:
             _check_expr_ownership(expr.otherwise, bindings, functions, records, constants, scope_depth=scope_depth + 1)
+        return
+    if isinstance(expr, ComptimeExpr):
+        for actual in expr.call.args:
+            if isinstance(actual, MoveArg):
+                raise InscriptionError("move may only be used as an argument to an owned buffer parameter", actual.line)
+            _check_expr_ownership(actual, bindings, functions, records, constants, scope_depth=scope_depth)
         return
     if isinstance(expr, Call):
         for actual in expr.args:
@@ -2351,12 +2365,13 @@ def _infer_call_scalar_argument_type(
     env: dict[str, ValueType],
     functions: dict[str, Function],
     records: dict[str, RecordDecl],
+    constants: dict[str, ConstValue] | None = None,
 ) -> ValueType:
     if isinstance(arg, Variable):
         actual = env.get(arg.name)
         if isinstance(actual, BufferType | ArrayType | ViewType | OwnedBufferType | RecordType | UnionType):
             return actual
-    return _infer_declared_type(arg, expected, env, functions, records)
+    return _infer_declared_type(arg, expected, env, functions, records, constants)
 
 
 def _argument_name(arg: Expr | MoveArg) -> str:
@@ -2529,6 +2544,83 @@ def _check_require(
         raise InscriptionError("require condition is known to be false", stmt.line)
 
 
+def _interpreter_value_from_const(value: ConstValue):
+    from .interpreter import BoolValue, EnumValue, FloatValue, IntValue
+
+    if value.type_name == "i1":
+        return BoolValue("i1", bool(value.value))
+    if isinstance(value.type_name, EnumType):
+        return EnumValue(value.type_name, int(value.value))
+    if is_float_type(value.type_name):
+        assert isinstance(value.type_name, str)
+        return FloatValue(value.type_name, float(value.value))
+    if is_integer_type(value.type_name):
+        assert isinstance(value.type_name, str)
+        return IntValue(value.type_name, int(value.value))
+    raise InscriptionError(f"comptime arguments of type {format_type(value.type_name)} are not supported in v0.49")
+
+
+def _const_value_from_interpreter_value(value, line: int) -> ConstValue:
+    from .interpreter import BoolValue, EnumValue, FloatValue, IntValue
+
+    if isinstance(value, BoolValue):
+        return ConstValue("i1", bool(value.value))
+    if isinstance(value, EnumValue):
+        return ConstValue(value.type_name, int(value.underlying_value))
+    if isinstance(value, FloatValue):
+        return ConstValue(value.type_name, normalize_float(float(value.value), value.type_name))
+    if isinstance(value, IntValue):
+        return ConstValue(value.type_name, normalize_integer(int(value.value), value.type_name))
+    result_type = getattr(value, "type_name", None)
+    raise InscriptionError(f"comptime result type {format_type(result_type)} is not supported in v0.49", line)
+
+
+def _evaluate_comptime_expr(
+    expr: ComptimeExpr,
+    env: dict[str, ValueType],
+    functions: dict[str, Function],
+    records: dict[str, RecordDecl],
+    constants: dict[str, ConstValue],
+    *,
+    expected: ValueType | None = None,
+) -> ConstValue:
+    from .interpreter import Interpreter, InterpreterError
+
+    result_type = infer_comptime_expr_type(expr, env, functions, records, expected=expected, constants=constants)
+    target = _lookup_phrase(expr.call.name, expr.call.line, functions)
+    args = []
+    for actual, param in zip(expr.call.args, target.params, strict=True):
+        param_type = resolve_value_type(param.type_name, expr.call.line, records, constants, functions, env)
+        try:
+            const_arg = evaluate_const_expr(actual, env, functions, records, constants, expected=param_type)
+        except CompileTimeEvaluationError as exc:
+            raise InscriptionError(
+                f"comptime argument {_argument_name(actual)} must be compile-time evaluable",
+                exc.line or getattr(actual, "line", expr.line),
+            ) from exc
+        args.append(_interpreter_value_from_const(const_arg))
+    resolved_functions = resolve_function_table(functions, records, constants)
+    interpreter = Interpreter.from_checked_context(
+        records=records,
+        functions=resolved_functions,
+        constants=constants,
+        enums=ACTIVE_ENUMS,
+        unions=ACTIVE_UNIONS,
+    )
+    try:
+        result = interpreter.call_phrase(expr.call.name, args)
+    except InterpreterError as exc:
+        detail = getattr(exc, "message", str(exc)).replace("v0.48", "v0.49")
+        raise InscriptionError(f"comptime evaluation failed: {detail}", exc.line or expr.line) from exc
+    value = _const_value_from_interpreter_value(result, expr.line)
+    if value.type_name != result_type:
+        raise InscriptionError(
+            f"comptime result type {format_type(value.type_name)} does not match {format_type(result_type)}",
+            expr.line,
+        )
+    return value
+
+
 def evaluate_const_expr(
     expr: Expr,
     env: dict[str, ValueType],
@@ -2539,6 +2631,8 @@ def evaluate_const_expr(
     expected: ValueType | None = None,
 ) -> ConstValue:
     type_name = infer_expr_type(expr, env, functions, records, expected=expected, constants=constants)
+    if isinstance(expr, ComptimeExpr):
+        return _evaluate_comptime_expr(expr, env, functions, records, constants, expected=expected)
     if isinstance(type_name, RecordType | BufferType | ArrayType | ViewType | OwnedBufferType | UnionType):
         noun = "union" if isinstance(type_name, UnionType) else "record"
         raise CompileTimeEvaluationError(f"{noun} value is not compile-time evaluable", getattr(expr, "line", None))
@@ -2865,6 +2959,56 @@ def evaluate_comparison(pred: str, left: int | bool | float, right: int | bool |
     raise AssertionError(pred)  # pragma: no cover
 
 
+def _is_comptime_scalar_or_enum(type_name: ValueType) -> bool:
+    resolved = resolve_named_value_type(type_name)
+    return (isinstance(resolved, str) and resolved in SCALAR_TYPES) or isinstance(resolved, EnumType)
+
+
+def infer_comptime_expr_type(
+    expr: ComptimeExpr,
+    env: dict[str, ValueType],
+    functions: dict[str, Function],
+    records: dict[str, RecordDecl],
+    *,
+    expected: ValueType | None = None,
+    constants: dict[str, ConstValue] | None = None,
+) -> ValueType:
+    constants = constants or {}
+    call = expr.call
+    target = _lookup_phrase(call.name, call.line, functions)
+    if target.return_type is None:
+        raise InscriptionError(f"phrase `{target.display_name}` does not return a value", call.line)
+    _check_call_arity(call, target)
+    result_type = resolve_value_type(target.return_type, call.line, records, constants, functions, env)
+    if not _is_comptime_scalar_or_enum(result_type):
+        raise InscriptionError(f"comptime result type {format_type(result_type)} is not supported in v0.49", call.line)
+    for actual, param in zip(call.args, target.params, strict=True):
+        if isinstance(actual, MoveArg):
+            raise InscriptionError("move may only be used as an argument to an owned buffer parameter", actual.line)
+        param_type = resolve_value_type(param.type_name, call.line, records, constants, functions, env)
+        if not _is_comptime_scalar_or_enum(param_type):
+            raise InscriptionError(f"comptime arguments of type {format_type(param_type)} are not supported in v0.49", getattr(actual, "line", call.line))
+        actual_type = _infer_call_scalar_argument_type(actual, param_type, env, functions, records, constants)
+        if actual_type != param_type:
+            argument_name = _argument_name(actual)
+            if argument_name == "argument":
+                argument_name = param.name
+            raise InscriptionError(
+                f"argument {argument_name} must have type {format_type(param_type)}, got {format_type(actual_type)}",
+                getattr(actual, "line", call.line),
+            )
+        try:
+            evaluate_const_expr(actual, env, functions, records, constants, expected=param_type)
+        except CompileTimeEvaluationError as exc:
+            raise InscriptionError(
+                f"comptime argument {_argument_name(actual)} must be compile-time evaluable",
+                exc.line or getattr(actual, "line", call.line),
+            ) from exc
+    if expected is not None:
+        require_type(result_type, expected, call.line)
+    return result_type
+
+
 def infer_expr_type(
     expr: Expr,
     env: dict[str, ValueType],
@@ -3028,6 +3172,8 @@ def infer_expr_type(
         return infer_cast_type(expr, env, functions, records, expected=expected)
     if isinstance(expr, Binary):
         return infer_binary_type(expr, env, functions, records, expected=expected)
+    if isinstance(expr, ComptimeExpr):
+        return infer_comptime_expr_type(expr, env, functions, records, expected=expected, constants=constants)
     if isinstance(expr, Call):
         target = _lookup_phrase(expr.name, expr.line, functions)
         if target.return_type is None:
