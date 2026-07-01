@@ -43,3 +43,4 @@ Recent milestones:
 - v0.62: centralized diagnostic rendering with file/line/column spans and source excerpts for common compiler, package, build-script, and formatter errors.
 - v0.63: stable diagnostic codes, a local diagnostic-code registry, and `inscription explain CODE` / `inscription explain --list`.
 - v0.64: structured JSON diagnostics via `--diagnostic-format text|json` for compiler, package, build, formatter, release, and test failures.
+- v0.65: deterministic source symbol/reference indexes via `inscription symbols` and `inscription package symbols`.

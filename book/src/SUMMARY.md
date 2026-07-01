@@ -50,6 +50,7 @@
 - [Artifacts](tooling/artifacts.md)
 - [Optimization](tooling/optimization.md)
 - [Interface JSON](tooling/interface-json.md)
+- [Source Symbols](tooling/symbols.md)
 - [C Headers](tooling/c-headers.md)
 - [Static Libraries](tooling/static-libraries.md)
 - [Executables](tooling/executables.md)

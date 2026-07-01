@@ -27,6 +27,7 @@ from inscription.interpreter import FloatValue, IntValue, Interpreter, Interpret
 from inscription.package import format_manifest_source, parse_manifest
 from inscription.parser import normalize_punctuation_source
 from inscription.runner import LOWERING_PASSES, OPTIMIZATION_PRESETS, ToolchainError, resolve_toolchain, run_file as _run_file, run_source as _run_source, verify_mlir
+from inscription.source_index import build_package_source_index, build_source_index
 from inscription.version import INSCRIPTION_VERSION, LANGUAGE_VERSION, RELEASE_FORMAT, version_payload
 from tests.v032_migrate import maybe_convert_path, maybe_convert_source
 
@@ -10397,6 +10398,144 @@ Give result plus seen.
             self.assertEqual(release_proc.returncode, 2)
             release_diag = stderr_json(release_proc)["diagnostics"][0]
             self.assertEqual(release_diag["code"], "INS-REL-0001")
+
+    def test_v065_source_index_single_file_symbols_and_references(self):
+        source = """Module Example.
+
+Type Count be i32.
+
+Record Point has x: i32; y: i32.
+
+Enum Mode backed by u8 has idle be 0; active be 1.
+
+Union MaybeI32 has none; some value: i32.
+
+To add left: Count and right: Count, giving Count.
+Give left plus right.
+
+To score point point: Point, giving i32.
+Give point.x plus point.y.
+
+To mode code mode: Mode, giving i32.
+Give match mode:
+Mode.active gives 7;
+anything gives 0.
+
+To maybe value maybe: MaybeI32, giving i32.
+Give match maybe:
+MaybeI32.some with value as value gives value;
+anything gives 0.
+
+To main, giving i32.
+Let p be Point with x be 3 and y be 4.
+Let maybe be MaybeI32.some with value be 7.
+Let first be add 20 and 22.
+Let second be score point p.
+Let third be mode code Mode.active.
+Let fourth be maybe value maybe.
+Give first plus second plus third plus fourth.
+
+Test addition works.
+Expect add 20 and 22 is equal to 42.
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "Example.ins"
+            path.write_text(source)
+            index = build_source_index(path)
+
+        self.assertEqual(index.payload()["format"], "inscription-symbol-index-v1")
+        symbols = {(symbol.kind, symbol.name) for symbol in index.symbols}
+        for expected in (
+            ("module", "Example"),
+            ("type_alias", "Count"),
+            ("record", "Point"),
+            ("record_field", "x"),
+            ("record_field", "y"),
+            ("enum", "Mode"),
+            ("enum_case", "active"),
+            ("union", "MaybeI32"),
+            ("union_variant", "some"),
+            ("union_payload", "value"),
+            ("phrase", "add _ and _"),
+            ("test", "addition works"),
+        ):
+            with self.subTest(symbol=expected):
+                self.assertIn(expected, symbols)
+        kinds = {reference.kind for reference in index.references}
+        for expected in (
+            "type_reference",
+            "phrase_call",
+            "enum_case_reference",
+            "union_constructor_reference",
+            "union_pattern_reference",
+            "field_reference",
+        ):
+            with self.subTest(reference_kind=expected):
+                self.assertIn(expected, kinds)
+        resolved = [reference for reference in index.references if reference.kind == "phrase_call" and reference.name == "add"]
+        self.assertTrue(resolved)
+        self.assertTrue(any(reference.target_id for reference in resolved))
+
+    def test_v065_package_source_index_symbols_build_steps_and_dependencies(self):
+        package_index = build_package_source_index(ROOT / "tests" / "fixtures" / "packages" / "build_script_standard_package")
+        self.assertEqual(package_index.package["name"], "StandardPkg")
+        symbol_pairs = {(symbol.kind, symbol.name) for symbol in package_index.symbols}
+        self.assertIn(("package", "StandardPkg"), symbol_pairs)
+        self.assertIn(("module", "StandardPkg"), symbol_pairs)
+        self.assertIn(("exported_phrase", "add _ and _"), symbol_pairs)
+        self.assertIn(("test", "addition works"), symbol_pairs)
+        self.assertIn(("build_step", "format"), symbol_pairs)
+        self.assertIn(("build_group", "ci"), symbol_pairs)
+        self.assertIn(("build_default", "default"), symbol_pairs)
+        build_refs = [reference for reference in package_index.references if reference.kind == "build_step_reference"]
+        self.assertTrue(any(reference.name == "format" and reference.target_id for reference in build_refs))
+
+        root_only = build_package_source_index(ROOT / "tests" / "fixtures" / "packages" / "app_with_dependency")
+        with_deps = build_package_source_index(
+            ROOT / "tests" / "fixtures" / "packages" / "app_with_dependency",
+            include_dependencies=True,
+        )
+        root_modules = {symbol.qualified_name for symbol in root_only.symbols if symbol.kind == "module"}
+        dep_modules = {symbol.qualified_name for symbol in with_deps.symbols if symbol.kind == "module"}
+        self.assertNotIn("Checksums", root_modules)
+        self.assertIn("Checksums", dep_modules)
+
+    def test_v065_symbols_cli_json_and_diagnostics(self):
+        env = {**os.environ, "PYTHONPATH": str(SRC)}
+
+        def run_cli(*args: str | Path) -> subprocess.CompletedProcess[str]:
+            return subprocess.run(
+                [sys.executable, "-m", "inscription", *(str(arg) for arg in args)],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+
+        symbols = run_cli("symbols", ROOT / "tests" / "fixtures" / "positive" / "phrase_max.ins", "--pretty")
+        self.assertEqual(symbols.returncode, 0, symbols.stderr)
+        payload = json.loads(symbols.stdout)
+        self.assertEqual(payload["format"], "inscription-symbol-index-v1")
+        self.assertTrue(payload["symbols"])
+        self.assertTrue(payload["references"])
+
+        package_symbols = run_cli("package", "symbols", ROOT / "tests" / "fixtures" / "packages" / "basic_package", "--pretty")
+        self.assertEqual(package_symbols.returncode, 0, package_symbols.stderr)
+        package_payload = json.loads(package_symbols.stdout)
+        self.assertEqual(package_payload["package"]["name"], "ProtocolTools")
+        self.assertTrue(any(item["kind"] == "test" for item in package_payload["symbols"]))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            bad = Path(tmp) / "bad.ins"
+            bad.write_text("To main, giving i32.\nGive missing.\n")
+            bad_proc = run_cli("symbols", bad, "--diagnostic-format", "json")
+            self.assertEqual(bad_proc.returncode, 2)
+            self.assertEqual(bad_proc.stdout, "")
+            diagnostic = json.loads(bad_proc.stderr)["diagnostics"][0]
+            self.assertEqual(diagnostic["code"], "INS-SEM-0001")
+            self.assertEqual(diagnostic["span"]["line"], 2)
 
 
 class FormatterTests(unittest.TestCase):

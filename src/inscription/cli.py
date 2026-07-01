@@ -39,6 +39,7 @@ from .package import (
     run_package_tests,
 )
 from .mlir import emit_mlir
+from .source_index import build_package_source_index, build_source_index
 from .runner import (
     EMIT_MODES,
     LOWERING_PASSES,
@@ -255,6 +256,14 @@ def main(argv: list[str] | None = None) -> int:
     _add_optimization_args(test_p)
     _add_diagnostic_format_arg(test_p)
 
+    symbols_p = sub.add_parser("symbols", help="emit a deterministic source symbol/reference index")
+    symbols_p.add_argument("source", type=Path, help="Inscription source file to index, or a package root with --package")
+    symbols_p.add_argument("--format", choices=("json",), default="json", help="symbol index output format")
+    symbols_p.add_argument("--include-references", action="store_true", help="include references in the JSON index (default in v0.65)")
+    symbols_p.add_argument("--module-root", type=Path, help="root directory for resolving imported modules")
+    symbols_p.add_argument("--package", action="store_true", help="treat SOURCE as a package root and index package symbols")
+    symbols_p.add_argument("--pretty", action="store_true", help="pretty-print JSON with two-space indentation")
+    _add_diagnostic_format_arg(symbols_p)
 
     version_p = sub.add_parser("version", help="print deterministic version metadata")
     version_p.add_argument("--json", action="store_true", help="emit version metadata as JSON")
@@ -357,6 +366,12 @@ def main(argv: list[str] | None = None) -> int:
     package_build_p.add_argument("--verify", action="store_true", help="verify emitted artifacts with the LLVM/MLIR 22 toolchain")
     _add_optimization_args(package_build_p)
     _add_diagnostic_format_arg(package_build_p)
+    package_symbols_p = package_sub.add_parser("symbols", help="emit a deterministic package symbol/reference index")
+    package_symbols_p.add_argument("root", nargs="?", type=Path, default=Path("."), help="package root containing package.ins")
+    package_symbols_p.add_argument("--format", choices=("json",), default="json", help="symbol index output format")
+    package_symbols_p.add_argument("--include-dependencies", action="store_true", help="also include local path dependency symbols")
+    package_symbols_p.add_argument("--pretty", action="store_true", help="pretty-print JSON with two-space indentation")
+    _add_diagnostic_format_arg(package_symbols_p)
 
     build_p = sub.add_parser("build", help="interpret build.ins and run package workflow/artifact/documentation steps")
     build_p.add_argument("build_args", nargs="*", help="optional PACKAGE_ROOT and optional STEP name")
@@ -420,6 +435,13 @@ def main(argv: list[str] | None = None) -> int:
                 print(json.dumps(entry.__dict__, indent=2, ensure_ascii=False))
             else:
                 sys.stdout.write(explain_diagnostic_code(entry))
+            return 0
+        if args.command == "symbols":
+            if args.package:
+                index = build_package_source_index(args.source, include_dependencies=False)
+            else:
+                index = build_source_index(args.source, module_root=args.module_root)
+            sys.stdout.write(index.json_text(pretty=args.pretty, include_references=True))
             return 0
         if args.command == "doctor":
             result = run_doctor(
@@ -697,6 +719,10 @@ def main(argv: list[str] | None = None) -> int:
                         print(f"would write archive checksum: {_display_relative(result.archive_checksum_path, root)}")
                 else:
                     print(f"package {result.package_name}: released to {output}")
+                return 0
+            if args.package_command == "symbols":
+                index = build_package_source_index(args.root, include_dependencies=args.include_dependencies)
+                sys.stdout.write(index.json_text(pretty=args.pretty, include_references=True))
                 return 0
             if args.package_command == "build":
                 result = build_package_artifact(

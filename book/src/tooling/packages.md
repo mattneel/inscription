@@ -1,6 +1,6 @@
 # Packages
 
-Inscription v0.45 added a declarative package manifest named `package.ins`; v0.46 added package-aware artifact builds; v0.47 added local path dependencies; v0.50 added optional `build.ins` scripts, v0.51 added check/test steps, and v0.52 added groups/default steps; v0.53 added mdBook documentation steps, v0.54 added package-aware build defaults, v0.55 added standard package workflows, v0.56 added package init/new skeleton generation, v0.57 added package-wide format checks, v0.58 added safe package clean for generated build artifacts, v0.59 added deterministic release bundles, v0.60 added deterministic release archives/checksums, v0.61 added version/doctor health reporting plus compiler/language metadata in release bundles, v0.62 adds source-span diagnostic excerpts, v0.63 adds stable diagnostic codes plus `inscription explain`, and v0.64 adds structured JSON diagnostics. The manifest is metadata, not executable build logic: think `build.zig.zon`, not `build.zig`. `build.ins` is the intentionally narrow interpreted build surface for named package workflow and artifact steps.
+Inscription v0.45 added a declarative package manifest named `package.ins`; v0.46 added package-aware artifact builds; v0.47 added local path dependencies; v0.50 added optional `build.ins` scripts, v0.51 added check/test steps, and v0.52 added groups/default steps; v0.53 added mdBook documentation steps, v0.54 added package-aware build defaults, v0.55 added standard package workflows, v0.56 added package init/new skeleton generation, v0.57 added package-wide format checks, v0.58 added safe package clean for generated build artifacts, v0.59 added deterministic release bundles, v0.60 added deterministic release archives/checksums, v0.61 added version/doctor health reporting plus compiler/language metadata in release bundles, v0.62 adds source-span diagnostic excerpts, v0.63 adds stable diagnostic codes plus `inscription explain`, v0.64 adds structured JSON diagnostics, and v0.65 adds package/source symbol indexes. The manifest is metadata, not executable build logic: think `build.zig.zon`, not `build.zig`. `build.ins` is the intentionally narrow interpreted build surface for named package workflow and artifact steps.
 
 A package root contains `package.ins`, a source directory, and optionally a test directory:
 
@@ -130,7 +130,7 @@ To build package package: Build.Package.
 Build.standard package workflow.
 ```
 
-Use `inscription build path/to/package --list` to list the script's expanded steps and default, `inscription build path/to/package release` to run the standard release group, `inscription build path/to/package library` to build one artifact step, or `inscription build path/to/package` to run the declared default step. v0.64 build scripts call only the built-in `Build` API for standard workflows, package release/clean/format/check/test/build/group/book requests, and package-aware defaults; they cannot run shell commands, access arbitrary files, import package source modules, or customize output paths.
+Use `inscription build path/to/package --list` to list the script's expanded steps and default, `inscription build path/to/package release` to run the standard release group, `inscription build path/to/package library` to build one artifact step, or `inscription build path/to/package` to run the declared default step. v0.65 build scripts call only the built-in `Build` API for standard workflows, package release/clean/format/check/test/build/group/book requests, and package-aware defaults; they cannot run shell commands, access arbitrary files, import package source modules, or customize output paths.
 
 ## Package release bundles
 
@@ -160,7 +160,7 @@ docs/                       # only with --include-book
 
 `--archive` writes a reproducible `.tar.gz` beside the release directory. Archive entries are sorted and normalize mtimes, owners, groups, names, and file modes. `--checksum` writes `checksums.sha256` inside the release directory; with `--archive`, it also writes a sibling `.tar.gz.sha256` file.
 
-`release.json` uses deterministic relative paths, includes Inscription tool/language metadata, and includes no timestamps, hostnames, usernames, git hashes, signatures, or registry metadata. Release bundles do not include source files, tests, dependency package artifacts, signatures, or upload/publish behavior in v0.64.
+`release.json` uses deterministic relative paths, includes Inscription tool/language metadata, and includes no timestamps, hostnames, usernames, git hashes, signatures, or registry metadata. Release bundles do not include source files, tests, dependency package artifacts, signatures, or upload/publish behavior in v0.65.
 
 ## Package builds
 
@@ -180,4 +180,4 @@ Library-like emits (`mlir`, `lowered-mlir`, `llvm-ir`, `object`, `static-library
 
 Package interface JSON includes a top-level `package` object with manifest metadata and direct dependency metadata. Package C headers include exported scalar phrases from the root package root/exposed modules and preserve exported phrase documentation comments; dependency exports are intentionally omitted from the root package header. Build the dependency package separately when you need its header. `--save-temps DIR` writes deterministic package intermediates such as `ProtocolTools.mlir`, `ProtocolTools.lowered.mlir`, `ProtocolTools.ll`, and `ProtocolTools.o`.
 
-Remote dependencies, registries, lockfiles, version solving, target triples, build profiles, custom output paths, arbitrary filesystem/process/network access, and general build graph scripting remain future work. See [Build Scripts](build-scripts.md) for the v0.64 package/build surface, and [Doctor and Version](doctor.md) for package health diagnostics.
+Remote dependencies, registries, lockfiles, version solving, target triples, build profiles, custom output paths, arbitrary filesystem/process/network access, and general build graph scripting remain future work. See [Build Scripts](build-scripts.md) for the v0.65 package/build surface, and [Doctor and Version](doctor.md) for package health diagnostics.
