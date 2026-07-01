@@ -3,6 +3,9 @@
 Common commands:
 
 ```sh
+PYTHONPATH=src python -m inscription --version
+PYTHONPATH=src python -m inscription version --json
+PYTHONPATH=src python -m inscription doctor --json
 PYTHONPATH=src python -m inscription compile SOURCE --verify
 PYTHONPATH=src python -m inscription run SOURCE
 PYTHONPATH=src python -m inscription test SOURCE
@@ -15,9 +18,10 @@ PYTHONPATH=src python -m inscription build PACKAGE_ROOT
 PYTHONPATH=src python -m inscription format SOURCE --check
 PYTHONPATH=src python -m inscription highlight SOURCE
 PYTHONPATH=src python -m inscription check-tools --show-pipeline
+PYTHONPATH=src python -m inscription doctor --check-pages-workflow
 ```
 
-`compile` emits artifacts without executing the program. `run` lowers through LLVM 22 and executes `main` with `lli`. `test` discovers top-level `Test ... .` declarations, compiles each selected test through the MLIR/LLVM pipeline, and reports a deterministic summary. `package new` and `package init` generate formatter-clean package skeletons. `package format` checks or rewrites package-owned `.ins` files. `package clean` removes generated package `build/` artifacts. `package check` validates `package.ins` manifests, dependency graphs, and package source layout. `package test` discovers test files from the manifest test directory and runs them with the package source directory plus direct dependency exposed modules as import roots. `package build` emits package-aware artifacts through the existing compile pipeline. `package release` assembles deterministic release bundle directories and can add reproducible archives plus SHA-256 manifests. `build` interprets `build.ins` and dispatches named release/archive, clean, format, check, test, artifact, documentation, and group steps through the package machinery. `format` is parse-only and does not need LLVM tools. `highlight` uses the same Inscription lexer used by this book.
+`--version` and `version` print deterministic version metadata. `doctor` checks Python, LLVM/MLIR tools, optional artifact/docs tools, package health, and build-script health without mutating files. `compile` emits artifacts without executing the program. `run` lowers through LLVM 22 and executes `main` with `lli`. `test` discovers top-level `Test ... .` declarations, compiles each selected test through the MLIR/LLVM pipeline, and reports a deterministic summary. `package new` and `package init` generate formatter-clean package skeletons. `package format` checks or rewrites package-owned `.ins` files. `package clean` removes generated package `build/` artifacts. `package check` validates `package.ins` manifests, dependency graphs, and package source layout. `package test` discovers test files from the manifest test directory and runs them with the package source directory plus direct dependency exposed modules as import roots. `package build` emits package-aware artifacts through the existing compile pipeline. `package release` assembles deterministic release bundle directories and can add reproducible archives plus SHA-256 manifests; release metadata includes Inscription tool/language metadata. `build` interprets `build.ins` and dispatches named release/archive, clean, format, check, test, artifact, documentation, and group steps through the package machinery. `format` is parse-only and does not need LLVM tools. `highlight` uses the same Inscription lexer used by this book.
 
 Useful test options:
 

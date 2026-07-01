@@ -25,6 +25,7 @@ from .interface import emit_c_header, emit_interface_json, make_interface_contex
 from .runner import EMIT_MODES, Toolchain, build_artifacts, selected_artifact, validate_executable_main
 from .semantic import analyze
 from .tester import TestRunItem, TestRunSummary, list_tests, run_tests, test_slug
+from .version import INSCRIPTION_VERSION, LANGUAGE_VERSION, RELEASE_FORMAT
 
 MANIFEST_NAME = "package.ins"
 SEMVER_RE = re.compile(r"\d+\.\d+\.\d+")
@@ -1385,10 +1386,14 @@ def _release_metadata(
     release_dir: Path,
 ) -> str:
     payload = {
-        "format": "inscription-release-v1",
+        "format": RELEASE_FORMAT,
         "package": {
             "name": manifest.package_name,
             "version": manifest.version,
+        },
+        "inscription": {
+            "version": INSCRIPTION_VERSION,
+            "language_version": LANGUAGE_VERSION,
         },
         "artifacts": [{"kind": artifact.kind, "path": artifact.path} for artifact in artifacts],
     }

@@ -42,6 +42,7 @@
 # Tooling
 
 - [CLI](tooling/cli.md)
+- [Doctor and Version](tooling/doctor.md)
 - [Formatter](tooling/formatter.md)
 - [Testing](tooling/testing.md)
 - [Packages](tooling/packages.md)

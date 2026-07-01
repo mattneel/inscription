@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -8,6 +9,7 @@ from .buildscript import build_step_display, load_build_plan, run_build_script
 from .package import PackageTestSummary
 from .compiler import compile_file, load_program
 from .diagnostics import InscriptionError
+from .doctor import run_doctor
 from .formatter import format_file
 from .interface import emit_c_header, emit_interface_json, load_interface_context
 from .package import (
@@ -34,6 +36,7 @@ from .runner import (
     validate_executable_main,
 )
 from .tester import list_tests, run_tests
+from .version import INSCRIPTION_VERSION, REQUIRED_LLVM_MAJOR, version_lines, version_payload
 
 
 def _add_optimization_args(command: argparse.ArgumentParser) -> None:
@@ -88,7 +91,8 @@ def _display_relative(path: Path, root: Path) -> str:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="inscription")
-    sub = parser.add_subparsers(dest="command", required=True)
+    parser.add_argument("--version", action="store_true", help="print the Inscription tool version and exit")
+    sub = parser.add_subparsers(dest="command", required=False)
 
     compile_p = sub.add_parser("compile", help="emit compiler artifacts for an Inscription source file")
     compile_p.add_argument("source", type=Path)
@@ -119,7 +123,7 @@ def main(argv: list[str] | None = None) -> int:
     compile_p.add_argument("--runtime-checks", action="store_true", help="emit runtime assertions for dynamic storage bounds")
     _add_optimization_args(compile_p)
 
-    run_p = sub.add_parser("run", help="compile and execute through LLVM 22 lli")
+    run_p = sub.add_parser("run", help=f"compile and execute through LLVM {REQUIRED_LLVM_MAJOR} lli")
     run_p.add_argument("source", type=Path)
     run_p.add_argument("--module-root", type=Path, help="root directory for resolving imported modules")
     run_p.add_argument("--runtime-checks", action="store_true", help="emit runtime assertions for dynamic storage bounds")
@@ -138,6 +142,20 @@ def main(argv: list[str] | None = None) -> int:
     test_p.add_argument("--filter", help="run only tests whose display name contains TEXT")
     test_p.add_argument("--list", action="store_true", help="list discovered tests without running them")
     _add_optimization_args(test_p)
+
+
+    version_p = sub.add_parser("version", help="print deterministic version metadata")
+    version_p.add_argument("--json", action="store_true", help="emit version metadata as JSON")
+
+    doctor_p = sub.add_parser("doctor", help="run deterministic environment and package health checks")
+    doctor_p.add_argument("root", nargs="?", type=Path, default=Path("."), help="package root to inspect when package.ins is present")
+    doctor_p.add_argument("--json", action="store_true", help="emit doctor results as JSON")
+    doctor_p.add_argument("--no-package", action="store_true", help="skip package health checks")
+    doctor_p.add_argument("--require-object", action="store_true", help=f"require LLVM {REQUIRED_LLVM_MAJOR} llc for object emission")
+    doctor_p.add_argument("--require-executable", action="store_true", help=f"require LLVM {REQUIRED_LLVM_MAJOR} llc and clang for executable emission")
+    doctor_p.add_argument("--require-static-library", action="store_true", help=f"require LLVM {REQUIRED_LLVM_MAJOR} llc and llvm-ar for static-library emission")
+    doctor_p.add_argument("--require-book", action="store_true", help="require mdBook for documentation build steps")
+    doctor_p.add_argument("--check-pages-workflow", action="store_true", help="check the local GitHub Pages mdBook workflow files")
 
     package_p = sub.add_parser("package", help="work with package.ins manifests")
     package_sub = package_p.add_subparsers(dest="package_command", required=True)
@@ -242,14 +260,40 @@ def main(argv: list[str] | None = None) -> int:
     highlight_p.add_argument("--style", default="default", help="Pygments style name")
     highlight_p.add_argument("--full", action="store_true", help="emit a complete HTML document")
 
-    tools_p = sub.add_parser("check-tools", help="verify LLVM 22 toolchain discovery")
+    tools_p = sub.add_parser("check-tools", help=f"verify LLVM {REQUIRED_LLVM_MAJOR} toolchain discovery")
     tools_p.add_argument("--show-pipeline", action="store_true", help="show optimization presets and the MLIR lowering pipeline")
-    tools_p.add_argument("--require-object", action="store_true", help="require LLVM 22 llc for object emission")
-    tools_p.add_argument("--require-executable", action="store_true", help="require LLVM 22 llc and clang for executable emission")
-    tools_p.add_argument("--require-static-library", action="store_true", help="require LLVM 22 llc and llvm-ar for static library emission")
+    tools_p.add_argument("--require-object", action="store_true", help=f"require LLVM {REQUIRED_LLVM_MAJOR} llc for object emission")
+    tools_p.add_argument("--require-executable", action="store_true", help=f"require LLVM {REQUIRED_LLVM_MAJOR} llc and clang for executable emission")
+    tools_p.add_argument("--require-static-library", action="store_true", help=f"require LLVM {REQUIRED_LLVM_MAJOR} llc and llvm-ar for static library emission")
 
     args = parser.parse_args(argv)
+    if args.version:
+        print(f"inscription {INSCRIPTION_VERSION}")
+        return 0
+    if args.command is None:
+        parser.error("the following arguments are required: command")
     try:
+        if args.command == "version":
+            if args.json:
+                print(json.dumps(version_payload(), indent=2))
+            else:
+                print("\n".join(version_lines()))
+            return 0
+        if args.command == "doctor":
+            result = run_doctor(
+                args.root,
+                no_package=args.no_package,
+                require_object=args.require_object,
+                require_executable=args.require_executable,
+                require_static_library=args.require_static_library,
+                require_book=args.require_book,
+                check_pages_workflow=args.check_pages_workflow,
+            )
+            if args.json:
+                sys.stdout.write(result.json_text())
+            else:
+                sys.stdout.write(result.text())
+            return 0 if result.ok else 2
         if args.command == "compile":
             if args.emit not in EMIT_MODES:
                 raise InscriptionError(f"invalid emit mode {args.emit}")

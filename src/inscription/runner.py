@@ -10,6 +10,7 @@ from pathlib import Path
 from .ast import Program
 from .compiler import load_program
 from .diagnostics import InscriptionError
+from .version import REQUIRED_LLVM_MAJOR
 from .mlir import emit_mlir
 from .semantic import (
     INTEGER_TYPES,
@@ -98,7 +99,7 @@ def resolve_toolchain(
     require_executable: bool = False,
     require_static_library: bool = False,
 ) -> Toolchain:
-    root = Path(os.environ.get("MLIR_TOOLCHAIN", "/usr/lib/llvm-22/bin"))
+    root = Path(os.environ.get("MLIR_TOOLCHAIN", f"/usr/lib/llvm-{REQUIRED_LLVM_MAJOR}/bin"))
     tools = {name: root / name for name in ("mlir-opt", "mlir-translate", "lli")}
     for name, path in tools.items():
         _require_llvm22_tool(name, path)
@@ -115,10 +116,10 @@ def resolve_toolchain(
 
 def _require_llvm22_tool(name: str, path: Path) -> None:
     if not path.exists() or not os.access(path, os.X_OK):
-        raise ToolchainError(f"required LLVM 22 tool '{name}' not found at {path}")
+        raise ToolchainError(f"required LLVM {REQUIRED_LLVM_MAJOR} tool '{name}' not found at {path}")
     version = _tool_version(path)
     if not _reports_llvm22(version):
-        raise ToolchainError(f"tool '{path}' does not report LLVM/MLIR 22.x")
+        raise ToolchainError(f"tool '{path}' does not report LLVM/MLIR {REQUIRED_LLVM_MAJOR}.x")
 
 
 def _resolve_optional_llc(
@@ -138,15 +139,15 @@ def _resolve_optional_llc(
     required = require_object or require_executable or require_static_library
     if not path.exists() or not os.access(path, os.X_OK):
         if required:
-            raise ToolchainError(f"{context} requires llc from LLVM 22, but llc was not found")
+            raise ToolchainError(f"{context} requires llc from LLVM {REQUIRED_LLVM_MAJOR}, but llc was not found")
         return None
     version = _tool_version(path)
     if not _reports_llvm22(version):
         if required:
             major = _llvm_major(version)
             if major is not None:
-                raise ToolchainError(f"{context} requires llc from LLVM 22, got LLVM {major}.x")
-            raise ToolchainError(f"{context} requires llc from LLVM 22, but llc does not report LLVM 22.x")
+                raise ToolchainError(f"{context} requires llc from LLVM {REQUIRED_LLVM_MAJOR}, got LLVM {major}.x")
+            raise ToolchainError(f"{context} requires llc from LLVM {REQUIRED_LLVM_MAJOR}, but llc does not report LLVM {REQUIRED_LLVM_MAJOR}.x")
         return None
     return path
 
@@ -155,21 +156,21 @@ def _resolve_optional_llvm_ar(root: Path, *, require_static_library: bool) -> Pa
     path = root / "llvm-ar"
     if not path.exists() or not os.access(path, os.X_OK):
         if require_static_library:
-            raise ToolchainError("static library emission requires llvm-ar from LLVM 22, but llvm-ar was not found")
+            raise ToolchainError(f"static library emission requires llvm-ar from LLVM {REQUIRED_LLVM_MAJOR}, but llvm-ar was not found")
         return None
     version = _tool_version(path)
     if not _reports_llvm22(version):
         if require_static_library:
             major = _llvm_major(version)
             if major is not None:
-                raise ToolchainError(f"static library emission requires llvm-ar from LLVM 22, got LLVM {major}.x")
-            raise ToolchainError("static library emission requires llvm-ar from LLVM 22, but llvm-ar does not report LLVM 22.x")
+                raise ToolchainError(f"static library emission requires llvm-ar from LLVM {REQUIRED_LLVM_MAJOR}, got LLVM {major}.x")
+            raise ToolchainError(f"static library emission requires llvm-ar from LLVM {REQUIRED_LLVM_MAJOR}, but llvm-ar does not report LLVM {REQUIRED_LLVM_MAJOR}.x")
         return None
     return path
 
 
 def _resolve_optional_clang(root: Path, *, require_executable: bool) -> Path | None:
-    candidates = (root / "clang", root / "clang-22")
+    candidates = (root / "clang", root / f"clang-{REQUIRED_LLVM_MAJOR}")
     invalid_versions: list[str] = []
     for path in candidates:
         if not path.exists() or not os.access(path, os.X_OK):
@@ -183,9 +184,9 @@ def _resolve_optional_clang(root: Path, *, require_executable: bool) -> Path | N
     if invalid_versions:
         major = _llvm_major(invalid_versions[0])
         if major is not None:
-            raise ToolchainError(f"executable emission requires clang from LLVM 22, got LLVM {major}.x")
-        raise ToolchainError("executable emission requires clang from LLVM 22, but clang does not report LLVM 22.x")
-    raise ToolchainError("executable emission requires clang from LLVM 22, but clang was not found")
+            raise ToolchainError(f"executable emission requires clang from LLVM {REQUIRED_LLVM_MAJOR}, got LLVM {major}.x")
+        raise ToolchainError(f"executable emission requires clang from LLVM {REQUIRED_LLVM_MAJOR}, but clang does not report LLVM {REQUIRED_LLVM_MAJOR}.x")
+    raise ToolchainError(f"executable emission requires clang from LLVM {REQUIRED_LLVM_MAJOR}, but clang was not found")
 
 
 def _tool_version(path: Path) -> str:
@@ -196,7 +197,7 @@ def _tool_version(path: Path) -> str:
 
 
 def _reports_llvm22(version: str) -> bool:
-    return re.search(r"\b22\.\d+", version) is not None
+    return re.search(rf"\b{REQUIRED_LLVM_MAJOR}\.\d+", version) is not None
 
 
 def _llvm_major(version: str) -> str | None:
@@ -262,7 +263,7 @@ def translate_to_llvm_ir(lowered_mlir: str, toolchain: Toolchain | None = None) 
 def compile_object(llvm_ir: str, toolchain: Toolchain | None = None) -> bytes:
     toolchain = toolchain or resolve_toolchain(require_object=True)
     if toolchain.llc is None:
-        raise ToolchainError("object emission requires llc from LLVM 22, but llc was not found")
+        raise ToolchainError(f"object emission requires llc from LLVM {REQUIRED_LLVM_MAJOR}, but llc was not found")
     with tempfile.TemporaryDirectory(prefix="inscription-object-") as tmp:
         tmp_path = Path(tmp)
         llvm_path = tmp_path / "input.ll"
@@ -299,7 +300,7 @@ def strip_llvm_function(llvm_ir: str, symbol: str) -> str:
 def link_executable(object_bytes: bytes, output_path: Path, link_objects: tuple[Path, ...], toolchain: Toolchain | None = None) -> None:
     toolchain = toolchain or resolve_toolchain(require_executable=True)
     if toolchain.clang is None:
-        raise ToolchainError("executable emission requires clang from LLVM 22, but clang was not found")
+        raise ToolchainError(f"executable emission requires clang from LLVM {REQUIRED_LLVM_MAJOR}, but clang was not found")
     for path in link_objects:
         if not path.exists():
             raise InscriptionError(f"link object {path} does not exist")
@@ -320,9 +321,9 @@ def create_static_library(
 ) -> None:
     toolchain = toolchain or resolve_toolchain(require_static_library=True)
     if toolchain.llc is None:
-        raise ToolchainError("static library emission requires llc from LLVM 22, but llc was not found")
+        raise ToolchainError(f"static library emission requires llc from LLVM {REQUIRED_LLVM_MAJOR}, but llc was not found")
     if toolchain.llvm_ar is None:
-        raise ToolchainError("static library emission requires llvm-ar from LLVM 22, but llvm-ar was not found")
+        raise ToolchainError(f"static library emission requires llvm-ar from LLVM {REQUIRED_LLVM_MAJOR}, but llvm-ar was not found")
     for path in archive_objects:
         if not path.exists():
             raise InscriptionError(f"archive object {path} does not exist")

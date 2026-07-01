@@ -26,6 +26,7 @@ from inscription.interpreter import FloatValue, IntValue, Interpreter, Interpret
 from inscription.package import format_manifest_source, parse_manifest
 from inscription.parser import normalize_punctuation_source
 from inscription.runner import LOWERING_PASSES, OPTIMIZATION_PRESETS, ToolchainError, resolve_toolchain, run_file as _run_file, run_source as _run_source, verify_mlir
+from inscription.version import INSCRIPTION_VERSION, LANGUAGE_VERSION, RELEASE_FORMAT, version_payload
 from tests.v032_migrate import maybe_convert_path, maybe_convert_source
 
 
@@ -9675,8 +9676,12 @@ Give result plus seen.
             metadata_path = release_dir / "release.json"
             self.assertTrue(metadata_path.exists())
             metadata = json.loads(metadata_path.read_text())
-            self.assertEqual(metadata["format"], "inscription-release-v1")
+            self.assertEqual(metadata["format"], RELEASE_FORMAT)
             self.assertEqual(metadata["package"], {"name": "ReleasePkg", "version": "0.1.0"})
+            self.assertEqual(
+                metadata["inscription"],
+                {"version": INSCRIPTION_VERSION, "language_version": LANGUAGE_VERSION},
+            )
             self.assertEqual(
                 metadata["artifacts"],
                 [
@@ -9920,6 +9925,82 @@ Give result plus seen.
             self.assertTrue((release_root / "ReleasePkg-0.1.0" / "checksums.sha256").exists())
             self.assertTrue((release_root / "ReleasePkg-0.1.0.tar.gz").exists())
             self.assertTrue((release_root / "ReleasePkg-0.1.0.tar.gz.sha256").exists())
+
+    def test_v061_version_and_doctor_cli(self):
+        env = {**os.environ, "PYTHONPATH": str(SRC)}
+
+        def run_cli(*args: str | Path, cwd: Path = ROOT) -> subprocess.CompletedProcess[str]:
+            return subprocess.run(
+                [sys.executable, "-m", "inscription", *(str(arg) for arg in args)],
+                cwd=cwd,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+
+        version_flag = run_cli("--version")
+        self.assertEqual(version_flag.returncode, 0, version_flag.stderr)
+        self.assertEqual(version_flag.stdout, f"inscription {INSCRIPTION_VERSION}\n")
+
+        version_text = run_cli("version")
+        self.assertEqual(version_text.returncode, 0, version_text.stderr)
+        self.assertIn(f"Inscription version: {INSCRIPTION_VERSION}\n", version_text.stdout)
+        self.assertIn(f"Language version: {LANGUAGE_VERSION}\n", version_text.stdout)
+        self.assertIn("Required LLVM/MLIR: 22.x\n", version_text.stdout)
+
+        version_json = run_cli("version", "--json")
+        self.assertEqual(version_json.returncode, 0, version_json.stderr)
+        self.assertEqual(json.loads(version_json.stdout), version_payload())
+
+        doctor = run_cli("doctor", "tests/fixtures/packages/release_package", "--json")
+        self.assertEqual(doctor.returncode, 0, doctor.stderr)
+        payload = json.loads(doctor.stdout)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["package"]["status"], "ok")
+        self.assertEqual(payload["package"]["name"], "ReleasePkg")
+        checks = {check["name"]: check for check in payload["checks"]}
+        self.assertEqual(checks["version"]["detail"], INSCRIPTION_VERSION)
+        self.assertEqual(checks["package"]["detail"], "ReleasePkg")
+        self.assertEqual(checks["build script"]["status"], "ok")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            no_package = run_cli("doctor", "--json", cwd=Path(tmp))
+        self.assertEqual(no_package.returncode, 0, no_package.stderr)
+        no_package_payload = json.loads(no_package.stdout)
+        self.assertTrue(no_package_payload["ok"])
+        self.assertEqual(no_package_payload["package"]["status"], "not-found")
+
+        pages = run_cli("doctor", "--check-pages-workflow")
+        self.assertEqual(pages.returncode, 0, pages.stderr)
+        self.assertIn("pages workflow: ok (.github/workflows/book.yml)\n", pages.stdout)
+
+    def test_v061_release_metadata_includes_inscription_version(self):
+        env = {**os.environ, "PYTHONPATH": str(SRC)}
+
+        def run_cli(*args: str | Path) -> subprocess.CompletedProcess[str]:
+            return subprocess.run(
+                [sys.executable, "-m", "inscription", *(str(arg) for arg in args)],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            package = Path(tmp) / "release_package"
+            shutil.copytree(ROOT / "tests" / "fixtures" / "packages" / "release_package", package)
+            release = run_cli("package", "release", package)
+            self.assertEqual(release.returncode, 0, release.stderr)
+            metadata_path = package / "build" / "release" / "ReleasePkg-0.1.0" / "release.json"
+            metadata = json.loads(metadata_path.read_text())
+            self.assertEqual(
+                metadata["inscription"],
+                {"version": INSCRIPTION_VERSION, "language_version": LANGUAGE_VERSION},
+            )
 
 
 class FormatterTests(unittest.TestCase):

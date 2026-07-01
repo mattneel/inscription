@@ -1,6 +1,6 @@
 # Build Scripts
 
-Inscription v0.50 added an optional package build script named `build.ins`; v0.51 added package check and test steps; v0.52 added build step groups and a default step; v0.53 added dedicated mdBook documentation steps; v0.54 added package-aware defaults for common artifact and documentation steps; v0.55 added the standard package workflow shortcut; v0.56 added package skeleton generators that emit that workflow by default; v0.57 added package format steps and made the standard workflow run a format check first; v0.58 added explicit clean steps for generated `build/` artifacts; v0.59 added release bundle steps; v0.60 adds deterministic release archive steps.
+Inscription v0.50 added an optional package build script named `build.ins`; v0.51 added package check and test steps; v0.52 added build step groups and a default step; v0.53 added dedicated mdBook documentation steps; v0.54 added package-aware defaults for common artifact and documentation steps; v0.55 added the standard package workflow shortcut; v0.56 added package skeleton generators that emit that workflow by default; v0.57 added package format steps and made the standard workflow run a format check first; v0.58 added explicit clean steps for generated `build/` artifacts; v0.59 added release bundle steps, v0.60 added deterministic release archive steps, and v0.61 adds version/doctor health reporting plus release compiler metadata.
 
 `package.ins` stays declarative package metadata, similar to `build.zig.zon`. `build.ins` is interpreted build logic, similar to a deliberately narrow first version of `build.zig`.
 
@@ -21,7 +21,7 @@ The required build phrase is a does phrase:
 To build package package: Build.Package.
 ```
 
-The `Build.Package` value is opaque in v0.60. It is passed by the build driver, but scripts cannot inspect package fields. Package-aware and standard workflow steps use only package metadata already known to the driver.
+The `Build.Package` value is opaque in v0.61. It is passed by the build driver, but scripts cannot inspect package fields. Package-aware and standard workflow steps use only package metadata already known to the driver.
 
 ## Standard workflow
 
@@ -58,13 +58,13 @@ Build.group named "release" with steps "ci" and "library" and "header" and "inte
 Build.default step is "ci".
 ```
 
-The standard workflow intentionally does not include an executable step in v0.60. Add `Build.executable for package.` explicitly when a package needs one.
+The standard workflow intentionally does not include an executable step in v0.61. Add `Build.executable for package.` explicitly when a package needs one.
 
 Duplicate rules are unchanged. Because the standard workflow expands to ordinary steps, adding `Build.tests named "tests".` or another `ci` group after it is rejected as a duplicate.
 
 ## Build API
 
-The v0.60 Build API records standard workflows, named release/clean/format/validation/test steps, package-aware artifact/documentation steps, aggregate groups, a default step, and older named artifact/documentation forms:
+The v0.61 Build API records standard workflows, named release/clean/format/validation/test steps, package-aware artifact/documentation steps, aggregate groups, a default step, and older named artifact/documentation forms:
 
 ```inscription,no-check
 Build.standard package workflow.
@@ -131,7 +131,7 @@ Build.release archive package.
 Build.release package named "dist".
 ```
 
-`Build.release package.` derives the step name `bundle` so it does not collide with the standard workflow's `release` group. The step writes the same default release directory as `inscription package release`: `build/release/<PackageFinalName>-<version>` or `build/release/<PackageFinalName>`. Build-script release steps include the static library, C header, interface JSON, copied `package.ins`, and `release.json`; executable and book inclusion remain CLI-only in v0.60.
+`Build.release package.` derives the step name `bundle` so it does not collide with the standard workflow's `release` group. The step writes the same default release directory as `inscription package release`: `build/release/<PackageFinalName>-<version>` or `build/release/<PackageFinalName>`. Build-script release steps include the static library, C header, interface JSON, copied `package.ins`, and `release.json`; executable and book inclusion remain CLI-only in v0.61.
 
 `Build.release archive package.` derives the step name `archive`. It creates the same release directory, a deterministic `.tar.gz`, `checksums.sha256`, and an archive `.sha256` sidecar. The named form `Build.release archive package named "name".` records the same archive/checksum behavior under an explicit step name.
 
@@ -182,4 +182,4 @@ Book steps require `mdbook`; checked book steps also require `book/tools/check_b
 
 ## Boundaries
 
-v0.60 build scripts are intentionally narrow. They cannot import package source modules, inspect arbitrary package metadata, call externs, spawn processes, read arbitrary files, use the network, generate source, choose custom release layouts, publish/upload bundles, sign artifacts, choose custom output paths from build.ins, delete arbitrary files, deploy docs, choose alternate documentation generators, or define general build graphs. `package.ins` remains parse-only, and dependency resolution is unchanged.
+v0.61 build scripts are intentionally narrow. They cannot import package source modules, inspect arbitrary package metadata, call externs, spawn processes, read arbitrary files, use the network, generate source, choose custom release layouts, publish/upload bundles, sign artifacts, choose custom output paths from build.ins, delete arbitrary files, deploy docs, choose alternate documentation generators, or define general build graphs. `package.ins` remains parse-only, and dependency resolution is unchanged.

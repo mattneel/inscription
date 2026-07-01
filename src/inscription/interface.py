@@ -9,6 +9,7 @@ from typing import Any
 from .ast import ConstantDecl, EnumDecl, EnumType, Function, Program, RecordDecl, TypeAliasDecl, TypeName, UnionDecl, ValueType
 from .compiler import LoadedCompilation, load_compilation, module_path
 from .diagnostics import InscriptionError
+from .version import C_HEADER_FORMAT, INTERFACE_JSON_FORMAT
 from .semantic import (
     ConstValue,
     TYPE_WIDTHS,
@@ -30,8 +31,6 @@ from .semantic import (
     validate_union_payloads,
 )
 
-INTERFACE_JSON_FORMAT = "inscription-interface-v1"
-C_HEADER_FORMAT = "inscription-c-header-v1"
 HEADER_SUPPORTED_TYPES = {"i32", "u32", "i64", "u64", "f32", "f64"}
 C_TYPE_MAP = {
     "i32": "int32_t",
