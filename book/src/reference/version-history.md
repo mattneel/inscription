@@ -28,8 +28,8 @@ Recent milestones:
 - v0.47: local `Depend on Name from path "...".` package dependencies with dependency-aware package check/test/build.
 - v0.48: internal deterministic interpreter groundwork for pure scalar/enum/record/union phrase evaluation.
 - v0.49: `comptime` scalar/enum phrase-call evaluation using the pure interpreter.
-
 - v0.50: `build.ins` MVP with the restricted built-in `Build` API for named artifact steps.
 - v0.51: build script package check/test steps, including dependency-inclusive tests.
 - v0.52: build script group steps, deterministic group dependencies, and an optional default step.
 - v0.53: build script mdBook documentation steps with optional package-local example checking.
+- v0.54: package-aware `build.ins` defaults for artifact and documentation steps.

@@ -8823,6 +8823,173 @@ Give result plus seen.
             self.assertIn("build step book-check ... ok", default_proc.stdout)
             self.assertIn("build step ci ... ok", default_proc.stdout)
 
+    def test_v054_package_aware_build_steps_parser_and_diagnostics(self):
+        source = (
+            "Import Build.\n\n"
+            "To build package package: Build.Package.\n"
+            "Build.static library for package.\n"
+            "Build.executable for package.\n"
+            "Build.c header for package.\n"
+            "Build.interface json for package.\n"
+            "Build.llvm ir for package.\n"
+            "Build.object for package.\n"
+            "Build.mlir for package.\n"
+            "Build.lowered mlir for package.\n"
+            "Build.book for package.\n"
+            "Build.book checked for package.\n"
+        )
+        script = parse_build_script(source)
+        self.assertEqual([(step.name, step.emit, step.package_default) for step in script.steps], [
+            ("library", "static-library", True),
+            ("app", "executable", True),
+            ("header", "c-header", True),
+            ("interface", "interface-json", True),
+            ("llvm-ir", "llvm-ir", True),
+            ("object", "object", True),
+            ("mlir", "mlir", True),
+            ("lowered-mlir", "lowered-mlir", True),
+            ("book", "book", True),
+            ("book-check", "book-check", True),
+        ])
+        formatted = format_source(source)
+        self.assertEqual(format_source(formatted), formatted)
+
+        cases = {
+            "duplicate derived artifact name": (
+                "Import Build.\n\nTo build package package: Build.Package.\n"
+                "Build.static library for package.\nBuild.static library named \"library\".\n",
+                "build step library is already defined",
+            ),
+            "duplicate derived book name": (
+                "Import Build.\n\nTo build package package: Build.Package.\n"
+                "Build.book checked for package.\nBuild.book checked named \"book-check\".\n",
+                "build step book-check is already defined",
+            ),
+            "non-package token": (
+                "Import Build.\n\nTo build package package: Build.Package.\n"
+                "Build.static library for other.\n",
+                "package-aware build steps must use `for package`",
+            ),
+            "renamed package parameter": (
+                "Import Build.\n\nTo build package pkg: Build.Package.\n"
+                "Build.static library for package.\n",
+                "build phrase parameter must be named package in v0.54",
+            ),
+        }
+        for name, (case_source, contains) in cases.items():
+            with self.subTest(name=name):
+                with self.assertRaises(InscriptionError) as ctx:
+                    parse_build_script(case_source)
+                self.assertIn(contains, str(ctx.exception))
+
+    def test_v054_package_aware_build_steps_outputs(self):
+        env = {**os.environ, "PYTHONPATH": str(SRC)}
+        fixture = ROOT / "tests" / "fixtures" / "packages" / "build_script_package_defaults"
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            package = tmp_path / "build_script_package_defaults"
+            shutil.copytree(fixture, package)
+
+            list_proc = subprocess.run(
+                [sys.executable, "-m", "inscription", "build", str(package), "--list"],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(list_proc.returncode, 0, list_proc.stderr)
+            self.assertIn("build step library: static-library\n", list_proc.stdout)
+            self.assertIn("build step app: executable\n", list_proc.stdout)
+            self.assertIn("build step header: c-header\n", list_proc.stdout)
+            self.assertIn("build step interface: interface-json\n", list_proc.stdout)
+            self.assertIn("build step book-check: book checked\n", list_proc.stdout)
+            self.assertIn("build step ci: group -> check, tests, book-check\n", list_proc.stdout)
+            self.assertIn("build step release: group -> ci, library, header, interface\n", list_proc.stdout)
+            self.assertIn("build default: ci\n", list_proc.stdout)
+
+            library_proc = subprocess.run(
+                [sys.executable, "-m", "inscription", "build", str(package), "library"],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(library_proc.returncode, 0, library_proc.stderr)
+            self.assertTrue((package / "build" / "libPackageDefaults.a").exists())
+
+            header_proc = subprocess.run(
+                [sys.executable, "-m", "inscription", "build", str(package), "header"],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(header_proc.returncode, 0, header_proc.stderr)
+            self.assertTrue((package / "build" / "PackageDefaults.h").exists())
+
+            interface_proc = subprocess.run(
+                [sys.executable, "-m", "inscription", "build", str(package), "interface"],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(interface_proc.returncode, 0, interface_proc.stderr)
+            self.assertTrue((package / "build" / "PackageDefaults.json").exists())
+
+            app_proc = subprocess.run(
+                [sys.executable, "-m", "inscription", "build", str(package), "app"],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(app_proc.returncode, 0, app_proc.stderr)
+            app_path = package / "build" / "PackageDefaults"
+            self.assertTrue(app_path.exists())
+            run_proc = subprocess.run([str(app_path)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False)
+            self.assertEqual(run_proc.returncode, 42, run_proc.stderr)
+
+            if shutil.which("mdbook") is None:
+                self.skipTest("mdBook is not installed")
+
+            default_proc = subprocess.run(
+                [sys.executable, "-m", "inscription", "build", str(package)],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(default_proc.returncode, 0, default_proc.stderr)
+            self.assertIn("build step check ... ok", default_proc.stdout)
+            self.assertIn("build step tests ... ok", default_proc.stdout)
+            self.assertIn("build step book-check ... ok", default_proc.stdout)
+            self.assertIn("build step ci ... ok", default_proc.stdout)
+
+            book_proc = subprocess.run(
+                [sys.executable, "-m", "inscription", "build", str(package), "book-check"],
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(book_proc.returncode, 0, book_proc.stderr)
+            self.assertTrue((package / "build" / "book-check" / "index.html").exists())
+
 
 class FormatterTests(unittest.TestCase):
     def cli(self, *args: str, cwd: Path | None = None) -> subprocess.CompletedProcess[str]:

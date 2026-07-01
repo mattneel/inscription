@@ -1,0 +1,13 @@
+Import Build.
+
+To build package package: Build.Package.
+Build.check package named "check".
+Build.tests named "tests".
+Build.static library for package.
+Build.c header for package.
+Build.interface json for package.
+Build.executable for package.
+Build.book checked for package.
+Build.group named "ci" with steps "check" and "tests" and "book-check".
+Build.group named "release" with steps "ci" and "library" and "header" and "interface".
+Build.default step is "ci".

@@ -1,0 +1,177 @@
+(* Inscription v0.54 grammar mirror. v0.54 adds package-aware build defaults. *)
+
+program                 ::= module_doc_block? module_decl? import_decl* top_level_decl* ;
+package_manifest        ::= module_doc_block? package_decl manifest_decl* ;
+build_script            ::= import_build_decl build_decl ;
+import_build_decl       ::= "Import" "Build" "." ;
+build_decl              ::= doc_block? "To" "build" "package" "package" ":" "Build.Package" "." build_sentence* ;
+build_sentence          ::= build_step_request | build_default_request ;
+build_step_request      ::= package_default_build_request
+                          | "Build.check" "package" "named" build_string "."
+                          | "Build.tests" "named" build_string "."
+                          | "Build.tests" "including" "dependencies" "named" build_string "."
+                          | "Build.book" "named" build_string "."
+                          | "Build.book" "checked" "named" build_string "."
+                          | "Build.static" "library" "named" build_string "."
+                          | "Build.executable" "named" build_string "."
+                          | "Build.c" "header" "named" build_string "."
+                          | "Build.interface" "json" "named" build_string "."
+                          | "Build.llvm" "ir" "named" build_string "."
+                          | "Build.object" "named" build_string "."
+                          | "Build.mlir" "named" build_string "."
+                          | "Build.lowered" "mlir" "named" build_string "."
+                          | "Build.group" "named" build_string "with" "steps" build_string ("and" build_string)* "." ;
+
+package_default_build_request ::= "Build.static" "library" "for" "package" "."
+                          | "Build.executable" "for" "package" "."
+                          | "Build.c" "header" "for" "package" "."
+                          | "Build.interface" "json" "for" "package" "."
+                          | "Build.llvm" "ir" "for" "package" "."
+                          | "Build.object" "for" "package" "."
+                          | "Build.mlir" "for" "package" "."
+                          | "Build.lowered" "mlir" "for" "package" "."
+                          | "Build.book" "for" "package" "."
+                          | "Build.book" "checked" "for" "package" "." ;
+build_default_request   ::= "Build.default" "step" "is" build_string "." ;
+build_string            ::= string_literal ;
+package_decl            ::= "Package" qualified_name "." ;
+manifest_decl           ::= version_decl | sources_decl | tests_decl | root_module_decl | expose_module_decl | dependency_decl ;
+version_decl            ::= "Version" manifest_string "." ;
+sources_decl            ::= "Sources" "are" "in" manifest_string "." ;
+tests_decl              ::= "Tests" "are" "in" manifest_string "." ;
+root_module_decl        ::= "Root" "module" "is" qualified_name "." ;
+expose_module_decl      ::= "Expose" "module" qualified_name "." ;
+dependency_decl         ::= "Depend" "on" qualified_name "from" "path" manifest_string "." ;
+manifest_string         ::= string_literal ;
+module_doc_block        ::= module_doc_comment+ ;
+module_decl             ::= doc_block? "Module" qualified_name "." ;
+import_decl             ::= "Import" qualified_name ("as" identifier)? "." ;
+
+top_level_decl          ::= documented_decl | check_decl ;
+documented_decl         ::= doc_block? documentable_decl ;
+documentable_decl       ::= type_alias_decl | constant_decl | record_decl | layout_record_decl
+                          | enum_decl | union_decl | external_decl | phrase_decl | test_decl ;
+type_alias_decl         ::= "Type" type_name "be" type_expr "." ;
+constant_decl           ::= "Constant" identifier ":" type_expr "be" expression "." ;
+check_decl              ::= "Check" expression "." ;
+record_decl             ::= "Record" type_name "has" field_list? "." ;
+layout_record_decl      ::= ("Layout" "record" | "Packed" "layout" "record") type_name "has" field_list? "." ;
+field_list              ::= field (";" field)* ;
+field                   ::= identifier ":" type_expr ;
+enum_decl               ::= "Enum" type_name "backed" "by" type_expr "has" enum_case_list? "." ;
+enum_case_list          ::= enum_case (";" enum_case)* ;
+enum_case               ::= identifier "be" expression ;
+union_decl              ::= "Union" type_name "has" union_variant_list? "." ;
+union_variant_list      ::= union_variant (";" union_variant)* ;
+union_variant           ::= identifier (payload_field ("and" payload_field)*)? ;
+payload_field           ::= identifier ":" type_expr ;
+external_decl           ::= "External" phrase_template ("," "giving" return_type)? "," "as" external_symbol "." ;
+phrase_decl             ::= "To" phrase_template ("," "giving" return_type)? ("," "exported" "as" external_symbol)? "." phrase_sentence* ;
+test_decl               ::= "Test" test_name "." test_sentence* ;
+test_name               ::= identifier (identifier | connector)* ;
+test_sentence           ::= let_sentence | require_sentence | check_sentence | write_sentence | assignment_sentence
+                          | when_sentence otherwise_sentence | while_sentence | for_sentence | foreach_sentence
+                          | match_step_sentence | call_sentence | expect_sentence ;
+expect_sentence         ::= "Expect" expression "." ;
+phrase_template         ::= phrase_word_or_hole+ ;
+phrase_word_or_hole     ::= identifier | connector | phrase_hole ;
+phrase_hole             ::= identifier ":" parameter_type ;
+parameter_type          ::= type_expr | "owned" "buffer" "of" type_expr ;
+connector               ::= "and" | "with" | "of" | "from" | "for" | "at" | "by" | ? non-reserved phrase word ? ;
+
+phrase_sentence         ::= let_sentence | require_sentence | check_sentence | write_sentence | assignment_sentence
+                          | when_sentence otherwise_sentence | while_sentence | for_sentence | foreach_sentence
+                          | match_step_sentence | call_sentence | give_sentence ;
+let_sentence            ::= "Let" identifier (":" type_expr)? "be" expression "."
+                          | "Let" identifier "be" storage_initializer "." ;
+storage_initializer     ::= fixed_buffer_initializer | array_initializer | view_initializer | owned_buffer_initializer | storage_alias_initializer ;
+fixed_buffer_initializer ::= "buffer" "of" length_expr type_expr ("filled" "with" expression | "containing" containing_list)
+                          | "buffer" "of" "bytes" string_literal ;
+array_initializer       ::= "array" "of" length_expr type_expr ("filled" "with" expression | "containing" containing_list)
+                          | "array" "of" "bytes" string_literal ;
+view_initializer        ::= "view" "of" identifier "from" expression "for" expression ;
+owned_buffer_initializer ::= "owned" "buffer" "of" length_expr type_expr "filled" "with" expression
+                          | "owned" "buffer" "of" length_expr type_expr "containing" containing_list
+                          | "owned" "buffer" "of" "bytes" string_literal
+                          | "owned" "buffer" "copied" "from" identifier ;
+storage_alias_initializer ::= type_name ("filled" "with" expression | "containing" containing_list) ;
+containing_list         ::= containing_item ("," containing_item)* ;
+containing_item         ::= expression | "bytes" string_literal ;
+require_sentence        ::= "Require" expression "." ;
+check_sentence          ::= "Check" expression "." ;
+write_sentence          ::= "Write" expression "into" identifier "at" expression "." ;
+assignment_sentence     ::= expression "becomes" expression "." ;
+give_sentence           ::= "Give" expression "." ;
+when_sentence           ::= "When" expression ("," phrase_sentence_body | ":" clause_list ".") ;
+otherwise_sentence      ::= "Otherwise" ("," phrase_sentence_body | ":" clause_list ".") ;
+while_sentence          ::= "While" expression ("," phrase_sentence_body | ":" clause_list ".") ;
+for_sentence            ::= "For" identifier "from" expression "up" "to" expression ("by" expression)? ":" clause_list "." ;
+foreach_sentence        ::= "For" "each" "index" identifier "of" identifier ":" clause_list "." ;
+match_step_sentence     ::= "Match" expression ":" match_step_arm (";" match_step_arm)* "." ;
+match_step_arm          ::= pattern_group match_guard? ":" clause_list | "otherwise" ":" clause_list ;
+clause_list             ::= clause_item (";" clause_item)* ;
+clause_item             ::= phrase_sentence_body | "then" phrase_sentence_body ;
+phrase_sentence_body    ::= ? any non-Give body sentence without final period ? ;
+
+phrase_actual           ::= expression | move_actual ;
+move_actual             ::= "move" identifier | "move" "(" phrase_call ")" ;
+
+expression              ::= scalar_expr | comptime_expr | phrase_call | record_constructor | union_constructor | match_expr | byte_literal | length_expr | layout_read ;
+comptime_expr           ::= "comptime" phrase_call ;
+phrase_call             ::= phrase words with phrase_actual values in template order ;
+match_expr              ::= "match" expression ":" match_expr_arm (";" match_expr_arm)* "." ;
+match_expr_arm          ::= pattern_group match_guard? "gives" expression | "otherwise" "gives" expression ;
+match_guard             ::= "when" expression ;
+pattern_group           ::= pattern_atom ("or" pattern_atom)* ;
+pattern_atom            ::= "anything" | enum_case | union_variant_pattern | range_pattern | integer_literal | boolean_literal | byte_literal | constant_ref ;
+range_pattern           ::= range_endpoint "through" range_endpoint ;
+range_endpoint          ::= integer_literal | byte_literal | constant_ref | qualified_constant_ref | "(" expression ")" ;
+union_variant_pattern   ::= qualified_name "." identifier ("with" union_pattern_field ("and" union_pattern_field)*)? ;
+union_pattern_field     ::= identifier | identifier "as" identifier | identifier "ignored" ;
+
+type_expr               ::= scalar_type | qualified_name | "buffer" "of" length_expr type_expr | "array" "of" length_expr type_expr | "view" "of" type_expr ;
+return_type             ::= type_expr | "owned" "buffer" "of" type_expr ;
+scalar_type             ::= "i1" | "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" | "f32" | "f64" ;
+identifier              ::= ? lower-case identifier ? ;
+type_name               ::= ? upper-case identifier ? ;
+qualified_name          ::= type_name ("." type_name)* ;
+external_symbol         ::= ? C/LLVM symbol accepted by the compiler ? ;
+
+ordinary_comment        ::= "//" ? text to end of line ? ;
+doc_comment             ::= "///" ? text to end of line ? ;
+module_doc_comment      ::= "//!" ? text to end of line ? ;
+doc_block               ::= doc_comment+ ;
+
+(* Test declarations are top-level, documentable declarations. A test body has its own lexical scope, may use ordinary step sentences, must contain at least one Expect, cannot use Give, and is ignored by ordinary run/C headers/interface JSON. Expect is valid only inside tests and lowers to a runtime assertion in test mode. *)
+
+(* Comments are lexical trivia outside string and byte literals. Ordinary comments may appear between declarations or sentences and after complete sentences. Documentation comments attach only to the next documentable top-level declaration and cannot attach to imports or phrase body sentences. Module documentation comments must appear before the first declaration. Block comments are unsupported. *)
+
+(* `then` resumes the parent clause list after nested control. `move` is valid only for owned-buffer consuming actuals. *)
+
+(* Match exhaustiveness: `otherwise` and final unguarded `anything` are catch-alls. Enum matches may omit a catch-all only when all declared cases are covered by unguarded direct case arms or unguarded alternatives of direct cases. Union matches may omit a catch-all only when all declared variants are covered by unguarded direct variant arms; alternatives can cover only payload-free variants in v0.45. i1 matches may omit a catch-all when unguarded true and false are covered, including `true or false`. Guarded arms do not count toward exhaustiveness. Integer scalar matches require `otherwise` or `anything` even when ranges cover the apparent domain. *)
+
+(* Pattern alternatives: `or` combines non-binding alternatives. `anything` cannot be used inside an alternative group. Union alternatives cannot bind payload fields in v0.45. *)
+
+(* Range patterns: `through` is inclusive and is valid only for integer scalar scrutinees. Endpoints must be compile-time evaluable and have the scrutinee type. Signed ranges use signed order; unsigned ranges use unsigned order. *)
+
+(* Match guards: lowercase `when` may appear after a pattern group and before `gives` or `:`. Guard expressions must have type i1. `otherwise` and `anything` cannot be guarded. *)
+
+(* Union payload fields: `field ignored` matches a payload field without introducing a binding. `ignored` is reserved in union payload patterns and is not an expression or whole-pattern wildcard. *)
+
+(* Owned buffer literals: `owned buffer of N T containing ...` expands byte-string splices only for u8, allocates dynamic owned storage, and stores elements in order. `owned buffer of bytes "..."` decodes a non-empty byte string into mutable owned u8 storage. `owned buffer copied from name` explicitly copies a buffer, array, view, or owned buffer into fresh owned dynamic storage without consuming the source. Zero-length owned buffers remain invalid. *)
+
+(* v0.43 comments: `//` is an ordinary line comment, `///` documents the next top-level declaration, and `//!` documents the module/root unit before the first declaration. Comments do not affect semantics or MLIR lowering; documentation comments are emitted in interface JSON and exported phrase docs are emitted in C headers. *)
+
+(* v0.44 tests: `Test name.` starts a top-level test body until the next top-level declaration or EOF. `Expect condition.` is valid only inside tests and requires i1. `inscription test SOURCE` discovers tests in the root and imported modules, runs each selected test through MLIR/LLVM, and reports deterministic pass/fail summaries. *)
+
+(* v0.45 package manifests: package.ins is not a normal source module. It accepts only module/file docs, ordinary comments, Package, Version, Sources, Tests, Root module, Expose module, and Depend on declarations. Package must be the first non-comment declaration. Sources and Root module are required; Version and Tests are optional; Expose module may repeat without duplicates. Source/test paths are relative to the package root and may not be absolute, empty, contain NUL, or contain `..`. Version strings use MAJOR.MINOR.PATCH. Package commands use Sources as the module root for check/test. *)
+
+(* v0.46 package build artifacts: `inscription package build [ROOT]` validates package.ins, uses Sources as the module root, builds the Root module, and includes exposed modules for library-like emits such as static-library, object, LLVM IR, interface JSON, and C headers. The default emit is static-library at build/lib<Package>.a. *)
+
+(* v0.47 package path dependencies: `Depend on Name from path "../package".` declares a local package dependency. Dependency paths are relative and may contain `..`, but may not be absolute or empty. Package commands load dependencies recursively, reject cycles and duplicate names/roots, and allow importing only direct dependency root/exposed modules from outside that dependency. `package test --include-dependencies` also runs dependency tests. *)
+
+(* v0.48 interpreter groundwork: the implementation adds an internal deterministic interpreter for checked pure phrases over scalar, enum, record/layout-record, and union values. Storage, owned buffers, views, extern calls, I/O, file system access, networking, process spawning, and heap allocation remain unsupported by the interpreter. *)
+
+(* v0.49 comptime scalar evaluation: `comptime phrase_call` is an expression prefix. The phrase call is evaluated during compilation by the pure interpreter, supports scalar and enum arguments/results, and lowers as a constant. It is not macros, reflection, generated declarations, arbitrary package-time execution, or a stable general interpreter API; v0.54 build.ins is a separate restricted Build API surface for check/test/build/group/book steps. *)
+
+(* v0.54 package-aware build defaults: `Build.<artifact> for package.` and `Build.book [checked] for package.` derive deterministic step names and outputs from the manifest package final segment. They require the canonical build phrase parameter `package`, share the normal build-step namespace, and do not expose general package metadata or custom output paths. *)

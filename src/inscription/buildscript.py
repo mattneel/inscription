@@ -40,6 +40,18 @@ _BUILD_CALLS: dict[str, str] = {
     "Build.mlir named": "mlir",
     "Build.lowered mlir named": "lowered-mlir",
 }
+_PACKAGE_DEFAULT_CALLS: dict[str, tuple[str, str]] = {
+    "Build.static library for package": ("library", "static-library"),
+    "Build.executable for package": ("app", "executable"),
+    "Build.c header for package": ("header", "c-header"),
+    "Build.interface json for package": ("interface", "interface-json"),
+    "Build.llvm ir for package": ("llvm-ir", "llvm-ir"),
+    "Build.object for package": ("object", "object"),
+    "Build.mlir for package": ("mlir", "mlir"),
+    "Build.lowered mlir for package": ("lowered-mlir", "lowered-mlir"),
+    "Build.book checked for package": ("book-check", "book-check"),
+    "Build.book for package": ("book", "book"),
+}
 _OUTPUT_SUFFIXES: dict[str, tuple[str, str]] = {
     "static-library": ("lib", ".a"),
     "executable": ("", ""),
@@ -66,6 +78,7 @@ class BuildStep:
     emit: str
     line: int
     dependencies: tuple[str, ...] = ()
+    package_default: bool = False
 
 
 @dataclass(frozen=True)
@@ -209,6 +222,8 @@ def _validate_build_phrase(text: str, line: int) -> None:
     if "," in text and "giving" in text:
         raise InscriptionError("build phrase must not return a value", line)
     if text != "To build package package: Build.Package":
+        if text.startswith("To build package ") and text.endswith(": Build.Package"):
+            raise InscriptionError("build phrase parameter must be named package in v0.54", line)
         if text.startswith("To build package"):
             raise InscriptionError("build phrase parameter must have type Build.Package", line)
         raise InscriptionError("build script must define `To build package package: Build.Package.`", line)
@@ -218,6 +233,9 @@ def _parse_build_call(text: str, line: int) -> BuildStep | None:
     group = _parse_group_step(text, line)
     if group is not None:
         return group
+    for phrase, (name, emit) in _PACKAGE_DEFAULT_CALLS.items():
+        if text == phrase:
+            return BuildStep(name, emit, line, package_default=True)
     for prefix, emit in _BUILD_CALLS.items():
         if not text.startswith(prefix + " "):
             continue
@@ -227,6 +245,8 @@ def _parse_build_call(text: str, line: int) -> BuildStep | None:
         name = _parse_build_string(literal, line)
         _validate_step_name(name, line)
         return BuildStep(name, emit, line)
+    if text.startswith("Build.") and " for " in text:
+        raise InscriptionError("package-aware build steps must use `for package`", line)
     if text.startswith("Build.") and " named " in text:
         raise InscriptionError(f"unknown Build API phrase `{_build_phrase_signature(text)}`", line)
     if text.startswith("Build."):
@@ -371,7 +391,13 @@ def output_path_for_step(package_root: Path, step: BuildStep) -> Path:
     if step.emit not in _ARTIFACT_EMITS:
         raise InscriptionError(f"build step {step.name} does not produce an artifact")
     prefix, suffix = _OUTPUT_SUFFIXES[step.emit]
-    return package_root / "build" / f"{prefix}{step.name}{suffix}"
+    basename = _package_final_name(package_root) if step.package_default else step.name
+    return package_root / "build" / f"{prefix}{basename}{suffix}"
+
+
+def _package_final_name(package_root: Path) -> str:
+    context = load_package_context(package_root)
+    return context.manifest.package_name.split(".")[-1]
 
 
 def build_step_display(step: BuildStep) -> str:
